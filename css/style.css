@@ -860,7 +860,7 @@ html, body {
   color: #38bdf8;
 }
 
-/* Media indicator badges (Zero network requests, zero broken images) */
+/* Media indicator badges & playable voice note / image components */
 .media-indicator-badge {
   display: inline-flex;
   align-items: center;
@@ -901,6 +901,74 @@ html, body {
   background: rgba(168, 85, 247, 0.16);
   color: #d8b4fe;
   border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+/* Voice Note Player (Modern Glassmorphism WhatsApp style) */
+.voice-note-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  margin-bottom: 6px;
+  min-width: 240px;
+  max-width: 320px;
+}
+
+.voice-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #34d399;
+}
+
+.voice-note-header i {
+  font-size: 0.85rem;
+}
+
+.voice-note-audio {
+  width: 100%;
+  height: 34px;
+  border-radius: 8px;
+  outline: none;
+}
+
+.voice-note-audio::-webkit-media-controls-panel {
+  background: rgba(30, 41, 59, 0.95);
+  border-radius: 8px;
+}
+
+.voice-note-audio::-webkit-media-controls-current-time-display,
+.voice-note-audio::-webkit-media-controls-time-remaining-display {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+/* Image Preview */
+.chat-media-image-wrap {
+  margin-bottom: 6px;
+  border-radius: 10px;
+  overflow: hidden;
+  max-width: 280px;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.chat-media-img {
+  width: 100%;
+  max-height: 240px;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.2s;
+}
+
+.chat-media-img:hover {
+  transform: scale(1.02);
 }
 
 /* Chat Input Bar (Direct sender from sender.py) */

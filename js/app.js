@@ -793,14 +793,41 @@
       const msgDiv = document.createElement('div');
       msgDiv.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
-      // Render lightweight badge instead of making failing HTTP requests for dead media files
+      // Render media (Voice notes play via Supabase Storage; images render gracefully)
       let mediaHTML = '';
       const mType = (msg.media_type || '').toLowerCase();
+      const mUrl = msg.media_url ? String(msg.media_url).trim() : '';
+      const hasValidMediaUrl = mUrl.startsWith('http://') || mUrl.startsWith('https://');
+
       if (mType && mType !== 'none' && mType !== 'text') {
         if (mType.includes('audio') || mType.includes('voice')) {
-          mediaHTML = `<div class="media-indicator-badge media-audio"><i class="fa-solid fa-microphone-lines"></i> <span>Voice Note</span></div>`;
+          if (hasValidMediaUrl) {
+            mediaHTML = `
+              <div class="voice-note-card">
+                <div class="voice-note-header">
+                  <span><i class="fa-solid fa-microphone-lines"></i> Voice Note</span>
+                  <span style="font-size:0.7rem; color:var(--text-dim);">WhatsApp Audio</span>
+                </div>
+                <audio class="voice-note-audio" controls preload="none">
+                  <source src="${escapeHTML(mUrl)}" type="audio/ogg">
+                  <source src="${escapeHTML(mUrl)}" type="audio/mpeg">
+                  Your browser does not support audio playback.
+                </audio>
+              </div>
+            `;
+          } else {
+            mediaHTML = `<div class="media-indicator-badge media-audio"><i class="fa-solid fa-microphone-lines"></i> <span>Voice Note</span></div>`;
+          }
         } else if (mType.includes('image') || mType.includes('photo')) {
-          mediaHTML = `<div class="media-indicator-badge media-image"><i class="fa-regular fa-image"></i> <span>Photo</span></div>`;
+          if (hasValidMediaUrl) {
+            mediaHTML = `
+              <div class="chat-media-image-wrap">
+                <img class="chat-media-img" src="${escapeHTML(mUrl)}" loading="lazy" alt="Photo" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-indicator-badge media-image\\'><i class=\\'fa-regular fa-image\\'></i> <span>Photo</span></div>';">
+              </div>
+            `;
+          } else {
+            mediaHTML = `<div class="media-indicator-badge media-image"><i class="fa-regular fa-image"></i> <span>Photo</span></div>`;
+          }
         } else if (mType.includes('video')) {
           mediaHTML = `<div class="media-indicator-badge media-video"><i class="fa-solid fa-video"></i> <span>Video</span></div>`;
         } else if (mType.includes('document') || mType.includes('pdf')) {
