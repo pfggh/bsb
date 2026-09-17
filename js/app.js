@@ -793,12 +793,20 @@
       const msgDiv = document.createElement('div');
       msgDiv.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
+      // Render lightweight badge instead of making failing HTTP requests for dead media files
       let mediaHTML = '';
-      if (msg.media_type && msg.media_type !== 'None' && msg.media_url) {
-        if (msg.media_type.toLowerCase().includes('audio') || msg.media_type.toLowerCase().includes('voice')) {
-          mediaHTML = `<div class="msg-media-box"><audio controls class="msg-audio-player" src="${escapeHTML(msg.media_url)}"></audio></div>`;
-        } else if (msg.media_type.toLowerCase().includes('image')) {
-          mediaHTML = `<div class="msg-media-box"><img class="msg-image-thumb" src="${escapeHTML(msg.media_url)}" alt="Media" onclick="window.open('${escapeHTML(msg.media_url)}')"/></div>`;
+      const mType = (msg.media_type || '').toLowerCase();
+      if (mType && mType !== 'none' && mType !== 'text') {
+        if (mType.includes('audio') || mType.includes('voice')) {
+          mediaHTML = `<div class="media-indicator-badge media-audio"><i class="fa-solid fa-microphone-lines"></i> <span>Voice Note</span></div>`;
+        } else if (mType.includes('image') || mType.includes('photo')) {
+          mediaHTML = `<div class="media-indicator-badge media-image"><i class="fa-regular fa-image"></i> <span>Photo</span></div>`;
+        } else if (mType.includes('video')) {
+          mediaHTML = `<div class="media-indicator-badge media-video"><i class="fa-solid fa-video"></i> <span>Video</span></div>`;
+        } else if (mType.includes('document') || mType.includes('pdf')) {
+          mediaHTML = `<div class="media-indicator-badge media-doc"><i class="fa-regular fa-file-lines"></i> <span>Document</span></div>`;
+        } else if (mType.includes('sticker')) {
+          mediaHTML = `<div class="media-indicator-badge media-sticker"><i class="fa-regular fa-face-smile"></i> <span>Sticker</span></div>`;
         }
       }
 

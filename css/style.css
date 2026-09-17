@@ -860,23 +860,47 @@ html, body {
   color: #38bdf8;
 }
 
-/* Media in bubble */
-.msg-media-box {
+/* Media indicator badges (Zero network requests, zero broken images) */
+.media-indicator-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border-radius: 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
   margin-bottom: 6px;
+  user-select: none;
 }
 
-.msg-audio-player {
-  width: 240px;
-  height: 36px;
-  border-radius: 8px;
+.media-indicator-badge.media-audio {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
-.msg-image-thumb {
-  max-width: 280px;
-  max-height: 200px;
-  border-radius: 8px;
-  object-fit: cover;
-  cursor: pointer;
+.media-indicator-badge.media-image {
+  background: rgba(99, 102, 241, 0.16);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+.media-indicator-badge.media-video {
+  background: rgba(244, 63, 94, 0.16);
+  color: #fda4af;
+  border: 1px solid rgba(244, 63, 94, 0.35);
+}
+
+.media-indicator-badge.media-doc {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.media-indicator-badge.media-sticker {
+  background: rgba(168, 85, 247, 0.16);
+  color: #d8b4fe;
+  border: 1px solid rgba(168, 85, 247, 0.35);
 }
 
 /* Chat Input Bar (Direct sender from sender.py) */
