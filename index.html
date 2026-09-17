@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BSB 24h Messenger - Teshrij</title>
+  <link rel="icon" type="image/png" href="img/logo.png" />
+
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+
+  <!-- FontAwesome 6 Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+  <!-- Application Stylesheet -->
+  <link rel="stylesheet" href="css/style.css" />
+
+  <!-- Supabase JS Client v2 (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- ======================================================================
+       1. LOGIN VIEW (Same security & brand as Admin Panel)
+       ====================================================================== -->
+  <div id="login-view" class="login-page">
+    <div class="login-container">
+      <img src="img/logo.png" alt="Teshrij Logo" class="login-logo" />
+      <h1 class="login-title">BSB Messenger</h1>
+      <p class="login-subtitle">Sign in to access 24h customer chats</p>
+      
+      <form id="login-form" class="login-form">
+        <div class="input-group">
+          <i class="fa-solid fa-envelope"></i>
+          <input type="email" id="login-email" class="input-field" placeholder="Email address" required autocomplete="email" />
+        </div>
+        <div class="input-group">
+          <i class="fa-solid fa-lock"></i>
+          <input type="password" id="login-password" class="input-field" placeholder="Password" required autocomplete="current-password" />
+        </div>
+        <button type="submit" id="login-submit-btn" class="btn-primary">
+          <i class="fa-solid fa-arrow-right-to-bracket"></i> Sign In
+        </button>
+      </form>
+      <div id="login-error" class="login-error"></div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       2. MAIN APPLICATION VIEW (Lightning Fast 24h Messenger Dashboard)
+       ====================================================================== -->
+  <div id="app-view" class="app-layout" style="display: none;">
+    
+    <!-- Top Navbar -->
+    <header class="top-navbar">
+      <div class="brand-section">
+        <img src="img/logo.png" alt="Teshrij" class="brand-logo-small" />
+        <span class="brand-title">
+          Teshrij BSB
+          <span class="badge-24h">Past 24h</span>
+        </span>
+      </div>
+
+      <div class="nav-actions">
+        <button id="sync-btn" class="btn-nav btn-sync" title="Sync live messages">
+          <i class="fa-solid fa-rotate"></i>
+          <span>Sync</span>
+        </button>
+        <a href="https://teshrij.xyz/pnl/" target="_blank" class="btn-nav" title="Open Main Admin Panel">
+          <i class="fa-solid fa-gauge-high"></i>
+          <span>Admin Panel</span>
+        </a>
+        <div class="btn-nav" style="cursor: default; opacity: 0.85;">
+          <i class="fa-regular fa-user"></i>
+          <span id="user-email-display">admin@teshrij.com</span>
+        </div>
+        <button id="logout-btn" class="btn-nav" title="Sign Out">
+          <i class="fa-solid fa-arrow-right-from-bracket"></i>
+          <span>Logout</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Split Layout -->
+    <div class="main-split">
+      
+      <!-- Left Sidebar: Conversations List -->
+      <aside class="conv-sidebar">
+        <div class="sidebar-header">
+          <div class="sidebar-title-row">
+            <span class="sidebar-title">
+              <i class="fa-brands fa-whatsapp" style="color: #25d366;"></i>
+              24h Active Numbers
+              <span id="conv-count-badge" class="counter-badge">0</span>
+            </span>
+            <span id="total-24h-count" style="font-size: 0.75rem; color: var(--text-dim); font-weight: 600;">0 active</span>
+          </div>
+
+          <!-- Instant Search -->
+          <div class="search-wrapper">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input type="text" id="search-input" class="search-input" placeholder="Search phone, name, message..." />
+          </div>
+
+          <!-- Filter Pills -->
+          <div class="filter-pills">
+            <button class="pill-btn active" data-filter="all">All</button>
+            <button class="pill-btn" data-filter="incoming">Incoming</button>
+            <button class="pill-btn" data-filter="tracking">Meta Ads</button>
+          </div>
+        </div>
+
+        <!-- Scrollable Fast Conversations List -->
+        <div id="conv-list" class="conv-list">
+          <!-- Populated by JavaScript -->
+        </div>
+      </aside>
+
+      <!-- Right Panel: Conversation View -->
+      <main class="chat-panel">
+        
+        <!-- Empty State (No conversation selected) -->
+        <div id="chat-empty-state" class="chat-empty-state">
+          <div class="chat-empty-icon">
+            <i class="fa-solid fa-comments"></i>
+          </div>
+          <h3 style="font-weight: 700; color: var(--text-main); font-size: 1.15rem;">Select a BSB Conversation</h3>
+          <p style="max-width: 320px; font-size: 0.85rem;">Showing all WhatsApp customer contacts that have messaged in the past 24 hours.</p>
+        </div>
+
+        <!-- Active Conversation View -->
+        <div id="chat-active-view" style="display: none; flex-direction: column; height: 100%; width: 100%;">
+          
+          <!-- Chat Header -->
+          <div class="chat-header">
+            <div class="chat-header-user">
+              <div class="conv-avatar" style="width: 38px; height: 38px; font-size: 0.9rem;">
+                <i class="fa-solid fa-user"></i>
+              </div>
+              <div class="chat-header-info">
+                <h2 id="chat-phone">Phone Number</h2>
+                <div class="chat-header-sub">
+                  <span id="chat-profile-name">BSB Contact</span>
+                  <div id="chat-ad-banner" class="meta-ad-banner" style="display: none;"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="chat-header-actions">
+              <a id="chat-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
+                <i class="fa-brands fa-whatsapp"></i> WhatsApp Web
+              </a>
+            </div>
+          </div>
+
+          <!-- Chat Messages Container -->
+          <div id="chat-messages-container" class="chat-messages-container">
+            <!-- Messages rendered dynamically -->
+          </div>
+
+          <!-- Chat Input Bar (Direct Sender from sender.py) -->
+          <div class="chat-input-bar">
+            <!-- Quick Canned Response Pills -->
+            <div class="quick-templates-row">
+              <button class="template-pill" data-text="Hello! How can we help you today?">Hello!</button>
+              <button class="template-pill" data-text="Whish payment, instant activation.">Whish Info</button>
+              <button class="template-pill" data-text="1 month: 4$ | 3 months: 10$ | 6 months: 15$ | 1 year: 21$">Netflix Price</button>
+              <button class="template-pill" data-text="ChatGPT+ Shared Account: 3 months: $15 | 6 months: $25 | 1 year: $45">ChatGPT Price</button>
+              <button class="template-pill" data-text="Anghami Plus: 1 month: 3$ | 3 months: 7.5$ | 1 year: 15$">Anghami Price</button>
+            </div>
+
+            <div class="input-row">
+              <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="Type a message via BestSMSBulk... (Enter to send, Shift+Enter for newline)"></textarea>
+              <button id="btn-send" class="btn-send" title="Send WhatsApp Message">
+                <i class="fa-solid fa-paper-plane"></i>
+              </button>
+            </div>
+
+            <div id="send-status-line" class="send-status-line"></div>
+          </div>
+
+        </div>
+
+      </main>
+
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
