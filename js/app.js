@@ -484,17 +484,29 @@
         if (error || !data) return;
 
         const st = data.status;
+        const total = data.total_contacts || 0;
         const evaluated = data.total_evaluated || 0;
         const created = data.drafts_created || 0;
         const skipped = data.skipped || 0;
+        const human = data.human_review || 0;
+        const currContact = data.current_contact ? ` • Contact: ${formatPhoneDisplay(data.current_contact)}` : '';
 
-        if (st === 'RUNNING') {
-          updateScanProgress(60, `Server-Side Scan Active: Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped)...`);
+        if (st === 'RUNNING' || (st === 'PENDING' && evaluated > 0)) {
+          const pct = total > 0 ? Math.min(95, Math.max(15, Math.round((evaluated / total) * 100))) : 25;
+          updateScanProgress(pct, `Server Scan Running: ${evaluated}/${total || '?'} evaluated (${created} drafts created, ${skipped} skipped)${currContact}`);
+          if (el.scanStatusPill) {
+            el.scanStatusPill.style.display = 'inline-flex';
+            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Job #${jobId} Running (${evaluated}/${total || '?'})`;
+          }
           loadDashboardStats();
           loadRecentScanDrafts();
         } else if (st === 'COMPLETED') {
           clearInterval(pollInterval);
-          updateScanProgress(100, `Server Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped).`);
+          updateScanProgress(100, `Server Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped, ${human} human review).`);
+          if (el.scanStatusPill) {
+            el.scanStatusPill.style.display = 'inline-flex';
+            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-circle-check"></i> Job #${jobId} Complete (${created} Drafts)`;
+          }
           loadDashboardStats();
           loadRecentScanDrafts();
           resetScanUI();
@@ -506,7 +518,7 @@
       } catch (err) {
         // Continue polling
       }
-    }, 2000);
+    }, 1200);
   }
 
   function resetScanUI() {
@@ -539,7 +551,12 @@
   function updateScanProgress(pct, text) {
     if (el.scanProgressFill) el.scanProgressFill.style.width = `${pct}%`;
     if (el.scanProgressPercent) el.scanProgressPercent.textContent = `${pct}%`;
-    if (el.scanProgressText) el.scanProgressText.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${escapeHTML(text)}`;
+    if (el.scanProgressText) {
+      const icon = pct >= 100
+        ? '<i class="fa-solid fa-circle-check" style="color: #34d399;"></i>'
+        : '<i class="fa-solid fa-spinner fa-spin" style="color: #38bdf8;"></i>';
+      el.scanProgressText.innerHTML = `${icon} ${escapeHTML(text)}`;
+    }
   }
 
   function appendScanResultRow(contact, decision, category, ruleIds, message, status) {

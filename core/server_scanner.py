@@ -24,10 +24,32 @@ POLICY_PATH = os.path.join(BASE_DIR, "feedback_learning_v2", "runtime_policy.txt
 PROMPT_PATH = os.path.join(BASE_DIR, "prompts", "system_prompt.txt")
 
 
+def connect_db():
+    addrs = ["18.198.145.223", "52.59.152.35", "18.198.30.239", ""]
+    last_err = None
+    for addr in addrs:
+        try:
+            params = {
+                "dbname": "postgres",
+                "user": "postgres.kfgswynickhywzhneltu",
+                "password": "raise unable duck fanatical arrest yard maid stunner truffle",
+                "host": "aws-0-eu-central-1.pooler.supabase.com",
+                "port": 5432,
+                "connect_timeout": 8
+            }
+            if addr:
+                params["hostaddr"] = addr
+            conn = psycopg2.connect(**params)
+            conn.autocommit = True
+            return conn
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or psycopg2.OperationalError("Unable to connect to Supabase pooler.")
+
+
 def get_db():
-    conn = psycopg2.connect(DB_URL)
-    conn.autocommit = True
-    return conn
+    return connect_db()
 
 
 def is_fixed_temperature_model(model_name: str) -> bool:
@@ -178,8 +200,7 @@ def sanitize_message(msg: Optional[str]) -> Optional[str]:
 # ============================================================================
 
 def process_single_contact(contact: str, profile_name: str, conn_str: str, client: OpenAI, instructions: str, chat_model: str = "gpt-4o") -> Dict[str, Any]:
-    conn = psycopg2.connect(conn_str)
-    conn.autocommit = True
+    conn = connect_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
@@ -364,12 +385,19 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
         if job_id:
             cur.execute("""
                 UPDATE scan_jobs 
-                SET status = 'COMPLETED', completed_at = NOW(), total_evaluated = 0, drafts_created = 0, skipped = 0
+                SET status = 'COMPLETED', completed_at = NOW(), total_contacts = 0, total_evaluated = 0, drafts_created = 0, skipped = 0, human_review = 0
                 WHERE id = %s
             """, (job_id,))
         cur.close()
         conn.close()
         return {"total_evaluated": 0, "drafts_created": 0, "skipped": 0, "human_review": 0}
+
+    if job_id:
+        cur.execute("""
+            UPDATE scan_jobs 
+            SET status = 'RUNNING', started_at = NOW(), total_contacts = %s, total_evaluated = 0, drafts_created = 0, skipped = 0, human_review = 0
+            WHERE id = %s
+        """, (total_eligible, job_id))
 
     client, chat_model = get_openai_client_and_model()
     instructions = load_instructions()
@@ -409,19 +437,22 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
 
             print(f"[{completed_count}/{total_eligible}] Evaluated {res.get('contact')} -> {dec} ({res.get('status')})")
 
-            # Intermediate progress update on scan_jobs
-            if job_id and completed_count % 5 == 0:
-                cur.execute("""
-                    UPDATE scan_jobs 
-                    SET total_evaluated = %s, drafts_created = %s, skipped = %s, human_review = %s
-                    WHERE id = %s
-                """, (stats["total_evaluated"], stats["drafts_created"], stats["skipped"], stats["human_review"], job_id))
+            # Intermediate progress update on scan_jobs for live UI updates
+            if job_id:
+                try:
+                    cur.execute("""
+                        UPDATE scan_jobs 
+                        SET status = 'RUNNING', total_evaluated = %s, drafts_created = %s, skipped = %s, human_review = %s, current_contact = %s
+                        WHERE id = %s
+                    """, (stats["total_evaluated"], stats["drafts_created"], stats["skipped"], stats["human_review"], str(res.get("contact") or ""), job_id))
+                except Exception as e:
+                    print(f"[JOB UPDATE WARNING] {e}")
 
     if job_id:
         cur.execute("""
             UPDATE scan_jobs 
             SET status = 'COMPLETED', completed_at = NOW(), 
-                total_evaluated = %s, drafts_created = %s, skipped = %s, human_review = %s
+                total_evaluated = %s, drafts_created = %s, skipped = %s, human_review = %s, current_contact = ''
             WHERE id = %s
         """, (stats["total_evaluated"], stats["drafts_created"], stats["skipped"], stats["human_review"], job_id))
 
@@ -516,47 +547,60 @@ def process_server_queue(max_items: int = 15):
     conn.close()
 
 
+def on_demand_listener_loop():
+    print("[DAEMON] Dedicated on-demand UI scan listener started (polling every 1.0s)...")
+    while True:
+        try:
+            conn = get_db()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT id FROM scan_jobs WHERE status = 'PENDING' ORDER BY requested_at ASC LIMIT 1")
+            pending_job = cur.fetchone()
+            job_id = None
+            if pending_job:
+                job_id = pending_job["id"]
+                cur.execute("UPDATE scan_jobs SET status = 'RUNNING', started_at = NOW() WHERE id = %s", (job_id,))
+            cur.close()
+            conn.close()
+
+            if job_id:
+                print(f"\n[DAEMON] Detected on-demand scan request (Job #{job_id}). Executing server-side scan...")
+                execute_server_scan(limit=None, job_id=job_id)
+        except Exception as e:
+            print(f"[ON-DEMAND LISTENER ERROR] {e}")
+        time.sleep(1.0)
+
+
 def run_server_daemon(interval_minutes: int = 15):
     """
     Continuous server-side daemon.
-    1. Listens for pending scan_jobs submitted by the Web UI.
+    1. Dedicated thread listens for on-demand scan_jobs submitted by the Web UI.
     2. Runs scheduled scan every interval_minutes.
     3. Dispatches send_queue with 1.5s delay.
     """
-    print(f"================================================================")
-    print(f" Teshrij Server-Side Follow-up Automation Daemon Started")
+    print("================================================================")
+    print(" Teshrij Server-Side Follow-up Automation Daemon Started")
     print(f" Periodic Scan: Every {interval_minutes} minutes")
-    print(f" On-Demand UI Listener: Active (polling scan_jobs)")
-    print(f" Queue Dispatcher: Active (1.5s delay, 9 AM - 9 PM Beirut)")
-    print(f"================================================================")
+    print(" On-Demand UI Listener: Active (instant dedicated thread)")
+    print(" Queue Dispatcher: Active (1.5s delay, 9 AM - 9 PM Beirut)")
+    print("================================================================")
 
-    last_scheduled_scan = datetime.now(timezone.utc) - timedelta(minutes=interval_minutes + 1)
+    import threading
+    listener_thread = threading.Thread(target=on_demand_listener_loop, daemon=True)
+    listener_thread.start()
+
+    last_scheduled_scan = datetime.now(timezone.utc)
     last_queue_check = 0
 
     while True:
         try:
-            # 1. Check for on-demand job requested from Web UI
-            conn = get_db()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id FROM scan_jobs WHERE status = 'PENDING' ORDER BY requested_at ASC LIMIT 1 FOR UPDATE")
-            pending_job = cur.fetchone()
-            cur.close()
-            conn.close()
-
-            if pending_job:
-                job_id = pending_job["id"]
-                print(f"[DAEMON] Detected on-demand scan request (Job #{job_id}). Executing server-side scan...")
-                execute_server_scan(limit=None, job_id=job_id)
-                last_scheduled_scan = datetime.now(timezone.utc)
-
-            # 2. Check if periodic scheduled scan is due
+            # 1. Check if periodic scheduled scan is due
             now = datetime.now(timezone.utc)
             if (now - last_scheduled_scan).total_seconds() >= interval_minutes * 60:
                 print(f"[DAEMON] {interval_minutes}-minute scheduled automation interval reached. Starting automated server scan...")
                 execute_server_scan(limit=None)
                 last_scheduled_scan = now
 
-            # 3. Process send queue every 15 seconds
+            # 2. Process send queue every 15 seconds
             if time.time() - last_queue_check >= 15:
                 process_server_queue()
                 last_queue_check = time.time()
@@ -564,8 +608,7 @@ def run_server_daemon(interval_minutes: int = 15):
         except Exception as e:
             print(f"[DAEMON ERROR] {e}")
 
-        # Sleep 2 seconds before checking next job
-        time.sleep(2.0)
+        time.sleep(3.0)
 
 
 if __name__ == "__main__":
