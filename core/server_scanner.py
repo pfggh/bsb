@@ -222,13 +222,16 @@ def process_single_contact(contact: str, profile_name: str, conn_str: str, clien
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
-        # Fetch last 12 messages
+        # Fetch last 14 messages (most recent), then sort ascending for transcript order
         cur.execute("""
             SELECT direction, message, timestamp, status
-            FROM bsb_messages
-            WHERE contact = %s
-            ORDER BY timestamp ASC
-            LIMIT 14
+            FROM (
+                SELECT direction, message, timestamp, status
+                FROM bsb_messages
+                WHERE contact = %s
+                ORDER BY timestamp DESC
+                LIMIT 14
+            ) t ORDER BY timestamp ASC
         """, (contact,))
         msgs = cur.fetchall()
 
