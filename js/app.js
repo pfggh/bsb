@@ -1426,10 +1426,8 @@
       window.OPENAI_CONFIG.api_key = el.cfgOpenaiKey.value.trim();
       localStorage.setItem('fady_openai_key', window.OPENAI_CONFIG.api_key);
     }
-    if (el.cfgChatModel) {
-      window.OPENAI_CONFIG.chat_model = el.cfgChatModel.value.trim();
-      localStorage.setItem('fady_chat_model', window.OPENAI_CONFIG.chat_model);
-    }
+    window.OPENAI_CONFIG.chat_model = 'gpt-4o';
+    localStorage.setItem('fady_chat_model', 'gpt-4o');
     if (el.cfgSendDelay) window.SYSTEM_CONFIG.send_delay_seconds = parseFloat(el.cfgSendDelay.value) || 1.5;
     if (el.cfgBsbKey) window.BSB_CONFIG.api_key = el.cfgBsbKey.value.trim();
     if (el.cfgBsbSecret) window.BSB_CONFIG.api_secret = el.cfgBsbSecret.value.trim();
