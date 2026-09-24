@@ -119,11 +119,16 @@
     el.reviewDraftReason = document.getElementById('review-draft-reason');
     el.reviewDraftTextarea = document.getElementById('review-draft-textarea');
     el.draftCharCount = document.getElementById('draft-char-count');
+    el.reviewRecipientPhone = document.getElementById('review-recipient-phone');
+    el.reviewRecipientName = document.getElementById('review-recipient-name');
     el.btnDraftValidate = document.getElementById('btn-draft-validate');
+    el.btnDraftEdit = document.getElementById('btn-draft-edit');
     el.btnDraftDefer = document.getElementById('btn-draft-defer');
     el.btnDraftCancel = document.getElementById('btn-draft-cancel');
     el.btnReviewPrev = document.getElementById('btn-review-prev');
     el.btnReviewNext = document.getElementById('btn-review-next');
+    el.btnReviewPrevTop = document.getElementById('btn-review-prev-top');
+    el.btnReviewNextTop = document.getElementById('btn-review-next-top');
     el.reviewProgressIndicator = document.getElementById('review-progress-indicator');
 
     // Misclick-Proof Modal
@@ -594,6 +599,8 @@
     const draft = state.reviewDrafts[state.currentReviewIndex];
     state.currentReviewDraft = draft;
 
+    if (el.reviewRecipientPhone) el.reviewRecipientPhone.textContent = formatPhoneDisplay(draft.contact);
+    if (el.reviewRecipientName) el.reviewRecipientName.innerHTML = `<i class="fa-solid fa-user"></i> ${escapeHTML(draft.profile_name || 'Customer')}`;
     if (el.reviewChatPhone) el.reviewChatPhone.textContent = formatPhoneDisplay(draft.contact);
     if (el.reviewChatProfile) el.reviewChatProfile.textContent = draft.profile_name || 'Customer';
     if (el.reviewWaLink) el.reviewWaLink.href = `https://web.whatsapp.com/send?phone=${normalizePhone(draft.contact)}`;
@@ -605,8 +612,8 @@
       el.reviewDraftDecision.className = `decision-badge ${dec === 'SEND' ? 'dec-send' : (dec === 'HUMAN_REVIEW' ? 'dec-human' : 'dec-skip')}`;
     }
     if (el.reviewDraftCategory) el.reviewDraftCategory.textContent = draft.category || 'sales';
-    if (el.reviewDraftTime) el.reviewDraftTime.textContent = formatRelativeTime(draft.created_at);
-    if (el.reviewDraftReason) el.reviewDraftReason.textContent = draft.reasoning || draft.internal_reason || 'Eligible follow-up candidate.';
+    if (el.reviewDraftTime) el.reviewDraftTime.innerHTML = `<i class="fa-regular fa-clock"></i> ${formatRelativeTime(draft.created_at)}`;
+    if (el.reviewDraftReason) el.reviewDraftReason.textContent = draft.reasoning || draft.internal_reason || 'Customer is eligible for follow-up outreach.';
 
     // Rules
     if (el.reviewDraftRules) {
@@ -645,20 +652,21 @@
 
   async function loadReviewChatHistory(contact) {
     if (!el.reviewMessagesContainer) return;
-    el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading 72h chat history...</div>';
+    el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 50px;"><i class="fa-solid fa-spinner fa-spin" style="font-size: 1.5rem; margin-bottom: 10px; display: block; color: var(--accent-cyan);"></i>Loading 72h chat history...</div>';
 
+    const cleanContact = normalizePhone(contact);
     try {
       const { data, error } = await window.supabaseClient
         .from('bsb_messages')
         .select('*')
-        .eq('contact', contact)
+        .or(`contact.eq.${contact},contact.eq.${cleanContact}`)
         .order('timestamp', { ascending: true })
-        .limit(40);
+        .limit(50);
 
       if (!error && data && data.length > 0) {
         renderReviewMessages(data);
       } else {
-        el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;">No messages found for this contact.</div>';
+        el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 50px;"><i class="fa-regular fa-comment-dots" style="font-size: 2rem; margin-bottom: 10px; display: block; opacity: 0.5;"></i>No previous messages found for this contact.</div>';
       }
     } catch (e) {
       el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: #fb7185; padding: 40px;">Failed to load messages.</div>';
@@ -667,10 +675,23 @@
 
   function renderReviewMessages(messages) {
     el.reviewMessagesContainer.innerHTML = '';
+    let lastDateStr = null;
+
     messages.forEach(msg => {
       const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
-      const bubble = document.createElement('div');
-      bubble.className = `chat-message-row ${isIncoming ? 'msg-incoming' : 'msg-outgoing'}`;
+      const msgDate = new Date(msg.timestamp);
+      const dateStr = !isNaN(msgDate) ? msgDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+
+      if (dateStr && dateStr !== lastDateStr) {
+        lastDateStr = dateStr;
+        const dateDiv = document.createElement('div');
+        dateDiv.className = 'chat-date-divider';
+        dateDiv.innerHTML = `<span class="chat-date-pill">${dateStr}</span>`;
+        el.reviewMessagesContainer.appendChild(dateDiv);
+      }
+
+      const row = document.createElement('div');
+      row.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
       let mediaContent = '';
       if (msg.media_type && msg.media_type !== 'None') {
@@ -682,17 +703,21 @@
         }
       }
 
-      bubble.innerHTML = `
-        <div class="chat-bubble">
+      row.innerHTML = `
+        <div class="msg-sender-tag ${isIncoming ? 'tag-customer' : 'tag-business'}">
+          <i class="fa-solid ${isIncoming ? 'fa-user' : 'fa-headset'}"></i>
+          <span>${isIncoming ? 'Customer' : 'You (Teshrij)'}</span>
+        </div>
+        <div class="msg-bubble" dir="auto">
           ${mediaContent}
-          <div class="msg-text">${escapeHTML(msg.message || '')}</div>
-          <div class="msg-time-row">
-            <span>${formatMessageTime(msg.timestamp)}</span>
-            ${!isIncoming ? '<i class="fa-solid fa-check-double" style="font-size: 0.65rem; color: #a5b4fc;"></i>' : ''}
-          </div>
+          <div class="msg-text-body">${escapeHTML(msg.message || '')}</div>
+        </div>
+        <div class="msg-meta">
+          <span>${formatMessageTime(msg.timestamp)}</span>
+          ${!isIncoming ? '<i class="fa-solid fa-check-double msg-status-icon msg-status-read"></i>' : ''}
         </div>
       `;
-      el.reviewMessagesContainer.appendChild(bubble);
+      el.reviewMessagesContainer.appendChild(row);
     });
 
     el.reviewMessagesContainer.scrollTop = el.reviewMessagesContainer.scrollHeight;
@@ -1386,9 +1411,12 @@
   // =========================================================================
   function initKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
-      // Ignore if user is currently typing in an input or textarea
       const tag = (e.target.tagName || '').toLowerCase();
-      if (tag === 'input' || (tag === 'textarea' && e.key !== 'Escape')) {
+      if ((tag === 'input' || tag === 'textarea') && e.key === 'Escape') {
+        e.target.blur();
+        return;
+      }
+      if (tag === 'input' || tag === 'textarea') {
         return;
       }
 
@@ -1452,6 +1480,12 @@
 
     // Step 2: Review Events
     if (el.btnDraftValidate) el.btnDraftValidate.addEventListener('click', validateCurrentDraft);
+    if (el.btnDraftEdit) el.btnDraftEdit.addEventListener('click', () => {
+      if (el.reviewDraftTextarea) {
+        el.reviewDraftTextarea.focus();
+        el.reviewDraftTextarea.select();
+      }
+    });
     if (el.btnDraftCancel) el.btnDraftCancel.addEventListener('click', cancelCurrentDraft);
     if (el.btnDraftDefer) el.btnDraftDefer.addEventListener('click', deferCurrentDraft);
     if (el.btnReviewNext) el.btnReviewNext.addEventListener('click', () => {
@@ -1461,6 +1495,18 @@
       }
     });
     if (el.btnReviewPrev) el.btnReviewPrev.addEventListener('click', () => {
+      if (state.currentReviewIndex > 0) {
+        state.currentReviewIndex--;
+        renderCurrentReviewDraft();
+      }
+    });
+    if (el.btnReviewNextTop) el.btnReviewNextTop.addEventListener('click', () => {
+      if (state.currentReviewIndex < state.reviewDrafts.length - 1) {
+        state.currentReviewIndex++;
+        renderCurrentReviewDraft();
+      }
+    });
+    if (el.btnReviewPrevTop) el.btnReviewPrevTop.addEventListener('click', () => {
       if (state.currentReviewIndex > 0) {
         state.currentReviewIndex--;
         renderCurrentReviewDraft();

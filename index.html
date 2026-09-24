@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20260924_suite_v1" />
+  <link rel="stylesheet" href="css/style.css?v=20260924_review_fady" />
 
   <!-- Supabase JS Client v2 (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -245,13 +245,22 @@
           </div>
 
           <!-- Right: Follow-up Draft Evaluation & Review Action Desk -->
+          <!-- Right: Follow-up Draft Evaluation & Review Action Desk (Fady_bot Parity) -->
           <div class="review-draft-pane">
             
-            <!-- Review Top Stepper & Send All Bar -->
-            <div class="draft-meta-header">
-              <div>
-                <span style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Review Queue</span>
-                <div id="review-stepper-counter" style="font-size: 1.1rem; font-weight: 800; color: var(--text-main);">0 of 0</div>
+            <!-- Top Controls: Queue Navigation & Misclick-Proof Send All -->
+            <div class="draft-top-controls">
+              <div class="draft-stepper-group">
+                <button id="btn-review-prev-top" class="btn-stepper-nav" title="Previous Draft (Key: P or Left Arrow)">
+                  <i class="fa-solid fa-chevron-left"></i>
+                </button>
+                <div class="stepper-label-box">
+                  <span class="stepper-title">REVIEW QUEUE</span>
+                  <div id="review-stepper-counter" class="stepper-count">0 of 0</div>
+                </div>
+                <button id="btn-review-next-top" class="btn-stepper-nav" title="Next Draft (Key: N or Right Arrow)">
+                  <i class="fa-solid fa-chevron-right"></i>
+                </button>
               </div>
 
               <!-- MISCLICK-PROOF "SEND ALL UNREVIEWED" BUTTON -->
@@ -261,83 +270,102 @@
               </button>
             </div>
 
-            <!-- Draft Card -->
+            <!-- Draft Main Card -->
             <div id="review-draft-card" class="draft-card">
-              <div class="draft-meta-header">
-                <div style="display: flex; align-items: center; gap: 8px;">
-                  <span id="review-draft-decision" class="decision-badge dec-send">SEND</span>
-                  <span id="review-draft-category" style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase;">sales</span>
+              
+              <!-- Recipient & Decision Header -->
+              <div class="draft-header-card">
+                <div class="draft-contact-block">
+                  <div class="draft-contact-main">
+                    <span id="review-recipient-phone" class="draft-phone-display">+961 Contact</span>
+                    <span id="review-draft-decision" class="decision-badge dec-send">SEND</span>
+                  </div>
+                  <div class="draft-contact-sub">
+                    <span id="review-recipient-name"><i class="fa-solid fa-user"></i> Customer</span>
+                    <span class="dot-separator">•</span>
+                    <span id="review-draft-category" class="category-pill">sales</span>
+                    <span class="dot-separator">•</span>
+                    <span id="review-draft-time" class="time-pill"><i class="fa-regular fa-clock"></i> Just now</span>
+                  </div>
                 </div>
-                <span id="review-draft-time" style="font-size: 0.72rem; color: var(--text-dim);">Drafted today</span>
               </div>
 
-              <!-- Matched Rules Tags -->
-              <div>
-                <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; font-weight: 700;">Matched Rules:</span>
-                <div id="review-draft-rules" class="draft-rules-list" style="margin-top: 4px;">
+              <!-- AI Rationale & Context (High Readability) -->
+              <div class="draft-reasoning-box">
+                <div class="reasoning-header">
+                  <i class="fa-solid fa-brain" style="color: #6366f1;"></i>
+                  <span>AI Reasoning & Context</span>
+                </div>
+                <p id="review-draft-reason" class="reasoning-text" dir="auto">
+                  Customer received pricing and has not confirmed order.
+                </p>
+              </div>
+
+              <!-- Matched Canonical Rules -->
+              <div class="draft-rules-box">
+                <span class="rules-header-label">Matched Canonical Rules (v2.0):</span>
+                <div id="review-draft-rules" class="draft-rules-list">
                   <span class="rule-chip">SALES_01: Prices Sent</span>
                 </div>
               </div>
 
-              <!-- AI Rationale -->
-              <div style="background: rgba(0, 0, 0, 0.25); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                <span style="font-size: 0.72rem; color: var(--accent-cyan); font-weight: 700; text-transform: uppercase; display: flex; align-items: center; gap: 5px;">
-                  <i class="fa-solid fa-brain"></i> AI Reasoning:
-                </span>
-                <p id="review-draft-reason" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; line-height: 1.4;">
-                  Customer received prices 4 hours ago and has not confirmed order.
-                </p>
-              </div>
-
-              <!-- Editable Follow-up Message -->
-              <div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                  <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; font-weight: 700;">Proposed WhatsApp Message:</span>
-                  <span id="draft-char-count" style="font-size: 0.7rem; color: var(--text-dim);">0 chars</span>
+              <!-- Proposed Follow-Up Message (THE MAIN FOCUS - ULTRA READABLE) -->
+              <div class="proposed-msg-section">
+                <div class="proposed-msg-header">
+                  <span class="proposed-label">
+                    <i class="fa-brands fa-whatsapp" style="color: #25d366; font-size: 1.15rem;"></i>
+                    Proposed WhatsApp Message
+                  </span>
+                  <span id="draft-char-count" class="char-count-badge">0 chars</span>
                 </div>
-                <textarea id="review-draft-textarea" class="draft-textarea-styled" placeholder="Follow-up message to send..."></textarea>
+                <textarea id="review-draft-textarea" class="fady-message-box" dir="auto" placeholder="Follow-up message to send..."></textarea>
+                <div class="msg-box-hint">
+                  <span><i class="fa-solid fa-keyboard"></i> Press <kbd class="key-kbd">E</kbd> to edit message, or <kbd class="key-kbd">V</kbd> to validate and queue</span>
+                </div>
               </div>
 
-              <!-- Action Buttons Bar -->
+              <!-- Primary Action Buttons Grid (Fady_bot Standard) -->
               <div class="review-action-grid">
-                <button id="btn-draft-validate" class="btn-review-action btn-act-validate" title="Validate and queue message for sending (Key: V)">
+                <button id="btn-draft-validate" class="btn-review-action btn-act-validate" title="Validate and queue message for sending (Key: V or Enter)">
                   <i class="fa-solid fa-check-double"></i> Validate & Queue [V]
+                </button>
+                <button id="btn-draft-edit" class="btn-review-action btn-act-edit" title="Focus textarea to edit message (Key: E)">
+                  <i class="fa-solid fa-pen-to-square"></i> Edit [E]
                 </button>
                 <button id="btn-draft-defer" class="btn-review-action btn-act-defer" title="Defer contact for 4 hours (Key: D)">
                   <i class="fa-solid fa-clock"></i> Defer 4h [D]
                 </button>
-                <button id="btn-draft-cancel" class="btn-review-action btn-act-cancel" title="Cancel follow-up and record negative feedback (Key: C)">
+                <button id="btn-draft-cancel" class="btn-review-action btn-act-cancel" title="Cancel follow-up (Key: C)">
                   <i class="fa-solid fa-xmark"></i> Cancel / Skip [C]
                 </button>
               </div>
 
-              <!-- Stepper Navigation -->
-              <div class="review-nav-bar">
-                <button id="btn-review-prev" class="btn-nav" style="padding: 6px 12px;" title="Previous Draft (Key: P or Left Arrow)">
-                  <i class="fa-solid fa-chevron-left"></i> Previous [P]
-                </button>
-                <span id="review-progress-indicator" style="font-weight: 700; color: var(--text-muted);">0 / 0</span>
-                <button id="btn-review-next" class="btn-nav" style="padding: 6px 12px;" title="Next Draft (Key: N or Right Arrow)">
-                  Next [N] <i class="fa-solid fa-chevron-right"></i>
-                </button>
-              </div>
-
-              <!-- Keyboard Hints -->
-              <div class="key-hints-bar">
-                <span><kbd class="key-kbd">V</kbd> Approve</span>
-                <span><kbd class="key-kbd">E</kbd> Edit</span>
-                <span><kbd class="key-kbd">C</kbd> Cancel</span>
-                <span><kbd class="key-kbd">D</kbd> Defer</span>
-                <span><kbd class="key-kbd">N</kbd>/<kbd class="key-kbd">P</kbd> Nav</span>
+              <!-- Bottom Keyboard Navigation & Shortcuts Strip -->
+              <div class="review-footer-bar">
+                <div class="key-hints-bar">
+                  <span><kbd class="key-kbd">V</kbd> Approve</span>
+                  <span><kbd class="key-kbd">E</kbd> Edit</span>
+                  <span><kbd class="key-kbd">C</kbd> Cancel</span>
+                  <span><kbd class="key-kbd">D</kbd> Defer</span>
+                  <span><kbd class="key-kbd">P</kbd>/<kbd class="key-kbd">N</kbd> Nav</span>
+                </div>
+                <div class="nav-btn-pair">
+                  <button id="btn-review-prev" class="btn-nav btn-nav-compact" title="Previous Draft (Key: P or Left Arrow)">
+                    <i class="fa-solid fa-arrow-left"></i> Prev [P]
+                  </button>
+                  <button id="btn-review-next" class="btn-nav btn-nav-compact" title="Next Draft (Key: N or Right Arrow)">
+                    Next [N] <i class="fa-solid fa-arrow-right"></i>
+                  </button>
+                </div>
               </div>
 
             </div>
 
             <!-- Empty review state -->
             <div id="review-empty-state" class="chat-empty-state" style="display: none; padding: 40px 20px;">
-              <i class="fa-solid fa-circle-check" style="font-size: 2.5rem; color: #10b981; margin-bottom: 15px;"></i>
-              <h3 style="font-size: 1.1rem; font-weight: 700;">All Drafts Reviewed!</h3>
-              <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 6px;">There are no more pending follow-up drafts in the queue. Run Step 1 to generate more drafts or proceed to Step 3 to dispatch reviewed messages.</p>
+              <i class="fa-solid fa-circle-check" style="font-size: 2.8rem; color: #10b981; margin-bottom: 15px;"></i>
+              <h3 style="font-size: 1.2rem; font-weight: 800; color: #f8fafc;">All Drafts Reviewed!</h3>
+              <p style="font-size: 0.9rem; color: var(--text-muted); margin-top: 8px; max-width: 360px; line-height: 1.5;">There are no more pending follow-up drafts in the queue. Run Step 1 to scan more contacts, or proceed to Step 3 to dispatch queued messages.</p>
             </div>
 
           </div>
@@ -799,7 +827,7 @@
   </div>
 
   <!-- Scripts (Cache-Busted) -->
-  <script src="js/config.js?v=20260924_suite_v1"></script>
-  <script src="js/app.js?v=20260924_suite_v1"></script>
+  <script src="js/config.js?v=20260924_review_fady"></script>
+  <script src="js/app.js?v=20260924_review_fady"></script>
 </body>
 </html>
