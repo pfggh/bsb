@@ -6,10 +6,10 @@
   <title>Teshrij Follow-up Suite - BSB WhatsApp Automation</title>
   <link rel="icon" type="image/png" href="img/logo.png" />
 
-  <!-- Google Fonts: Inter -->
+  <!-- Google Fonts: Inter & JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
   <!-- FontAwesome 6 Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
@@ -63,31 +63,31 @@
         </span>
       </div>
 
-      <!-- 5-Step Suite Navigation Tabs -->
+      <!-- Fady_bot Main.py Navigation Tabs -->
       <nav class="suite-nav-tabs">
         <button class="suite-tab-btn active" data-tab="tab-scan" id="tab-btn-scan">
-          <i class="fa-solid fa-wand-magic-sparkles"></i>
-          <span>1. AI Scan</span>
+          <i class="fa-solid fa-bolt" style="color: #10b981;"></i>
+          <span>[3] Analyze</span>
           <span id="badge-eligible-scan" class="nav-pill">0</span>
         </button>
         <button class="suite-tab-btn" data-tab="tab-review" id="tab-btn-review">
-          <i class="fa-solid fa-list-check"></i>
-          <span>2. Review</span>
+          <i class="fa-solid fa-list-check" style="color: #38bdf8;"></i>
+          <span>[4] Review TUI</span>
           <span id="badge-pending-review" class="nav-pill pill-warning">0</span>
         </button>
         <button class="suite-tab-btn" data-tab="tab-send" id="tab-btn-send">
-          <i class="fa-solid fa-paper-plane"></i>
-          <span>3. Send Queue</span>
+          <i class="fa-solid fa-paper-plane" style="color: #a855f7;"></i>
+          <span>[5] Dispatcher</span>
           <span id="badge-queue-count" class="nav-pill pill-primary">0</span>
         </button>
         <button class="suite-tab-btn" data-tab="tab-chats" id="tab-btn-chats">
-          <i class="fa-solid fa-comments"></i>
-          <span>4. See Chats</span>
+          <i class="fa-brands fa-whatsapp" style="color: #22c55e;"></i>
+          <span>[Chats] Live Feed</span>
           <span id="badge-chats-count" class="nav-pill">0</span>
         </button>
         <button class="suite-tab-btn" data-tab="tab-admin" id="tab-btn-admin">
-          <i class="fa-solid fa-sliders"></i>
-          <span>5. Admin & Rules</span>
+          <i class="fa-solid fa-sliders" style="color: #06b6d4;"></i>
+          <span>[7-11] Admin & Rules</span>
         </button>
       </nav>
 
@@ -116,39 +116,62 @@
     <div class="suite-content-wrapper">
 
       <!-- ==================================================================
-           STEP 1: RUN AI SCAN VIEW
+           STEP 1: RUN AI SCAN VIEW (Fady_bot Authentic TUI Style)
            ================================================================== -->
       <section id="view-scan" class="suite-view active">
         <div class="suite-view-container">
+          
+          <!-- Authentic Fady_bot TUI Banner -->
+          <div class="tui-terminal-banner">
+            <div class="tui-banner-ascii">╔══════════════════════════════════════════════════════════════════════════╗
+║                       F A D Y _ B O T   v 2 . 0                          ║
+║          WhatsApp Follow-up Automation & Continuous Learning             ║
+║            Supabase PostgreSQL • BestSMSBulk API • OpenAI GPT-4o          ║
+╚══════════════════════════════════════════════════════════════════════════╝</div>
+          </div>
+
+          <!-- TUI Terminal Metrics & Status Summary Table (Matching display_status_summary()) -->
+          <div class="suite-table-wrapper" style="margin-bottom: 5px;">
+            <table class="tui-status-table">
+              <thead>
+                <tr>
+                  <th colspan="2"><i class="fa-solid fa-terminal"></i> SYSTEM STATUS & METRICS (feedback_learning_v2)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><i class="fa-solid fa-book-bookmark"></i> Canonical Rules Loaded (v2)</td>
+                  <td id="stat-canonical-rules" class="tui-count-green" style="text-align: right; width: 140px;">64</td>
+                </tr>
+                <tr>
+                  <td><i class="fa-solid fa-users"></i> 24h Active WhatsApp Contacts</td>
+                  <td id="stat-active-contacts" class="tui-count-green" style="text-align: right;">0</td>
+                </tr>
+                <tr>
+                  <td><i class="fa-solid fa-bullseye"></i> Unscanned Candidates (Pending Evaluation)</td>
+                  <td id="stat-scan-candidates" class="tui-count-cyan" style="text-align: right;">0</td>
+                </tr>
+                <tr>
+                  <td><i class="fa-solid fa-hourglass-half"></i> Pending Follow-up Drafts for Review</td>
+                  <td id="stat-pending-drafts" class="tui-count-amber" style="text-align: right;">0</td>
+                </tr>
+                <tr>
+                  <td><i class="fa-solid fa-paper-plane"></i> Send Queue (Ready for Dispatch)</td>
+                  <td id="stat-queued-count-banner" class="tui-count-cyan" style="text-align: right;">0</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
           <div class="suite-view-header">
             <div class="suite-title-group">
-              <h2><i class="fa-solid fa-wand-magic-sparkles" style="color: #a855f7;"></i> Step 1: AI Follow-up Scanner</h2>
+              <h2><i class="fa-solid fa-wand-magic-sparkles" style="color: #10b981;"></i> [Option 3] Run AI Analysis & Draft Follow-ups</h2>
               <p>Scans active conversations (past 24h, ≥2h old) from <code>bsb_messages</code>, evaluates against 64 canonical rules via pgvector, and synthesizes structured JSON follow-up drafts.</p>
             </div>
             <div class="suite-header-actions">
               <span id="scan-status-pill" class="decision-badge dec-send" style="display: none;">
                 <i class="fa-solid fa-circle-notch fa-spin"></i> Scanning Active
               </span>
-            </div>
-          </div>
-
-          <!-- Summary Metric Cards -->
-          <div class="metrics-row">
-            <div class="metric-card">
-              <span class="metric-label"><i class="fa-solid fa-users"></i> 24h Active Contacts</span>
-              <span id="stat-active-contacts" class="metric-value val-emerald">0</span>
-            </div>
-            <div class="metric-card">
-              <span class="metric-label"><i class="fa-solid fa-bullseye"></i> Unscanned Candidates</span>
-              <span id="stat-scan-candidates" class="metric-value val-indigo">0</span>
-            </div>
-            <div class="metric-card">
-              <span class="metric-label"><i class="fa-solid fa-hourglass-half"></i> Pending Review</span>
-              <span id="stat-pending-drafts" class="metric-value val-amber">0</span>
-            </div>
-            <div class="metric-card">
-              <span class="metric-label"><i class="fa-solid fa-book-bookmark"></i> Canonical Rules Active</span>
-              <span id="stat-canonical-rules" class="metric-value">64</span>
             </div>
           </div>
 
@@ -218,6 +241,10 @@
           
           <!-- Left: Customer Conversation History (72h full depth) -->
           <div class="review-chat-pane">
+            <div class="tui-pane-bar">
+              <span><i class="fa-solid fa-terminal"></i> CONVERSATION TRANSCRIPT (LEFT PANE)</span>
+              <span id="review-window-badge" class="badge-24h">24h WhatsApp Window</span>
+            </div>
             <div class="chat-header">
               <div class="chat-header-user">
                 <div class="conv-avatar" style="width: 36px; height: 36px; font-size: 0.85rem;">
@@ -227,7 +254,6 @@
                   <h2 id="review-chat-phone">+961 Contact</h2>
                   <div class="chat-header-sub">
                     <span id="review-chat-profile">Customer</span>
-                    <span id="review-window-badge" class="badge-24h" style="margin-left: 8px;">24h Window</span>
                   </div>
                 </div>
               </div>
@@ -247,6 +273,10 @@
           <!-- Right: Follow-up Draft Evaluation & Review Action Desk -->
           <!-- Right: Follow-up Draft Evaluation & Review Action Desk (Fady_bot Parity) -->
           <div class="review-draft-pane">
+            <div class="tui-pane-bar bar-green" style="margin: -22px -24px 16px -24px; padding: 10px 20px;">
+              <span><i class="fa-solid fa-terminal"></i> [OPTION 4] REVIEW & EDIT FOLLOW-UPS (RIGHT PANE)</span>
+              <span>[V] Validate • [E] Edit • [C] Cancel • [D] Defer</span>
+            </div>
             
             <!-- Top Controls: Queue Navigation & Misclick-Proof Send All -->
             <div class="draft-top-controls">
@@ -380,7 +410,7 @@
         <div class="suite-view-container">
           <div class="suite-view-header">
             <div class="suite-title-group">
-              <h2><i class="fa-solid fa-paper-plane" style="color: #6366f1;"></i> Step 3: Send Queue & Dispatcher</h2>
+              <h2><i class="fa-solid fa-paper-plane" style="color: #6366f1;"></i> [Option 5] Start Send Queue Worker & Dispatcher</h2>
               <p>Dispatches approved follow-ups via BestSMSBulk WhatsApp API with a mandatory <strong>1.5s delay</strong> and <strong>9 AM – 9 PM Beirut active hours</strong> protection.</p>
             </div>
             <div class="suite-header-actions">
@@ -589,12 +619,12 @@
             
             <!-- Admin Subtabs (Full Fady_bot Main.py Parity) -->
             <div class="admin-subtabs">
-              <button class="admin-subtab-btn active" data-subtab="sub-rules"><i class="fa-solid fa-book"></i> Canonical Rules (64)</button>
-              <button class="admin-subtab-btn" data-subtab="sub-prompts"><i class="fa-solid fa-terminal"></i> System Prompt & Policy</button>
-              <button class="admin-subtab-btn" data-subtab="sub-learning"><i class="fa-solid fa-brain"></i> Learning Log</button>
-              <button class="admin-subtab-btn" data-subtab="sub-benchmark"><i class="fa-solid fa-vial-circle-check"></i> Benchmarks (96)</button>
-              <button class="admin-subtab-btn" data-subtab="sub-teach"><i class="fa-solid fa-graduation-cap"></i> Teach Contact</button>
-              <button class="admin-subtab-btn" data-subtab="sub-config"><i class="fa-solid fa-gear"></i> Config & Actions</button>
+              <button class="admin-subtab-btn active" data-subtab="sub-rules"><i class="fa-solid fa-book"></i> [8] Canonical Rules (64)</button>
+              <button class="admin-subtab-btn" data-subtab="sub-prompts"><i class="fa-solid fa-terminal"></i> [Prompt] System Prompt & Policy</button>
+              <button class="admin-subtab-btn" data-subtab="sub-learning"><i class="fa-solid fa-brain"></i> [8] Learning Log</button>
+              <button class="admin-subtab-btn" data-subtab="sub-teach"><i class="fa-solid fa-graduation-cap"></i> [7] Teach Contact</button>
+              <button class="admin-subtab-btn" data-subtab="sub-benchmark"><i class="fa-solid fa-vial-circle-check"></i> Benchmark (96)</button>
+              <button class="admin-subtab-btn" data-subtab="sub-config"><i class="fa-solid fa-gear"></i> [10-11] Config & Maintenance</button>
             </div>
           </div>
 

@@ -93,6 +93,7 @@
     el.statScanCandidates = document.getElementById('stat-scan-candidates');
     el.statPendingDrafts = document.getElementById('stat-pending-drafts');
     el.statCanonicalRules = document.getElementById('stat-canonical-rules');
+    el.statQueuedCountBanner = document.getElementById('stat-queued-count-banner');
     el.btnStartAiScan = document.getElementById('btn-start-ai-scan');
     el.btnRefreshScan = document.getElementById('btn-refresh-scan');
     el.scanProgressBox = document.getElementById('scan-progress-box');
@@ -438,6 +439,7 @@
     if (el.statSentToday) el.statSentToday.textContent = (s.sent_today || 0).toLocaleString();
     if (el.statFailedCount) el.statFailedCount.textContent = (s.failed_messages || 0).toLocaleString();
     if (el.statCanonicalRules) el.statCanonicalRules.textContent = s.canonical_rules_count || 64;
+    if (el.statQueuedCountBanner) el.statQueuedCountBanner.textContent = (s.queued_messages || 0).toLocaleString();
     if (el.badgeChatsCount) el.badgeChatsCount.textContent = (s.contacts_24h || 0);
 
     const candidates = Math.max(0, (s.contacts_24h || 0) - (s.pending_drafts || 0));

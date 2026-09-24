@@ -1378,40 +1378,46 @@ html, body {
 
 /* Animated Progress Bars */
 .progress-box {
-  background: rgba(15, 23, 42, 0.8);
-  border: 1px solid var(--border);
+  background: #060913;
+  border: 1.5px solid #10b981;
   border-radius: var(--radius-md);
-  padding: 16px 20px;
+  padding: 18px 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  box-shadow: 0 0 25px rgba(16, 185, 129, 0.2);
 }
 
 .progress-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #34d399;
 }
 
 .progress-track {
   width: 100%;
-  height: 10px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 20px;
+  height: 14px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: 8px;
   overflow: hidden;
   position: relative;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6);
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #6366f1, #a855f7, #38bdf8);
+  background: linear-gradient(90deg, #10b981, #06b6d4, #38bdf8);
   background-size: 200% 100%;
-  border-radius: 20px;
+  border-radius: 6px;
   width: 0%;
-  transition: width 0.3s ease;
-  animation: shimmer 2s linear infinite;
+  transition: width 0.35s ease;
+  animation: shimmer 1.5s linear infinite;
+  box-shadow: 0 0 14px rgba(6, 182, 212, 0.6);
 }
 
 @keyframes shimmer {
@@ -2100,3 +2106,131 @@ html, body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* ==========================================================================
+   FADY_BOT AUTHENTIC TUI TERMINAL WORKBENCH THEME & ASCII PANES
+   ========================================================================== */
+.tui-terminal-banner {
+  background: #060911;
+  border: 1px solid #10b981;
+  border-radius: 8px;
+  padding: 12px 18px;
+  font-family: 'JetBrains Mono', monospace;
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.15);
+  margin-bottom: 8px;
+}
+
+.tui-banner-ascii {
+  color: #34d399;
+  font-size: 0.75rem;
+  line-height: 1.15;
+  white-space: pre;
+  font-weight: 800;
+  text-align: center;
+  margin: 0 auto;
+}
+
+.tui-status-table {
+  width: 100%;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+  background: rgba(6, 9, 17, 0.9);
+}
+
+.tui-status-table th {
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+  padding: 8px 14px;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  font-weight: 800;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.tui-status-table td {
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+}
+
+.tui-status-table tr:hover td {
+  background: rgba(16, 185, 129, 0.06);
+}
+
+.tui-count-green {
+  color: #34d399;
+  font-weight: 800;
+}
+
+.tui-count-cyan {
+  color: #38bdf8;
+  font-weight: 800;
+}
+
+.tui-count-amber {
+  color: #fbbf24;
+  font-weight: 800;
+}
+
+/* TUI Terminal-Style Review Pane Header */
+.tui-pane-bar {
+  background: #0f172a;
+  border-bottom: 2px solid #38bdf8;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+  color: #38bdf8;
+  font-weight: 700;
+}
+
+.tui-pane-bar.bar-green {
+  border-bottom-color: #10b981;
+  color: #34d399;
+}
+
+/* ASCII Border Box for Follow-up Message */
+.tui-msg-ascii-box {
+  background: #050811;
+  border: 1.5px solid #10b981;
+  border-radius: 8px;
+  padding: 14px 16px;
+  position: relative;
+  box-shadow: 0 0 24px rgba(16, 185, 129, 0.25), inset 0 0 16px rgba(16, 185, 129, 0.05);
+}
+
+.tui-msg-ascii-header {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: #34d399;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Keyboard Action Keys Bar in TUI Footer */
+.tui-action-strip {
+  background: #050811;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+
+.tui-action-key {
+  color: #fbbf24;
+  font-weight: 800;
+}
+
