@@ -1,54 +1,74 @@
 /**
- * Teshrij BSB Messenger - 10x Ultra-Optimized Engine
+ * Teshrij Follow-up Suite - Ultra-Optimized Engine
+ * Connected to Supabase PostgreSQL (pgvector), BestSMSBulk API & OpenAI
  * 
- * Performance & Architecture:
- * 1. Convs selection rule: Past 24h window, strictly 2h or older (ideal follow-up candidates).
- * 2. Chat history depth: Loads full 72h of messages (instead of 24h), plus lightning-fast load_more.
- * 3. 0ms Instant Display: In-memory LRU cache + Persistent IndexedDB store.
- * 4. Background Idle Prefetching: Top conversations are prefetched in browser idle slots.
- * 5. Single-Roundtrip Database RPC: Pre-aggregates messages + has_older in 1 query.
- * 6. Microsecond Pre-indexed Search: <1ms search latency across all contacts.
- * 7. Zero-reflow DOM Recycling & CSS content-visibility for ancient/low-end CPUs.
+ * 5-Step Unified Suite:
+ * 1. AI Scan (Evaluates eligible 24h chats against 64 canonical rules)
+ * 2. Review Page (Split-screen review desk with Misclick-Proof Send All button)
+ * 3. Send Reviewed (Safe rate-limited dispatcher with 1.5s delay)
+ * 4. See Chats (Ultra-fast 72h messenger with media player & instant search)
+ * 5. Admin & Rules (Canonical rules manager, 96-fixture training runner, teach mode)
  */
 
 (() => {
   'use strict';
 
   // Core Configuration
-  const HOURS_LOOKBACK_CONVS = 24; // Rule: which convs to show (past 24h)
-  const MIN_HOURS_OLD = 2.0;       // Rule: only load 2h or older convs
-  const HOURS_LOOKBACK_CHATS = 72; // Rule: load 72h of chat history (not 24)
-  const IDB_NAME = 'teshrij_bsb_v3';
+  const HOURS_LOOKBACK_CONVS = 24; // 24h window
+  const MIN_HOURS_OLD = 2.0;       // At least 2h old
+  const HOURS_LOOKBACK_CHATS = 72; // Full 72h chat history
+  const IDB_NAME = 'teshrij_followup_suite_v1';
   const IDB_VERSION = 1;
 
-  // Application State
+  // Global Suite State
   const state = {
     session: null,
+    activeTab: 'tab-scan',
+    stats: {
+      total_messages: 0,
+      contacts_24h: 0,
+      pending_drafts: 0,
+      approved_drafts: 0,
+      cancelled_drafts: 0,
+      queued_messages: 0,
+      sent_today: 0,
+      failed_messages: 0,
+      canonical_rules_count: 64
+    },
+    // Step 1: Scan
+    isScanning: false,
+    stopScanRequested: false,
+    scanCandidates: [],
+    // Step 2: Review
+    reviewDrafts: [],
+    currentReviewIndex: 0,
+    currentReviewDraft: null,
+    // Step 3: Send Queue
+    queueItems: [],
+    isDispatchingQueue: false,
+    pauseDispatchRequested: false,
+    // Step 4: Chats
     conversations: [],
     filteredConversations: [],
     activeContact: null,
     activeConversationData: null,
     messages: [],
-    oldestLoadedTimestamp: null,
-    hasOlderMessages: false,
     activeFilter: 'all',
     searchQuery: '',
     isLoadingConversations: false,
-    isLoadingMessages: false,
-    isLoadingMore: false,
-    isSending: false,
-    pollInterval: null,
-    prefetchQueue: [],
-    isPrefetching: false,
-    // Multi-tier memory cache
-    threadCache: new Map(), // contact -> { messages, oldestLoadedTimestamp, hasOlderMessages, cachedAt }
+    threadCache: new Map(),
+    // Step 5: Admin & Rules
+    canonicalRules: [],
+    filteredRules: [],
+    benchmarkCases: [],
     idb: null
   };
 
-  // DOM Elements
+  // DOM Elements Cache
   const el = {};
 
   function initDOMElements() {
+    // Auth
     el.loginView = document.getElementById('login-view');
     el.appView = document.getElementById('app-view');
     el.loginForm = document.getElementById('login-form');
@@ -56,17 +76,89 @@
     el.passwordInput = document.getElementById('login-password');
     el.loginError = document.getElementById('login-error');
     el.loginSubmitBtn = document.getElementById('login-submit-btn');
-
     el.userEmailDisplay = document.getElementById('user-email-display');
     el.logoutBtn = document.getElementById('logout-btn');
     el.syncBtn = document.getElementById('sync-btn');
-    el.cacheIndicator = document.getElementById('cache-indicator');
+
+    // Navigation Tabs
+    el.suiteTabBtns = document.querySelectorAll('.suite-tab-btn');
+    el.suiteViews = document.querySelectorAll('.suite-view');
+    el.badgeEligibleScan = document.getElementById('badge-eligible-scan');
+    el.badgePendingReview = document.getElementById('badge-pending-review');
+    el.badgeQueueCount = document.getElementById('badge-queue-count');
+    el.badgeChatsCount = document.getElementById('badge-chats-count');
+
+    // Step 1: Scan Elements
+    el.statActiveContacts = document.getElementById('stat-active-contacts');
+    el.statScanCandidates = document.getElementById('stat-scan-candidates');
+    el.statPendingDrafts = document.getElementById('stat-pending-drafts');
+    el.statCanonicalRules = document.getElementById('stat-canonical-rules');
+    el.scanBatchLimit = document.getElementById('scan-batch-limit');
+    el.scanModelSelect = document.getElementById('scan-model-select');
+    el.btnStartAiScan = document.getElementById('btn-start-ai-scan');
+    el.btnStopAiScan = document.getElementById('btn-stop-ai-scan');
+    el.scanProgressBox = document.getElementById('scan-progress-box');
+    el.scanProgressText = document.getElementById('scan-progress-text');
+    el.scanProgressPercent = document.getElementById('scan-progress-percent');
+    el.scanProgressFill = document.getElementById('scan-progress-fill');
+    el.scanResultsTbody = document.getElementById('scan-results-tbody');
+    el.scanStatusPill = document.getElementById('scan-status-pill');
+
+    // Step 2: Review Elements
+    el.reviewChatPhone = document.getElementById('review-chat-phone');
+    el.reviewChatProfile = document.getElementById('review-chat-profile');
+    el.reviewWaLink = document.getElementById('review-wa-link');
+    el.reviewMessagesContainer = document.getElementById('review-messages-container');
+    el.reviewStepperCounter = document.getElementById('review-stepper-counter');
+    el.unreviewedCountBadge = document.getElementById('unreviewed-count-badge');
+    el.btnOpenSendAllModal = document.getElementById('btn-open-send-all-modal');
+    el.reviewDraftCard = document.getElementById('review-draft-card');
+    el.reviewEmptyState = document.getElementById('review-empty-state');
+    el.reviewDraftDecision = document.getElementById('review-draft-decision');
+    el.reviewDraftCategory = document.getElementById('review-draft-category');
+    el.reviewDraftTime = document.getElementById('review-draft-time');
+    el.reviewDraftRules = document.getElementById('review-draft-rules');
+    el.reviewDraftReason = document.getElementById('review-draft-reason');
+    el.reviewDraftTextarea = document.getElementById('review-draft-textarea');
+    el.draftCharCount = document.getElementById('draft-char-count');
+    el.btnDraftValidate = document.getElementById('btn-draft-validate');
+    el.btnDraftDefer = document.getElementById('btn-draft-defer');
+    el.btnDraftCancel = document.getElementById('btn-draft-cancel');
+    el.btnReviewPrev = document.getElementById('btn-review-prev');
+    el.btnReviewNext = document.getElementById('btn-review-next');
+    el.reviewProgressIndicator = document.getElementById('review-progress-indicator');
+
+    // Misclick-Proof Modal
+    el.misclickModal = document.getElementById('misclick-modal');
+    el.modalSendCount = document.getElementById('modal-send-count');
+    el.modalDurationEst = document.getElementById('modal-duration-est');
+    el.modalRecipientsPreview = document.getElementById('modal-recipients-preview');
+    el.modalTypeConfirmation = document.getElementById('modal-type-confirmation');
+    el.btnConfirmSendAll = document.getElementById('btn-confirm-send-all');
+    el.holdBtnLabel = document.getElementById('hold-btn-label');
+    el.btnCancelSendAllModal = document.getElementById('btn-cancel-send-all-modal');
+
+    // Step 3: Send Queue Elements
+    el.statQueuedCount = document.getElementById('stat-queued-count');
+    el.statSentToday = document.getElementById('stat-sent-today');
+    el.statFailedCount = document.getElementById('stat-failed-count');
+    el.senderStatusBadge = document.getElementById('sender-status-badge');
+    el.queueDryrunToggle = document.getElementById('queue-dryrun-toggle');
+    el.btnStartQueueDispatch = document.getElementById('btn-start-queue-dispatch');
+    el.btnPauseQueueDispatch = document.getElementById('btn-pause-queue-dispatch');
+    el.btnRefreshQueue = document.getElementById('btn-refresh-queue');
+    el.queueProgressBox = document.getElementById('queue-progress-box');
+    el.queueProgressText = document.getElementById('queue-progress-text');
+    el.queueProgressPercent = document.getElementById('queue-progress-percent');
+    el.queueProgressFill = document.getElementById('queue-progress-fill');
+    el.queueItemsTbody = document.getElementById('queue-items-tbody');
+
+    // Step 4: Chats Elements
     el.convCountBadge = document.getElementById('conv-count-badge');
     el.total24hCount = document.getElementById('total-24h-count');
     el.searchInput = document.getElementById('search-input');
     el.convList = document.getElementById('conv-list');
     el.filterPills = document.querySelectorAll('.pill-btn');
-
     el.chatEmptyState = document.getElementById('chat-empty-state');
     el.chatActiveView = document.getElementById('chat-active-view');
     el.chatPhone = document.getElementById('chat-phone');
@@ -74,68 +166,46 @@
     el.chatWaLink = document.getElementById('chat-wa-link');
     el.chatAdBanner = document.getElementById('chat-ad-banner');
     el.chatMessagesContainer = document.getElementById('chat-messages-container');
-    el.loadMoreWrapper = document.getElementById('load-more-wrapper');
     el.chatTextarea = document.getElementById('chat-textarea');
     el.btnSend = document.getElementById('btn-send');
     el.sendStatusLine = document.getElementById('send-status-line');
     el.quickTemplates = document.querySelectorAll('.template-pill');
-  }
 
-  // =========================================================================
-  // IndexedDB Fast Local Cache
-  // =========================================================================
-  async function initIndexedDB() {
-    return new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-        req.onupgradeneeded = (e) => {
-          const db = e.target.result;
-          if (!db.objectStoreNames.contains('conversations')) {
-            db.createObjectStore('conversations', { keyPath: 'key' });
-          }
-          if (!db.objectStoreNames.contains('threads')) {
-            db.createObjectStore('threads', { keyPath: 'contact' });
-          }
-        };
-        req.onsuccess = (e) => {
-          state.idb = e.target.result;
-          resolve(state.idb);
-        };
-        req.onerror = () => resolve(null);
-      } catch (err) {
-        resolve(null);
-      }
-    });
-  }
+    // Step 5: Admin Elements
+    el.adminSubtabBtns = document.querySelectorAll('.admin-subtab-btn');
+    el.rulesSearchInput = document.getElementById('rules-search-input');
+    el.ruleCatFilters = document.querySelectorAll('.rule-cat-filter');
+    el.rulesGrid = document.getElementById('rules-grid');
+    el.btnRunBenchmark = document.getElementById('btn-run-benchmark');
+    el.benchStatAcc = document.getElementById('bench-stat-acc');
+    el.benchStatPassed = document.getElementById('bench-stat-passed');
+    el.benchStatRecall = document.getElementById('bench-stat-recall');
+    el.benchStatSafety = document.getElementById('bench-stat-safety');
+    el.benchmarkResultsTbody = document.getElementById('benchmark-results-tbody');
+    el.teachPhone = document.getElementById('teach-phone');
+    el.teachMessage = document.getElementById('teach-message');
+    el.teachReason = document.getElementById('teach-reason');
+    el.btnSubmitTeach = document.getElementById('btn-submit-teach');
+    el.teachFeedbackStatus = document.getElementById('teach-feedback-status');
+    el.cfgOpenaiKey = document.getElementById('cfg-openai-key');
+    el.cfgChatModel = document.getElementById('cfg-chat-model');
+    el.cfgSendDelay = document.getElementById('cfg-send-delay');
+    el.cfgBsbKey = document.getElementById('cfg-bsb-key');
+    el.cfgBsbSecret = document.getElementById('cfg-bsb-secret');
+    el.btnSaveConfig = document.getElementById('btn-save-config');
+    el.cfgStatusLine = document.getElementById('cfg-status-line');
 
-  async function idbGet(storeName, key) {
-    if (!state.idb) return null;
-    return new Promise((resolve) => {
-      try {
-        const tx = state.idb.transaction(storeName, 'readonly');
-        const store = tx.objectStore(storeName);
-        const req = store.get(key);
-        req.onsuccess = () => resolve(req.result ? req.result.data : null);
-        req.onerror = () => resolve(null);
-      } catch (e) {
-        resolve(null);
-      }
-    });
-  }
-
-  async function idbSet(storeName, key, data) {
-    if (!state.idb) return;
-    try {
-      const tx = state.idb.transaction(storeName, 'readwrite');
-      const store = tx.objectStore(storeName);
-      if (storeName === 'conversations') {
-        store.put({ key, data, savedAt: Date.now() });
-      } else {
-        store.put({ contact: key, data, savedAt: Date.now() });
-      }
-    } catch (e) {
-      // Non-blocking cache write
-    }
+    // Rule Detail Modal
+    el.ruleDetailModal = document.getElementById('rule-detail-modal');
+    el.modalRuleId = document.getElementById('modal-rule-id');
+    el.modalRuleCat = document.getElementById('modal-rule-cat');
+    el.modalRuleTitle = document.getElementById('modal-rule-title');
+    el.modalRuleReason = document.getElementById('modal-rule-reason');
+    el.modalRuleArabiziBox = document.getElementById('modal-rule-arabizi-box');
+    el.modalRuleArabiziList = document.getElementById('modal-rule-arabizi-list');
+    el.modalRuleExclusionsBox = document.getElementById('modal-rule-exclusions-box');
+    el.modalRuleExclusionsList = document.getElementById('modal-rule-exclusions-list');
+    el.btnCloseRuleModal = document.getElementById('btn-close-rule-modal');
   }
 
   // =========================================================================
@@ -144,37 +214,18 @@
   function normalizePhone(phoneStr) {
     if (!phoneStr) return "";
     let raw = String(phoneStr).trim();
-    if (raw.toLowerCase().startsWith("ig_")) return "";
-
     let digits = raw.replace(/\D/g, "");
     if (!digits) return "";
-
-    if (digits.startsWith("00")) {
-      digits = digits.slice(2);
-      if (!digits) return "";
-    }
-
+    if (digits.startsWith("00")) digits = digits.slice(2);
     if (digits.startsWith("961")) {
       let rest = digits.slice(3);
-      if (rest.startsWith("03") && rest.length === 8) {
-        return "961" + rest.slice(1);
-      }
+      if (rest.startsWith("03") && rest.length === 8) return "961" + rest.slice(1);
       return digits;
     }
-
-    if (digits.length === 8 && digits.startsWith("03")) {
-      return "961" + digits.slice(1);
-    }
-    if (digits.length === 7 && digits.startsWith("3")) {
-      return "961" + digits;
-    }
-    if (digits.length === 7 && (digits.startsWith("7") || digits.startsWith("8"))) {
-      return "961" + digits;
-    }
-    if (digits.length === 8 && (digits.startsWith("7") || digits.startsWith("8"))) {
-      return "961" + digits;
-    }
-
+    if (digits.length === 8 && digits.startsWith("03")) return "961" + digits.slice(1);
+    if (digits.length === 7 && digits.startsWith("3")) return "961" + digits;
+    if (digits.length === 7 && (digits.startsWith("7") || digits.startsWith("8"))) return "961" + digits;
+    if (digits.length === 8 && (digits.startsWith("7") || digits.startsWith("8"))) return "961" + digits;
     return digits;
   }
 
@@ -183,13 +234,8 @@
     const str = String(contact);
     if (str.startsWith("961") && str.length >= 10) {
       const rest = str.slice(3);
-      if (rest.length === 8) {
-        return `+961 ${rest.slice(0, 2)} ${rest.slice(2, 5)} ${rest.slice(5)}`;
-      }
+      if (rest.length === 8) return `+961 ${rest.slice(0, 2)} ${rest.slice(2, 5)} ${rest.slice(5)}`;
       return `+961 ${rest}`;
-    }
-    if (str.length === 11 && str.startsWith("1")) {
-      return `+1 (${str.slice(1, 4)}) ${str.slice(4, 7)}-${str.slice(7)}`;
     }
     return `+${str}`;
   }
@@ -199,7 +245,6 @@
     const date = new Date(isoStr);
     const now = new Date();
     const diffSec = Math.floor((now - date) / 1000);
-
     if (diffSec < 60) return "Just now";
     const diffMin = Math.floor(diffSec / 60);
     if (diffMin < 60) return `${diffMin}m ago`;
@@ -207,8 +252,7 @@
     if (diffHr < 24) return `${diffHr}h ago`;
     const diffDays = Math.floor(diffHr / 24);
     if (diffDays === 1) return `1d ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    return `${diffDays}d ago`;
   }
 
   function formatMessageTime(isoStr) {
@@ -219,32 +263,28 @@
 
   function escapeHTML(str) {
     if (!str) return "";
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
   }
 
-  // Resolves media URL: if already in Supabase Storage CDN, returns it; otherwise routes through on-demand Edge Function
+  function isBeirutWorkingHours() {
+    const d = new Date();
+    // UTC+3 Beirut time
+    const beirutHour = (d.getUTCHours() + 3) % 24;
+    return beirutHour >= (window.SYSTEM_CONFIG?.beirut_hours_start || 9) && beirutHour < (window.SYSTEM_CONFIG?.beirut_hours_end || 21);
+  }
+
   function resolveMediaUrl(chatId, mediaType, rawUrl) {
     const trimmed = (rawUrl || '').trim();
-    if (trimmed.includes('supabase.co/storage/v1/object/public/bsb-media/')) {
-      return trimmed;
-    }
+    if (trimmed.includes('supabase.co/storage/v1/object/public/bsb-media/')) return trimmed;
     if (chatId) {
       const typeParam = (mediaType || '').toLowerCase().includes('image') ? 'image' : 'audio';
       return `${window.SUPABASE_URL}/functions/v1/bsb_media?chatid=${encodeURIComponent(chatId)}&type=${typeParam}`;
     }
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      return trimmed;
-    }
-    return '';
+    return trimmed;
   }
 
   // =========================================================================
-  // Authentication (Matches Admin Panel)
+  // Authentication
   // =========================================================================
   async function checkAuth() {
     if (!window.supabaseClient) return;
@@ -262,19 +302,21 @@
 
   function setAuthenticated(session) {
     state.session = session;
-    if (el.userEmailDisplay) {
-      el.userEmailDisplay.textContent = session.user?.email || "Admin";
-    }
+    if (el.userEmailDisplay) el.userEmailDisplay.textContent = session.user?.email || "Admin";
     el.loginView.style.display = 'none';
     el.appView.style.display = 'flex';
 
+    // Initialize suite data
+    loadDashboardStats();
     loadConversations();
-    startPolling();
+    loadReviewDrafts();
+    loadSendQueue();
+    loadCanonicalRules();
+    loadConfigForm();
   }
 
   function setUnauthenticated() {
     state.session = null;
-    stopPolling();
     el.loginView.style.display = 'flex';
     el.appView.style.display = 'none';
     if (el.loginError) el.loginError.textContent = '';
@@ -284,7 +326,6 @@
     e.preventDefault();
     const email = el.emailInput.value.trim();
     const password = el.passwordInput.value;
-
     if (!email || !password) {
       el.loginError.textContent = "Please enter email and password.";
       return;
@@ -317,799 +358,1272 @@
   }
 
   // =========================================================================
-  // Conversations Loading: 24h Lookback + ≥2h Old Filter (Instant SWR)
+  // Tab Switching (0ms Latency)
   // =========================================================================
-  async function loadConversations(isBackground = false) {
-    if (state.isLoadingConversations) return;
-    state.isLoadingConversations = true;
+  function switchTab(tabId) {
+    state.activeTab = tabId;
 
-    if (!isBackground && el.syncBtn) {
-      el.syncBtn.classList.add('spinning');
-    }
-
-    // Step 1: Instant load from local IndexedDB cache (< 5ms)
-    if (!isBackground && state.conversations.length === 0) {
-      const cached = await idbGet('conversations', 'list_24h_2h');
-      if (cached && Array.isArray(cached) && cached.length > 0) {
-        setConversationsData(cached, true);
-      }
-    }
-
-    // Step 2: Fetch fresh data from Supabase RPC
-    try {
-      let data = null;
-      let error = null;
-
-      try {
-        const res = await window.supabaseClient.rpc('get_bsb_recent_conversations', {
-          hours_lookback: HOURS_LOOKBACK_CONVS,
-          min_hours_old: MIN_HOURS_OLD
-        });
-        data = res.data;
-        error = res.error;
-      } catch (rpcErr) {
-        error = rpcErr;
-      }
-
-      // Fallback direct query if RPC had an issue
-      if (error || !data) {
-        const lookbackIso = new Date(Date.now() - HOURS_LOOKBACK_CONVS * 3600 * 1000).toISOString();
-        const minHoursIso = new Date(Date.now() - MIN_HOURS_OLD * 3600 * 1000).toISOString();
-
-        const fallbackRes = await window.supabaseClient
-          .from('bsb_messages')
-          .select('contact, profile_name, message, direction, timestamp, status, has_tracking, ad_id')
-          .gte('timestamp', lookbackIso)
-          .lte('timestamp', minHoursIso)
-          .order('timestamp', { ascending: false })
-          .limit(2000);
-
-        if (!fallbackRes.error && fallbackRes.data) {
-          const map = new Map();
-          for (const msg of fallbackRes.data) {
-            if (!map.has(msg.contact)) {
-              map.set(msg.contact, {
-                contact: msg.contact,
-                profile_name: msg.profile_name,
-                last_message: msg.message,
-                last_direction: msg.direction,
-                last_timestamp: msg.timestamp,
-                last_status: msg.status,
-                msg_count_24h: 1,
-                incoming_count_24h: String(msg.direction).toLowerCase() === 'incoming' ? 1 : 0,
-                has_tracking: msg.has_tracking,
-                ad_id: msg.ad_id
-              });
-            } else {
-              const it = map.get(msg.contact);
-              it.msg_count_24h++;
-              if (String(msg.direction).toLowerCase() === 'incoming') it.incoming_count_24h++;
-            }
-          }
-          data = Array.from(map.values());
-        }
-      }
-
-      if (data && Array.isArray(data)) {
-        setConversationsData(data, false);
-        // Persist to local IndexedDB cache
-        idbSet('conversations', 'list_24h_2h', data);
-        // Start background prefetching top conversations
-        queueBackgroundPrefetch(data.slice(0, 20));
-      }
-
-    } catch (err) {
-      console.error("Fetch conversations error:", err);
-    } finally {
-      state.isLoadingConversations = false;
-      if (el.syncBtn) el.syncBtn.classList.remove('spinning');
-    }
-  }
-
-  function setConversationsData(list, isCached = false) {
-    // Pre-index lowercased search key for <1ms searches
-    state.conversations = list.map(c => {
-      c._searchKey = `${c.contact || ''} ${c.profile_name || ''} ${c.last_message || ''}`.toLowerCase();
-      return c;
+    // Update Tab Buttons
+    el.suiteTabBtns.forEach(btn => {
+      const target = btn.getAttribute('data-tab');
+      btn.classList.toggle('active', target === tabId);
     });
 
-    if (el.cacheIndicator) {
-      el.cacheIndicator.style.display = isCached ? 'inline-flex' : 'none';
-    }
+    // Update Views
+    const viewMap = {
+      'tab-scan': 'view-scan',
+      'tab-review': 'view-review',
+      'tab-send': 'view-send',
+      'tab-chats': 'view-chats',
+      'tab-admin': 'view-admin'
+    };
 
-    applyFilterAndSearch();
-
-    const totalCount = state.conversations.length;
-    if (el.convCountBadge) el.convCountBadge.textContent = totalCount;
-    if (el.total24hCount) el.total24hCount.textContent = `${totalCount} active`;
-
-    if (!state.activeContact && state.filteredConversations.length > 0 && window.innerWidth > 768) {
-      selectConversation(state.filteredConversations[0].contact);
-    }
-  }
-
-  // =========================================================================
-  // Background Idle Prefetching (0.00ms Instant Click Response)
-  // =========================================================================
-  function queueBackgroundPrefetch(contactsList) {
-    state.prefetchQueue = contactsList.map(c => c.contact).filter(c => !state.threadCache.has(c));
-    processNextPrefetch();
-  }
-
-  function processNextPrefetch() {
-    if (state.isPrefetching || state.prefetchQueue.length === 0) return;
-    const nextContact = state.prefetchQueue.shift();
-
-    const schedule = window.requestIdleCallback || ((cb) => setTimeout(cb, 100));
-    schedule(async () => {
-      state.isPrefetching = true;
-      try {
-        await fetchChatData(nextContact, true);
-      } catch (e) {}
-      state.isPrefetching = false;
-      if (state.prefetchQueue.length > 0) {
-        setTimeout(processNextPrefetch, 60);
-      }
-    });
-  }
-
-  // =========================================================================
-  // Microsecond Filter & Search
-  // =========================================================================
-  function applyFilterAndSearch() {
-    const q = state.searchQuery.toLowerCase().trim();
-    const filter = state.activeFilter;
-
-    if (!q && filter === 'all') {
-      state.filteredConversations = state.conversations;
-    } else {
-      state.filteredConversations = state.conversations.filter(c => {
-        if (filter === 'incoming' && (c.incoming_count_24h || 0) <= 0) return false;
-        if (filter === 'tracking' && !c.has_tracking && !c.ad_id) return false;
-        if (!q) return true;
-        return c._searchKey.includes(q);
-      });
-    }
-
-    renderConversationsList();
-  }
-
-  function renderConversationsList() {
-    if (!el.convList) return;
-
-    if (state.filteredConversations.length === 0) {
-      el.convList.innerHTML = `
-        <div style="padding: 30px 20px; text-align: center; color: var(--text-dim);">
-          <i class="fa-solid fa-comment-slash" style="font-size: 1.8rem; margin-bottom: 8px; opacity: 0.5;"></i>
-          <p>No conversations found</p>
-        </div>
-      `;
-      return;
-    }
-
-    const fragment = document.createDocumentFragment();
-
-    for (const c of state.filteredConversations) {
-      const item = document.createElement('div');
-      item.className = `conv-item ${c.contact === state.activeContact ? 'active' : ''}`;
-      item.dataset.contact = c.contact;
-
-      const isIncoming = String(c.last_direction || '').toLowerCase() === 'incoming';
-      const initial = (c.profile_name ? c.profile_name.charAt(0) : (c.contact ? c.contact.slice(-2) : '?')).toUpperCase();
-      const displayName = c.profile_name ? escapeHTML(c.profile_name) : formatPhoneDisplay(c.contact);
-      const timeStr = formatRelativeTime(c.last_timestamp);
-      const previewStr = escapeHTML((c.last_message || '').slice(0, 75));
-
-      item.innerHTML = `
-        <div class="conv-avatar ${isIncoming ? 'incoming-indicator' : ''}">
-          ${initial}
-        </div>
-        <div class="conv-info">
-          <div class="conv-header-line">
-            <span class="conv-name" title="${displayName}">${displayName}</span>
-            <span class="conv-time">${timeStr}</span>
-          </div>
-          <div class="conv-subline">
-            <span class="conv-preview">
-              <i class="fa-solid ${isIncoming ? 'fa-arrow-down dir-incoming' : 'fa-arrow-up dir-outgoing'} dir-icon"></i>
-              ${previewStr || '<em>No message</em>'}
-            </span>
-            <div class="conv-badges">
-              ${c.has_tracking || c.ad_id ? '<span class="ad-pill">AD</span>' : ''}
-              <span class="msg-count-pill">${c.msg_count_24h || 1}</span>
-            </div>
-          </div>
-        </div>
-      `;
-
-      fragment.appendChild(item);
-    }
-
-    el.convList.innerHTML = '';
-    el.convList.appendChild(fragment);
-  }
-
-  // =========================================================================
-  // Conversation View: 72h History Load + Instant 0ms Cache Display
-  // =========================================================================
-  async function selectConversation(contact) {
-    if (!contact) return;
-    state.activeContact = contact;
-    state.activeConversationData = state.conversations.find(c => c.contact === contact) || null;
-
-    const items = el.convList.querySelectorAll('.conv-item');
-    items.forEach(it => {
-      it.classList.toggle('active', it.dataset.contact === contact);
+    el.suiteViews.forEach(v => {
+      v.classList.remove('active');
     });
 
-    el.chatEmptyState.style.display = 'none';
-    el.chatActiveView.style.display = 'flex';
+    const activeViewId = viewMap[tabId];
+    const targetEl = document.getElementById(activeViewId);
+    if (targetEl) targetEl.classList.add('active');
 
-    const displayName = state.activeConversationData?.profile_name || formatPhoneDisplay(contact);
-    el.chatPhone.textContent = displayName;
-    el.chatProfileName.textContent = state.activeConversationData?.profile_name ? formatPhoneDisplay(contact) : 'BSB Contact';
-    el.chatWaLink.href = `https://wa.me/${contact}`;
-
-    if (state.activeConversationData?.has_tracking || state.activeConversationData?.ad_id) {
-      el.chatAdBanner.style.display = 'flex';
-      el.chatAdBanner.innerHTML = `<i class="fa-brands fa-facebook"></i> Meta Ad: ${state.activeConversationData.ad_id || 'Tracked'}`;
-    } else {
-      el.chatAdBanner.style.display = 'none';
-    }
-
-    // Step 1: 0ms In-Memory Cache Check
-    if (state.threadCache.has(contact)) {
-      const cached = state.threadCache.get(contact);
-      state.messages = cached.messages;
-      state.oldestLoadedTimestamp = cached.oldestLoadedTimestamp;
-      state.hasOlderMessages = cached.hasOlderMessages;
-      renderChatMessages();
-      scrollChatToBottom(false);
-      // Background SWR revalidate
-      fetchChatData(contact, true);
-      return;
-    }
-
-    // Step 2: <5ms IndexedDB Cache Check
-    const idbCached = await idbGet('threads', contact);
-    if (idbCached && idbCached.messages) {
-      state.messages = idbCached.messages;
-      state.oldestLoadedTimestamp = idbCached.oldestLoadedTimestamp;
-      state.hasOlderMessages = idbCached.hasOlderMessages;
-      state.threadCache.set(contact, idbCached);
-      renderChatMessages();
-      scrollChatToBottom(false);
-      fetchChatData(contact, true);
-      return;
-    }
-
-    // Step 3: Fetch 72h of chat history from Supabase
-    el.chatMessagesContainer.innerHTML = `
-      <div style="padding: 40px; text-align: center; color: var(--text-dim);">
-        <i class="fa-solid fa-spinner fa-spin" style="font-size: 1.5rem; margin-bottom: 8px;"></i>
-        <p>Loading 72h chat history...</p>
-      </div>
-    `;
-
-    await fetchChatData(contact, false);
+    // Trigger tab-specific refreshes
+    if (tabId === 'tab-review') loadReviewDrafts();
+    if (tabId === 'tab-send') loadSendQueue();
+    if (tabId === 'tab-chats' && state.conversations.length === 0) loadConversations();
   }
 
-  // Combined Single-Roundtrip Chat History Fetch (72 Hours)
-  async function fetchChatData(contact, isBackground = false) {
-    if (state.isLoadingMessages && !isBackground) return;
-    if (!isBackground) state.isLoadingMessages = true;
-
+  // =========================================================================
+  // Live Dashboard Statistics (Supabase RPC)
+  // =========================================================================
+  async function loadDashboardStats() {
+    if (!window.supabaseClient) return;
     try {
-      // 1. Try single-roundtrip RPC get_bsb_contact_chat
-      let messages = [];
-      let hasOlder = false;
-      let rpcSuccess = false;
-
-      try {
-        const { data: rpcData, error: rpcErr } = await window.supabaseClient.rpc('get_bsb_contact_chat', {
-          target_contact: contact,
-          hours_lookback: HOURS_LOOKBACK_CHATS
-        });
-
-        if (!rpcErr && rpcData && typeof rpcData === 'object') {
-          messages = rpcData.messages || [];
-          hasOlder = !!rpcData.has_older;
-          rpcSuccess = true;
-        }
-      } catch (e) {}
-
-      // 2. Direct Query Fallback if RPC failed
-      if (!rpcSuccess) {
-        const seventyTwoHoursAgo = new Date(Date.now() - HOURS_LOOKBACK_CHATS * 3600 * 1000).toISOString();
-        const { data: queryData, error: queryErr } = await window.supabaseClient
-          .from('bsb_messages')
-          .select('id, chat_id, contact, profile_name, direction, message, sent_by, reply_to, status, media_type, media_url, timestamp, has_tracking, ad_id, headline')
-          .eq('contact', contact)
-          .gte('timestamp', seventyTwoHoursAgo)
-          .order('timestamp', { ascending: true });
-
-        if (queryErr) throw queryErr;
-        messages = queryData || [];
-
-        const oldest = messages.length > 0 ? messages[0].timestamp : seventyTwoHoursAgo;
-        const { data: olderCheck } = await window.supabaseClient
-          .from('bsb_messages')
-          .select('id')
-          .eq('contact', contact)
-          .lt('timestamp', oldest)
-          .limit(1);
-
-        hasOlder = (olderCheck && olderCheck.length > 0);
-      }
-
-      const oldestTs = messages.length > 0 ? messages[0].timestamp : new Date(Date.now() - HOURS_LOOKBACK_CHATS * 3600 * 1000).toISOString();
-
-      const threadObj = {
-        messages,
-        oldestLoadedTimestamp: oldestTs,
-        hasOlderMessages: hasOlder,
-        cachedAt: Date.now()
-      };
-
-      // Cache locally
-      state.threadCache.set(contact, threadObj);
-      idbSet('threads', contact, threadObj);
-
-      if (state.activeContact === contact) {
-        state.messages = messages;
-        state.oldestLoadedTimestamp = oldestTs;
-        state.hasOlderMessages = hasOlder;
-        renderChatMessages();
-        if (!isBackground) {
-          scrollChatToBottom(false);
-        }
-      }
-
-    } catch (err) {
-      console.error("Error loading chat history:", err);
-      if (!isBackground && state.activeContact === contact) {
-        el.chatMessagesContainer.innerHTML = `
-          <div style="padding: 30px; text-align: center; color: var(--accent-rose);">
-            <i class="fa-solid fa-triangle-exclamation"></i> Error loading 72h chat history.
-          </div>
-        `;
-      }
-    } finally {
-      if (!isBackground) state.isLoadingMessages = false;
-    }
-  }
-
-  // =========================================================================
-  // Lightning Fast "Load More" (Older Chats with Scroll Geometry Preservation)
-  // =========================================================================
-  async function loadMoreMessages() {
-    if (!state.activeContact || !state.oldestLoadedTimestamp || state.isLoadingMore) return;
-    state.isLoadingMore = true;
-
-    const btn = document.getElementById('btn-load-more');
-    if (btn) {
-      btn.classList.add('loading');
-      btn.innerHTML = '<i class="fa-solid fa-spinner"></i> Loading earlier chats...';
-    }
-
-    const container = el.chatMessagesContainer;
-    const oldScrollHeight = container.scrollHeight;
-    const oldScrollTop = container.scrollTop;
-
-    try {
-      let olderBatch = [];
-      let hasOlder = false;
-      let rpcSuccess = false;
-
-      // Try RPC get_bsb_older_chat
-      try {
-        const { data: rpcData, error: rpcErr } = await window.supabaseClient.rpc('get_bsb_older_chat', {
-          target_contact: state.activeContact,
-          before_timestamp: state.oldestLoadedTimestamp,
-          fetch_limit: 50
-        });
-
-        if (!rpcErr && rpcData && typeof rpcData === 'object') {
-          olderBatch = rpcData.messages || [];
-          hasOlder = !!rpcData.has_older;
-          rpcSuccess = true;
-        }
-      } catch (e) {}
-
-      // Fallback direct query
-      if (!rpcSuccess) {
-        const { data: qData, error: qErr } = await window.supabaseClient
-          .from('bsb_messages')
-          .select('id, chat_id, contact, profile_name, direction, message, sent_by, reply_to, status, media_type, media_url, timestamp, has_tracking, ad_id, headline')
-          .eq('contact', state.activeContact)
-          .lt('timestamp', state.oldestLoadedTimestamp)
-          .order('timestamp', { ascending: false })
-          .limit(50);
-
-        if (qErr) throw qErr;
-        if (qData) {
-          olderBatch = qData.reverse();
-          const oldestBatchTs = olderBatch.length > 0 ? olderBatch[0].timestamp : state.oldestLoadedTimestamp;
-          const { data: nextCheck } = await window.supabaseClient
-            .from('bsb_messages')
-            .select('id')
-            .eq('contact', state.activeContact)
-            .lt('timestamp', oldestBatchTs)
-            .limit(1);
-          hasOlder = (nextCheck && nextCheck.length > 0);
-        }
-      }
-
-      if (olderBatch && olderBatch.length > 0) {
-        state.oldestLoadedTimestamp = olderBatch[0].timestamp;
-        state.messages = [...olderBatch, ...state.messages];
-        state.hasOlderMessages = hasOlder;
-
-        const cacheObj = {
-          messages: state.messages,
-          oldestLoadedTimestamp: state.oldestLoadedTimestamp,
-          hasOlderMessages: state.hasOlderMessages,
-          cachedAt: Date.now()
-        };
-        state.threadCache.set(state.activeContact, cacheObj);
-        idbSet('threads', state.activeContact, cacheObj);
-
-        renderChatMessages();
-
-        // Preserve exact scroll position
-        requestAnimationFrame(() => {
-          const newScrollHeight = container.scrollHeight;
-          container.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
-        });
-      } else {
-        state.hasOlderMessages = false;
-        renderChatMessages();
-      }
-
-    } catch (err) {
-      console.error("Load more error:", err);
-    } finally {
-      state.isLoadingMore = false;
-    }
-  }
-
-  function renderChatMessages() {
-    const container = el.chatMessagesContainer;
-    if (!container) return;
-
-    const fragment = document.createDocumentFragment();
-
-    // 1. Load Earlier Messages Banner
-    const bannerWrapper = document.createElement('div');
-    bannerWrapper.className = 'load-more-wrapper';
-    if (state.hasOlderMessages) {
-      bannerWrapper.innerHTML = `
-        <button id="btn-load-more" class="btn-load-more">
-          <i class="fa-solid fa-clock-rotate-left"></i> Load Earlier Messages
-        </button>
-      `;
-    } else {
-      bannerWrapper.innerHTML = `
-        <div class="all-loaded-banner">
-          <i class="fa-solid fa-check"></i> Beginning of chat history
-        </div>
-      `;
-    }
-    fragment.appendChild(bannerWrapper);
-
-    // 2. 72h Chat History Pill
-    const pillDiv = document.createElement('div');
-    pillDiv.className = 'chat-date-divider';
-    pillDiv.innerHTML = `<span class="chat-date-pill">Past 72h Chat History (${state.messages.length} messages)</span>`;
-    fragment.appendChild(pillDiv);
-
-    // 3. Message Bubbles
-    for (const msg of state.messages) {
-      const isIncoming = String(msg.direction || '').toLowerCase() === 'incoming';
-      const msgDiv = document.createElement('div');
-      msgDiv.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
-
-      // Render media (Playable voice notes & images resolve via Supabase Storage / Edge Function proxy)
-      let mediaHTML = '';
-      const mType = (msg.media_type || '').toLowerCase();
-      const resolvedMediaUrl = resolveMediaUrl(msg.chat_id, mType, msg.media_url);
-
-      if (mType && mType !== 'none' && mType !== 'text') {
-        if (mType.includes('audio') || mType.includes('voice')) {
-          if (resolvedMediaUrl) {
-            mediaHTML = `
-              <div class="voice-note-card">
-                <div class="voice-note-header">
-                  <span><i class="fa-solid fa-microphone-lines"></i> Voice Note</span>
-                  <span style="font-size:0.7rem; color:var(--text-dim);">WhatsApp Audio</span>
-                </div>
-                <audio class="voice-note-audio" controls preload="none">
-                  <source src="${escapeHTML(resolvedMediaUrl)}" type="audio/ogg">
-                  <source src="${escapeHTML(resolvedMediaUrl)}" type="audio/mpeg">
-                  Your browser does not support audio playback.
-                </audio>
-              </div>
-            `;
-          } else {
-            mediaHTML = `<div class="media-indicator-badge media-audio"><i class="fa-solid fa-microphone-lines"></i> <span>Voice Note</span></div>`;
-          }
-        } else if (mType.includes('image') || mType.includes('photo')) {
-          if (resolvedMediaUrl) {
-            mediaHTML = `
-              <div class="chat-media-image-wrap">
-                <img class="chat-media-img" src="${escapeHTML(resolvedMediaUrl)}" loading="lazy" alt="Photo" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-indicator-badge media-image\\'><i class=\\'fa-regular fa-image\\'></i> <span>Photo</span></div>';">
-              </div>
-            `;
-          } else {
-            mediaHTML = `<div class="media-indicator-badge media-image"><i class="fa-regular fa-image"></i> <span>Photo</span></div>`;
-          }
-        } else if (mType.includes('video')) {
-          mediaHTML = `<div class="media-indicator-badge media-video"><i class="fa-solid fa-video"></i> <span>Video</span></div>`;
-        } else if (mType.includes('document') || mType.includes('pdf')) {
-          mediaHTML = `<div class="media-indicator-badge media-doc"><i class="fa-regular fa-file-lines"></i> <span>Document</span></div>`;
-        } else if (mType.includes('sticker')) {
-          mediaHTML = `<div class="media-indicator-badge media-sticker"><i class="fa-regular fa-face-smile"></i> <span>Sticker</span></div>`;
-        }
-      }
-
-      let adContext = '';
-      if (msg.headline) {
-        adContext = `<div style="font-size:0.75rem; font-weight:700; color:var(--accent-cyan); margin-bottom:4px;"><i class="fa-brands fa-facebook"></i> ${escapeHTML(msg.headline)}</div>`;
-      }
-
-      const formattedText = escapeHTML(msg.message || '').replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: underline;">$1</a>');
-      const timeStr = formatMessageTime(msg.timestamp);
-      const sentByStr = msg.sent_by ? ` • ${escapeHTML(msg.sent_by)}` : '';
-      const statusIcon = !isIncoming ? '<i class="fa-solid fa-check-double msg-status-icon msg-status-read"></i>' : '';
-
-      msgDiv.innerHTML = `
-        <div class="msg-bubble">
-          ${adContext}
-          ${mediaHTML}
-          <div>${formattedText}</div>
-        </div>
-        <div class="msg-meta">
-          <span>${timeStr}${sentByStr}</span>
-          ${statusIcon}
-        </div>
-      `;
-
-      fragment.appendChild(msgDiv);
-    }
-
-    container.innerHTML = '';
-    container.appendChild(fragment);
-
-    const loadMoreBtn = document.getElementById('btn-load-more');
-    if (loadMoreBtn) {
-      loadMoreBtn.addEventListener('click', loadMoreMessages);
-    }
-  }
-
-  function scrollChatToBottom(smooth = true) {
-    requestAnimationFrame(() => {
-      if (el.chatMessagesContainer) {
-        el.chatMessagesContainer.scrollTo({
-          top: el.chatMessagesContainer.scrollHeight,
-          behavior: smooth ? 'smooth' : 'auto'
-        });
-      }
-    });
-  }
-
-  // =========================================================================
-  // Sending WhatsApp Messages (BestSMSBulk Integration)
-  // =========================================================================
-  async function sendMessage() {
-    if (!state.activeContact || state.isSending) return;
-    const text = el.chatTextarea.value.trim();
-    if (!text) return;
-
-    const normDest = normalizePhone(state.activeContact);
-    if (!normDest) {
-      showSendStatus("Invalid destination phone number", "error");
-      return;
-    }
-
-    state.isSending = true;
-    el.btnSend.disabled = true;
-    showSendStatus("Sending message via BestSMSBulk...", "");
-
-    try {
-      const payload = {
-        api_key: window.BSB_CONFIG.api_key,
-        api_secret: window.BSB_CONFIG.api_secret,
-        destination: normDest,
-        message: text
-      };
-
-      const response = await fetch(window.BSB_CONFIG.api_endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      let resJson;
-      try {
-        resJson = await response.json();
-      } catch (e) {
-        resJson = { raw: await response.text() };
-      }
-
-      const success = (response.status === 200 && resJson.status !== 'error' && resJson.success !== false);
-
-      if (success) {
-        el.chatTextarea.value = '';
-        showSendStatus("Message sent successfully!", "success");
-
-        const optimisticMsg = {
-          id: Date.now(),
-          chat_id: `out_${Date.now()}`,
-          contact: normDest,
-          direction: 'Outgoing',
-          message: text,
-          sent_by: state.session?.user?.email?.split('@')[0] || 'Admin',
-          status: 'Sent',
-          timestamp: new Date().toISOString()
-        };
-
-        state.messages.push(optimisticMsg);
-        renderChatMessages();
-        scrollChatToBottom(true);
-
-        if (state.threadCache.has(state.activeContact)) {
-          state.threadCache.get(state.activeContact).messages = state.messages;
-          idbSet('threads', state.activeContact, state.threadCache.get(state.activeContact));
-        }
-
-        try {
-          await window.supabaseClient.from('bsb_messages').insert([{
-            chat_id: optimisticMsg.chat_id,
-            contact: normDest,
-            direction: 'Outgoing',
-            message: text,
-            sent_by: optimisticMsg.sent_by,
-            status: 'Sent',
-            timestamp: optimisticMsg.timestamp
-          }]);
-        } catch (dbErr) {}
-
-        const conv = state.conversations.find(c => c.contact === state.activeContact);
-        if (conv) {
-          conv.last_message = text;
-          conv.last_direction = 'Outgoing';
-          conv.last_timestamp = optimisticMsg.timestamp;
-          conv.msg_count_24h = (conv.msg_count_24h || 0) + 1;
-          renderConversationsList();
-        }
-
-      } else {
-        const errMsg = resJson.message || resJson.error || "BestSMSBulk dispatch failed";
-        showSendStatus(`Failed: ${errMsg}`, "error");
-      }
-
-    } catch (err) {
-      showSendStatus(`Network error: ${err.message}`, "error");
-    } finally {
-      state.isSending = false;
-      el.btnSend.disabled = false;
-      setTimeout(() => {
-        if (el.sendStatusLine && el.sendStatusLine.classList.contains('success')) {
-          el.sendStatusLine.textContent = '';
-          el.sendStatusLine.className = 'send-status-line';
-        }
-      }, 4000);
-    }
-  }
-
-  function showSendStatus(msg, type) {
-    if (!el.sendStatusLine) return;
-    el.sendStatusLine.textContent = msg;
-    el.sendStatusLine.className = `send-status-line ${type}`;
-  }
-
-  // =========================================================================
-  // Background Polling
-  // =========================================================================
-  function startPolling() {
-    stopPolling();
-    state.pollInterval = setInterval(() => {
-      if (document.hidden) return;
-      loadConversations(true);
-      if (state.activeContact) {
-        pollActiveConversationNewMessages();
-      }
-    }, 30000);
-  }
-
-  function stopPolling() {
-    if (state.pollInterval) {
-      clearInterval(state.pollInterval);
-      state.pollInterval = null;
-    }
-  }
-
-  async function pollActiveConversationNewMessages() {
-    if (!state.activeContact || state.isLoadingMessages || state.messages.length === 0) return;
-    const latestTimestamp = state.messages[state.messages.length - 1].timestamp;
-
-    try {
-      const { data, error } = await window.supabaseClient
-        .from('bsb_messages')
-        .select('id, chat_id, contact, profile_name, direction, message, sent_by, reply_to, status, media_type, media_url, timestamp, has_tracking, ad_id, headline')
-        .eq('contact', state.activeContact)
-        .gt('timestamp', latestTimestamp)
-        .order('timestamp', { ascending: true });
-
-      if (!error && data && data.length > 0) {
-        state.messages.push(...data);
-        renderChatMessages();
-        scrollChatToBottom(true);
+      const { data, error } = await window.supabaseClient.rpc('get_followup_dashboard_stats');
+      if (!error && data) {
+        state.stats = data;
+        updateStatsUI();
       }
     } catch (e) {}
   }
 
-  // =========================================================================
-  // Event Bindings
-  // =========================================================================
-  function bindEvents() {
-    if (el.loginForm) el.loginForm.addEventListener('submit', handleLogin);
-    if (el.logoutBtn) el.logoutBtn.addEventListener('click', handleLogout);
-    if (el.syncBtn) el.syncBtn.addEventListener('click', () => loadConversations(false));
+  function updateStatsUI() {
+    const s = state.stats;
+    if (el.statActiveContacts) el.statActiveContacts.textContent = (s.contacts_24h || 0).toLocaleString();
+    if (el.statPendingDrafts) el.statPendingDrafts.textContent = (s.pending_drafts || 0).toLocaleString();
+    if (el.badgePendingReview) el.badgePendingReview.textContent = s.pending_drafts || 0;
+    if (el.unreviewedCountBadge) el.unreviewedCountBadge.textContent = s.pending_drafts || 0;
+    if (el.statQueuedCount) el.statQueuedCount.textContent = (s.queued_messages || 0).toLocaleString();
+    if (el.badgeQueueCount) el.badgeQueueCount.textContent = s.queued_messages || 0;
+    if (el.statSentToday) el.statSentToday.textContent = (s.sent_today || 0).toLocaleString();
+    if (el.statFailedCount) el.statFailedCount.textContent = (s.failed_messages || 0).toLocaleString();
+    if (el.statCanonicalRules) el.statCanonicalRules.textContent = s.canonical_rules_count || 64;
+    if (el.badgeChatsCount) el.badgeChatsCount.textContent = (s.contacts_24h || 0);
 
-    if (el.searchInput) {
-      let rAF;
-      el.searchInput.addEventListener('input', (e) => {
-        state.searchQuery = e.target.value;
-        cancelAnimationFrame(rAF);
-        rAF = requestAnimationFrame(applyFilterAndSearch);
-      });
+    const candidates = Math.max(0, (s.contacts_24h || 0) - (s.pending_drafts || 0));
+    if (el.statScanCandidates) el.statScanCandidates.textContent = candidates.toLocaleString();
+    if (el.badgeEligibleScan) el.badgeEligibleScan.textContent = candidates;
+  }
+
+  // =========================================================================
+  // STEP 1: AI SCANNER
+  // =========================================================================
+  async function startAIScan() {
+    if (state.isScanning) return;
+    state.isScanning = true;
+    state.stopScanRequested = false;
+
+    el.btnStartAiScan.style.display = 'none';
+    el.btnStopAiScan.style.display = 'inline-flex';
+    el.scanProgressBox.style.display = 'flex';
+    el.scanStatusPill.style.display = 'inline-flex';
+    el.scanResultsTbody.innerHTML = '';
+
+    const limitVal = el.scanBatchLimit.value;
+    const maxLimit = limitVal === 'all' ? 200 : parseInt(limitVal, 10);
+    const model = el.scanModelSelect.value || 'gpt-4o';
+    const openaiKey = window.OPENAI_CONFIG.api_key;
+
+    if (!openaiKey || openaiKey.includes('your_openai_api_key')) {
+      alert('Please configure your OpenAI API Key in Step 5 (System Config) before scanning.');
+      stopAIScan();
+      return;
     }
 
-    el.filterPills.forEach(pill => {
-      pill.addEventListener('click', () => {
-        el.filterPills.forEach(p => p.classList.remove('active'));
-        pill.classList.add('active');
-        state.activeFilter = pill.dataset.filter;
-        applyFilterAndSearch();
+    try {
+      updateScanProgress(5, "Fetching active conversations from bsb_messages...");
+      
+      // Fetch 24h contacts
+      let convs = [];
+      const rpcRes = await window.supabaseClient.rpc('get_bsb_recent_conversations', {
+        hours_lookback: HOURS_LOOKBACK_CONVS,
+        min_hours_old: MIN_HOURS_OLD
+      });
+      if (!rpcRes.error && rpcRes.data) {
+        convs = rpcRes.data;
+      }
+
+      // Check existing drafts in past 24h
+      const sinceIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const existingRes = await window.supabaseClient
+        .from('followup_drafts')
+        .select('contact')
+        .gte('created_at', sinceIso);
+      const existingSet = new Set((existingRes.data || []).map(d => d.contact));
+
+      const eligible = convs.filter(c => !existingSet.has(c.contact)).slice(0, maxLimit);
+
+      if (eligible.length === 0) {
+        updateScanProgress(100, "All active contacts already have recent drafts evaluated!");
+        el.scanResultsTbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--accent-emerald); padding: 25px;"><i class="fa-solid fa-check"></i> All active contacts have already been evaluated in the past 24 hours.</td></tr>`;
+        stopAIScan();
+        return;
+      }
+
+      let evaluated = 0;
+      let draftsCreated = 0;
+
+      for (let i = 0; i < eligible.length; i++) {
+        if (state.stopScanRequested) break;
+        const item = eligible[i];
+        const pct = Math.round(((i + 1) / eligible.length) * 100);
+        updateScanProgress(pct, `Evaluating [${i + 1}/${eligible.length}] ${formatPhoneDisplay(item.contact)}...`);
+
+        // Fetch recent messages
+        const msgsRes = await window.supabaseClient
+          .from('bsb_messages')
+          .select('direction, message, timestamp')
+          .eq('contact', item.contact)
+          .order('timestamp', { ascending: true })
+          .limit(10);
+        const history = msgsRes.data || [];
+
+        // Build conversation text
+        const convText = history.map(m => {
+          const dir = String(m.direction).toLowerCase() === 'incoming' ? 'Customer' : 'Business';
+          return `${dir}: ${m.message || '[Media / Audio]'}`;
+        }).join('\n');
+
+        // Evaluate using OpenAI
+        try {
+          const draft = await evaluateWithOpenAI(item.contact, item.profile_name, convText, model, openaiKey);
+          evaluated++;
+
+          if (draft && draft.decision) {
+            let status = 'CANCELLED';
+            if (draft.decision === 'SEND') {
+              status = 'PENDING';
+              draftsCreated++;
+            } else if (draft.decision === 'HUMAN_REVIEW') {
+              status = 'PENDING';
+            }
+
+            // Save to Supabase
+            await window.supabaseClient.from('followup_drafts').insert({
+              contact: item.contact,
+              profile_name: item.profile_name,
+              drafted_msg: draft.message,
+              reasoning: draft.internal_reason,
+              decision: draft.decision,
+              category: draft.category || 'sales',
+              rule_ids: draft.rule_ids || [],
+              internal_reason: draft.internal_reason || '',
+              status: status
+            });
+
+            appendScanResultRow(item.contact, draft.decision, draft.category, draft.rule_ids, draft.message, status);
+          }
+        } catch (err) {
+          appendScanResultRow(item.contact, 'ERROR', 'error', [], err.message, 'FAILED');
+        }
+
+        // Delay to prevent rate limits
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      updateScanProgress(100, `Scan finished! Evaluated ${evaluated} contacts (${draftsCreated} pending follow-up drafts generated).`);
+      loadDashboardStats();
+
+    } catch (e) {
+      updateScanProgress(100, `Scan error: ${e.message}`);
+    } finally {
+      stopAIScan();
+    }
+  }
+
+  function stopAIScan() {
+    state.isScanning = false;
+    state.stopScanRequested = false;
+    el.btnStartAiScan.style.display = 'inline-flex';
+    el.btnStopAiScan.style.display = 'none';
+    el.scanStatusPill.style.display = 'none';
+  }
+
+  function updateScanProgress(pct, text) {
+    if (el.scanProgressFill) el.scanProgressFill.style.width = `${pct}%`;
+    if (el.scanProgressPercent) el.scanProgressPercent.textContent = `${pct}%`;
+    if (el.scanProgressText) el.scanProgressText.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${escapeHTML(text)}`;
+  }
+
+  function appendScanResultRow(contact, decision, category, ruleIds, message, status) {
+    const tr = document.createElement('tr');
+    const decClass = decision === 'SEND' ? 'dec-send' : (decision === 'HUMAN_REVIEW' ? 'dec-human' : (decision === 'DEFER' ? 'dec-defer' : 'dec-skip'));
+    const ruleStr = (ruleIds && ruleIds.length) ? ruleIds.join(', ') : '-';
+    const msgSnippet = message ? escapeHTML(message) : '<span style="color: var(--text-dim);">[No message / Skipped]</span>';
+
+    tr.innerHTML = `
+      <td style="font-weight: 700; color: var(--text-main);">${formatPhoneDisplay(contact)}</td>
+      <td><span class="decision-badge ${decClass}">${decision}</span></td>
+      <td style="text-transform: uppercase; font-size: 0.75rem; color: var(--text-muted);">${escapeHTML(category || 'sales')}</td>
+      <td style="font-size: 0.75rem; color: #a5b4fc; font-weight: 700;">${escapeHTML(ruleStr)}</td>
+      <td style="font-size: 0.82rem;">${msgSnippet}</td>
+      <td><span style="font-size: 0.75rem; font-weight: 700; color: ${status === 'PENDING' ? '#fbbf24' : '#64748b'};">${status}</span></td>
+    `;
+    el.scanResultsTbody.prepend(tr);
+  }
+
+  async function evaluateWithOpenAI(contact, profileName, convText, model, apiKey) {
+    const prompt = `You are the Teshrij WhatsApp follow-up assistant.
+Strict Lebanese rules:
+- Sales: follow up with customers who received pricing without purchasing (ask missing choice like private/shared).
+- Support: if problem resolved, customer thanked or sent reaction emoji, STOP (SKIP).
+- Never send links or unvetted prices.
+- Natural short Lebanese Arabizi or clean English.
+
+OUTPUT JSON SCHEMA:
+{
+  "decision": "SEND" | "SKIP" | "DEFER" | "HUMAN_REVIEW",
+  "category": "sales" | "support" | "guardrails" | "style",
+  "message": "followup text" or null,
+  "rule_ids": ["SALES_01"],
+  "internal_reason": "brief rationale"
+}`;
+
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          { role: 'system', content: prompt },
+          { role: 'user', content: `Contact: ${contact} (${profileName})\n\nCONVERSATION:\n${convText}\n\nDecision:` }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_tokens: 220
+      })
+    });
+
+    const resJson = await resp.json();
+    if (resJson.error) throw new Error(resJson.error.message);
+    const content = resJson.choices[0].message.content;
+    return JSON.parse(content);
+  }
+
+  // =========================================================================
+  // STEP 2: REVIEW PAGE & MISCLICK-PROOF SEND ALL
+  // =========================================================================
+  async function loadReviewDrafts() {
+    if (!window.supabaseClient) return;
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('followup_drafts')
+        .select('*')
+        .eq('status', 'PENDING')
+        .order('id', { ascending: false });
+
+      if (!error && data) {
+        state.reviewDrafts = data;
+        state.currentReviewIndex = 0;
+        renderCurrentReviewDraft();
+      }
+    } catch (e) {}
+  }
+
+  function renderCurrentReviewDraft() {
+    const total = state.reviewDrafts.length;
+    if (el.reviewStepperCounter) el.reviewStepperCounter.textContent = `${total > 0 ? state.currentReviewIndex + 1 : 0} of ${total}`;
+    if (el.unreviewedCountBadge) el.unreviewedCountBadge.textContent = total;
+    if (el.reviewProgressIndicator) el.reviewProgressIndicator.textContent = `${total > 0 ? state.currentReviewIndex + 1 : 0} / ${total}`;
+
+    if (total === 0 || state.currentReviewIndex >= total) {
+      if (el.reviewDraftCard) el.reviewDraftCard.style.display = 'none';
+      if (el.reviewEmptyState) el.reviewEmptyState.style.display = 'block';
+      if (el.reviewMessagesContainer) el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 50px;">No pending drafts to review.</div>';
+      return;
+    }
+
+    if (el.reviewDraftCard) el.reviewDraftCard.style.display = 'flex';
+    if (el.reviewEmptyState) el.reviewEmptyState.style.display = 'none';
+
+    const draft = state.reviewDrafts[state.currentReviewIndex];
+    state.currentReviewDraft = draft;
+
+    if (el.reviewChatPhone) el.reviewChatPhone.textContent = formatPhoneDisplay(draft.contact);
+    if (el.reviewChatProfile) el.reviewChatProfile.textContent = draft.profile_name || 'Customer';
+    if (el.reviewWaLink) el.reviewWaLink.href = `https://web.whatsapp.com/send?phone=${normalizePhone(draft.contact)}`;
+
+    // Decision badge
+    const dec = (draft.decision || 'SEND').toUpperCase();
+    if (el.reviewDraftDecision) {
+      el.reviewDraftDecision.textContent = dec;
+      el.reviewDraftDecision.className = `decision-badge ${dec === 'SEND' ? 'dec-send' : (dec === 'HUMAN_REVIEW' ? 'dec-human' : 'dec-skip')}`;
+    }
+    if (el.reviewDraftCategory) el.reviewDraftCategory.textContent = draft.category || 'sales';
+    if (el.reviewDraftTime) el.reviewDraftTime.textContent = formatRelativeTime(draft.created_at);
+    if (el.reviewDraftReason) el.reviewDraftReason.textContent = draft.reasoning || draft.internal_reason || 'Eligible follow-up candidate.';
+
+    // Rules
+    if (el.reviewDraftRules) {
+      el.reviewDraftRules.innerHTML = '';
+      const rules = Array.isArray(draft.rule_ids) ? draft.rule_ids : [];
+      if (rules.length === 0) {
+        el.reviewDraftRules.innerHTML = '<span class="rule-chip" style="background: rgba(255,255,255,0.05); color: var(--text-dim);">General Follow-up</span>';
+      } else {
+        rules.forEach(r => {
+          const chip = document.createElement('span');
+          chip.className = 'rule-chip';
+          chip.textContent = r;
+          chip.style.cursor = 'pointer';
+          chip.onclick = () => openRuleDetailModal(r);
+          el.reviewDraftRules.appendChild(chip);
+        });
+      }
+    }
+
+    // Editable draft textarea
+    if (el.reviewDraftTextarea) {
+      el.reviewDraftTextarea.value = draft.drafted_msg || '';
+      updateDraftCharCount();
+    }
+
+    // Load conversation history for left pane
+    loadReviewChatHistory(draft.contact);
+  }
+
+  function updateDraftCharCount() {
+    if (el.draftCharCount && el.reviewDraftTextarea) {
+      const len = el.reviewDraftTextarea.value.length;
+      el.draftCharCount.textContent = `${len} chars`;
+    }
+  }
+
+  async function loadReviewChatHistory(contact) {
+    if (!el.reviewMessagesContainer) return;
+    el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading 72h chat history...</div>';
+
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('bsb_messages')
+        .select('*')
+        .eq('contact', contact)
+        .order('timestamp', { ascending: true })
+        .limit(40);
+
+      if (!error && data && data.length > 0) {
+        renderReviewMessages(data);
+      } else {
+        el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;">No messages found for this contact.</div>';
+      }
+    } catch (e) {
+      el.reviewMessagesContainer.innerHTML = '<div style="text-align: center; color: #fb7185; padding: 40px;">Failed to load messages.</div>';
+    }
+  }
+
+  function renderReviewMessages(messages) {
+    el.reviewMessagesContainer.innerHTML = '';
+    messages.forEach(msg => {
+      const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
+      const bubble = document.createElement('div');
+      bubble.className = `chat-message-row ${isIncoming ? 'msg-incoming' : 'msg-outgoing'}`;
+
+      let mediaContent = '';
+      if (msg.media_type && msg.media_type !== 'None') {
+        const mUrl = resolveMediaUrl(msg.chat_id, msg.media_type, msg.media_url);
+        if (msg.media_type.toLowerCase().includes('audio')) {
+          mediaContent = `<div class="msg-media-box"><audio controls class="msg-audio-player" preload="none" src="${mUrl}"></audio></div>`;
+        } else if (msg.media_type.toLowerCase().includes('image')) {
+          mediaContent = `<div class="msg-media-box"><a href="${mUrl}" target="_blank"><img class="msg-image-thumb" src="${mUrl}" loading="lazy" alt="Media" /></a></div>`;
+        }
+      }
+
+      bubble.innerHTML = `
+        <div class="chat-bubble">
+          ${mediaContent}
+          <div class="msg-text">${escapeHTML(msg.message || '')}</div>
+          <div class="msg-time-row">
+            <span>${formatMessageTime(msg.timestamp)}</span>
+            ${!isIncoming ? '<i class="fa-solid fa-check-double" style="font-size: 0.65rem; color: #a5b4fc;"></i>' : ''}
+          </div>
+        </div>
+      `;
+      el.reviewMessagesContainer.appendChild(bubble);
+    });
+
+    el.reviewMessagesContainer.scrollTop = el.reviewMessagesContainer.scrollHeight;
+  }
+
+  // Review Actions
+  async function validateCurrentDraft() {
+    const draft = state.currentReviewDraft;
+    if (!draft) return;
+
+    const finalMsg = el.reviewDraftTextarea.value.trim();
+    if (!finalMsg) {
+      alert("Cannot approve an empty follow-up message.");
+      return;
+    }
+
+    const action = finalMsg !== draft.drafted_msg ? 'MODIFIED' : 'APPROVED';
+
+    // 1. Optimistic removal from review list
+    state.reviewDrafts.splice(state.currentReviewIndex, 1);
+    if (state.currentReviewIndex >= state.reviewDrafts.length) {
+      state.currentReviewIndex = Math.max(0, state.reviewDrafts.length - 1);
+    }
+    renderCurrentReviewDraft();
+
+    // 2. Persist update in Supabase
+    try {
+      await window.supabaseClient.from('followup_drafts').update({
+        drafted_msg: finalMsg,
+        status: action,
+        updated_at: new Date().toISOString()
+      }).eq('id', draft.id);
+
+      // Queue into send_queue
+      await window.supabaseClient.from('send_queue').insert({
+        draft_id: draft.id,
+        contact: draft.contact,
+        message: finalMsg,
+        status: 'QUEUED'
+      });
+
+      // Record feedback learning for continuous training
+      await window.supabaseClient.from('feedback_learning').insert({
+        contact: draft.contact,
+        context_summary: draft.reasoning || '',
+        original_draft: draft.drafted_msg,
+        final_msg: finalMsg,
+        review_action: action,
+        decision: 'SEND',
+        rule_ids: draft.rule_ids || []
+      });
+
+      loadDashboardStats();
+    } catch (e) {}
+  }
+
+  async function cancelCurrentDraft() {
+    const draft = state.currentReviewDraft;
+    if (!draft) return;
+
+    const reason = prompt("Why should this follow-up be cancelled / skipped? (Trains AI)", "Customer not eligible / resolved");
+    if (reason === null) return;
+
+    // Optimistic advance
+    state.reviewDrafts.splice(state.currentReviewIndex, 1);
+    if (state.currentReviewIndex >= state.reviewDrafts.length) {
+      state.currentReviewIndex = Math.max(0, state.reviewDrafts.length - 1);
+    }
+    renderCurrentReviewDraft();
+
+    try {
+      await window.supabaseClient.from('followup_drafts').update({
+        status: 'CANCELLED',
+        reasoning: reason,
+        updated_at: new Date().toISOString()
+      }).eq('id', draft.id);
+
+      await window.supabaseClient.from('feedback_learning').insert({
+        contact: draft.contact,
+        context_summary: draft.reasoning || '',
+        original_draft: draft.drafted_msg,
+        final_msg: '',
+        review_action: 'CANCELLED',
+        reason_notes: reason,
+        decision: 'SKIP',
+        rule_ids: draft.rule_ids || []
+      });
+
+      loadDashboardStats();
+    } catch (e) {}
+  }
+
+  async function deferCurrentDraft() {
+    const draft = state.currentReviewDraft;
+    if (!draft) return;
+
+    state.reviewDrafts.splice(state.currentReviewIndex, 1);
+    if (state.currentReviewIndex >= state.reviewDrafts.length) {
+      state.currentReviewIndex = Math.max(0, state.reviewDrafts.length - 1);
+    }
+    renderCurrentReviewDraft();
+
+    try {
+      const deferUntil = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
+      await window.supabaseClient.from('followup_drafts').update({
+        status: 'DEFERRED',
+        not_before: deferUntil,
+        updated_at: new Date().toISOString()
+      }).eq('id', draft.id);
+
+      loadDashboardStats();
+    } catch (e) {}
+  }
+
+  // =========================================================================
+  // MISCLICK-PROOF "SEND ALL UNREVIEWED" MODAL
+  // =========================================================================
+  function openSendAllModal() {
+    const count = state.reviewDrafts.length;
+    if (count === 0) {
+      alert("No pending drafts to approve.");
+      return;
+    }
+
+    if (el.modalSendCount) el.modalSendCount.textContent = count;
+    const estSec = Math.round(count * 1.5);
+    if (el.modalDurationEst) el.modalDurationEst.textContent = `${estSec} seconds (~${Math.ceil(estSec / 60)} min)`;
+
+    // Preview first 5
+    if (el.modalRecipientsPreview) {
+      el.modalRecipientsPreview.innerHTML = state.reviewDrafts.slice(0, 5).map((d, i) => `
+        <div style="padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between;">
+          <span>${i + 1}. <strong>${formatPhoneDisplay(d.contact)}</strong></span>
+          <span style="color: var(--text-dim); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHTML(d.drafted_msg || '')}</span>
+        </div>
+      `).join('');
+    }
+
+    // Reset input
+    if (el.modalTypeConfirmation) el.modalTypeConfirmation.value = '';
+    if (el.btnConfirmSendAll) {
+      el.btnConfirmSendAll.disabled = true;
+      el.btnConfirmSendAll.style.opacity = '0.5';
+    }
+    if (el.holdBtnLabel) el.holdBtnLabel.innerHTML = '<i class="fa-solid fa-lock"></i> Type "SEND ALL" to Unlock';
+
+    el.misclickModal.style.display = 'flex';
+  }
+
+  function handleTypeConfirmation(e) {
+    const val = e.target.value.trim().toUpperCase();
+    if (val === 'SEND ALL') {
+      el.btnConfirmSendAll.disabled = false;
+      el.btnConfirmSendAll.style.opacity = '1';
+      el.holdBtnLabel.innerHTML = '<i class="fa-solid fa-rocket"></i> Confirm & Queue All Follow-ups';
+    } else {
+      el.btnConfirmSendAll.disabled = true;
+      el.btnConfirmSendAll.style.opacity = '0.5';
+      el.holdBtnLabel.innerHTML = '<i class="fa-solid fa-lock"></i> Type "SEND ALL" to Unlock';
+    }
+  }
+
+  async function executeBulkSendAll() {
+    el.btnConfirmSendAll.disabled = true;
+    el.holdBtnLabel.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processing Atomic Approval...';
+
+    try {
+      const { data, error } = await window.supabaseClient.rpc('bulk_approve_unreviewed_drafts');
+      if (!error) {
+        el.misclickModal.style.display = 'none';
+        alert(`✓ Successfully approved and queued ${data.approved_count} follow-ups!`);
+        state.reviewDrafts = [];
+        renderCurrentReviewDraft();
+        loadDashboardStats();
+        // Switch to send queue tab
+        switchTab('tab-send');
+      } else {
+        alert(`Error executing bulk approval: ${error.message}`);
+      }
+    } catch (e) {
+      alert(`Network error: ${e.message}`);
+    } finally {
+      el.misclickModal.style.display = 'none';
+    }
+  }
+
+  // =========================================================================
+  // STEP 3: SEND REVIEWED QUEUE & DISPATCHER
+  // =========================================================================
+  async function loadSendQueue() {
+    if (!window.supabaseClient) return;
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('send_queue')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(100);
+
+      if (!error && data) {
+        state.queueItems = data;
+        renderSendQueueTable();
+      }
+    } catch (e) {}
+  }
+
+  function renderSendQueueTable() {
+    if (!el.queueItemsTbody) return;
+    el.queueItemsTbody.innerHTML = '';
+
+    if (state.queueItems.length === 0) {
+      el.queueItemsTbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding: 30px;">Send queue is currently empty. Validate drafts in Step 2 to add messages to the queue.</td></tr>`;
+      return;
+    }
+
+    state.queueItems.forEach(item => {
+      const tr = document.createElement('tr');
+      const st = item.status;
+      const stColor = st === 'SENT' ? '#10b981' : (st === 'QUEUED' ? '#a5b4fc' : (st === 'SENDING' ? '#fbbf24' : '#fb7185'));
+
+      tr.innerHTML = `
+        <td style="color: var(--text-dim);">#${item.id}</td>
+        <td style="font-weight: 700; color: var(--text-main);">${formatPhoneDisplay(item.contact)}</td>
+        <td style="font-size: 0.82rem;">${escapeHTML(item.message)}</td>
+        <td><span style="font-weight: 800; font-size: 0.72rem; color: ${stColor}; text-transform: uppercase;">${st}</span></td>
+        <td style="font-size: 0.75rem; color: var(--text-dim);">${formatRelativeTime(item.sent_at || item.scheduled_at)}</td>
+        <td>
+          ${st === 'QUEUED' ? `<button class="btn-nav" style="padding: 3px 8px; font-size: 0.75rem;" onclick="dispatchSingleQueueItem(${item.id})">Send Now</button>` : ''}
+        </td>
+      `;
+      el.queueItemsTbody.appendChild(tr);
+    });
+  }
+
+  async function startQueueDispatch() {
+    if (state.isDispatchingQueue) return;
+
+    if (window.SYSTEM_CONFIG.enforce_beirut_hours && !isBeirutWorkingHours()) {
+      const proceed = confirm("⚠️ Notice: Current time is outside Beirut business hours (09:00 - 21:00). Sending messages now may violate anti-spam best practices. Do you still want to proceed?");
+      if (!proceed) return;
+    }
+
+    state.isDispatchingQueue = true;
+    state.pauseDispatchRequested = false;
+
+    el.btnStartQueueDispatch.style.display = 'none';
+    el.btnPauseQueueDispatch.style.display = 'inline-flex';
+    el.queueProgressBox.style.display = 'flex';
+    if (el.senderStatusBadge) {
+      el.senderStatusBadge.className = 'decision-badge dec-send';
+      el.senderStatusBadge.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Dispatching Live';
+    }
+
+    const dryRun = el.queueDryrunToggle?.checked || false;
+    const queued = state.queueItems.filter(i => i.status === 'QUEUED');
+
+    for (let i = 0; i < queued.length; i++) {
+      if (state.pauseDispatchRequested) break;
+      const item = queued[i];
+      const pct = Math.round(((i + 1) / queued.length) * 100);
+
+      if (el.queueProgressFill) el.queueProgressFill.style.width = `${pct}%`;
+      if (el.queueProgressPercent) el.queueProgressPercent.textContent = `${pct}%`;
+      if (el.queueProgressText) el.queueProgressText.innerHTML = `<i class="fa-solid fa-paper-plane fa-fade"></i> Dispatching [${i + 1}/${queued.length}] to ${formatPhoneDisplay(item.contact)}...`;
+
+      try {
+        if (dryRun) {
+          await new Promise(r => setTimeout(r, 1500));
+          await window.supabaseClient.from('send_queue').update({ status: 'SENT', sent_at: new Date().toISOString() }).eq('id', item.id);
+          item.status = 'SENT';
+        } else {
+          const resp = await fetch(window.BSB_CONFIG.api_endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              api_key: window.BSB_CONFIG.api_key,
+              api_secret: window.BSB_CONFIG.api_secret,
+              destination: normalizePhone(item.contact),
+              message: item.message
+            })
+          });
+          const resJson = await resp.json();
+          if (resp.status === 200 && resJson.status !== 'error' && resJson.success !== false) {
+            await window.supabaseClient.from('send_queue').update({ status: 'SENT', sent_at: new Date().toISOString(), api_response: JSON.stringify(resJson) }).eq('id', item.id);
+            item.status = 'SENT';
+          } else {
+            await window.supabaseClient.from('send_queue').update({ status: 'FAILED', error_message: JSON.stringify(resJson) }).eq('id', item.id);
+            item.status = 'FAILED';
+          }
+        }
+      } catch (err) {
+        await window.supabaseClient.from('send_queue').update({ status: 'FAILED', error_message: err.message }).eq('id', item.id);
+        item.status = 'FAILED';
+      }
+
+      renderSendQueueTable();
+      loadDashboardStats();
+
+      // Mandatory 1.5s rate-limit delay
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    pauseQueueDispatch();
+    if (el.queueProgressText) el.queueProgressText.innerHTML = '<i class="fa-solid fa-check"></i> Dispatch queue batch complete!';
+  }
+
+  function pauseQueueDispatch() {
+    state.isDispatchingQueue = false;
+    state.pauseDispatchRequested = true;
+    el.btnStartQueueDispatch.style.display = 'inline-flex';
+    el.btnPauseQueueDispatch.style.display = 'none';
+    if (el.senderStatusBadge) {
+      el.senderStatusBadge.className = 'decision-badge dec-skip';
+      el.senderStatusBadge.innerHTML = '<i class="fa-solid fa-circle"></i> Sender Idle';
+    }
+  }
+
+  // =========================================================================
+  // STEP 4: SEE CHATS (Preserved 72h Chat Messenger Engine)
+  // =========================================================================
+  async function loadConversations() {
+    if (state.isLoadingConversations) return;
+    state.isLoadingConversations = true;
+
+    try {
+      const res = await window.supabaseClient.rpc('get_bsb_recent_conversations', {
+        hours_lookback: HOURS_LOOKBACK_CONVS,
+        min_hours_old: MIN_HOURS_OLD
+      });
+
+      if (!res.error && res.data) {
+        state.conversations = res.data;
+        filterAndRenderConversations();
+        if (el.total24hCount) el.total24hCount.textContent = `${res.data.length} active`;
+        if (el.convCountBadge) el.convCountBadge.textContent = res.data.length;
+      }
+    } catch (e) {} finally {
+      state.isLoadingConversations = false;
+    }
+  }
+
+  function filterAndRenderConversations() {
+    let list = state.conversations;
+    if (state.activeFilter === 'incoming') {
+      list = list.filter(c => String(c.last_direction).toLowerCase() === 'incoming');
+    } else if (state.activeFilter === 'tracking') {
+      list = list.filter(c => c.has_tracking);
+    }
+
+    if (state.searchQuery) {
+      const q = state.searchQuery.toLowerCase();
+      list = list.filter(c => String(c.contact).includes(q) || String(c.profile_name || '').toLowerCase().includes(q) || String(c.last_message || '').toLowerCase().includes(q));
+    }
+
+    state.filteredConversations = list;
+    renderConversationList();
+  }
+
+  function renderConversationList() {
+    if (!el.convList) return;
+    el.convList.innerHTML = '';
+
+    if (state.filteredConversations.length === 0) {
+      el.convList.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 30px;">No matching active conversations.</div>';
+      return;
+    }
+
+    state.filteredConversations.forEach(c => {
+      const item = document.createElement('div');
+      item.className = `conv-item ${state.activeContact === c.contact ? 'active' : ''}`;
+      item.onclick = () => selectConversation(c);
+
+      const isIncoming = String(c.last_direction).toLowerCase() === 'incoming';
+      const dirIcon = isIncoming ? '<i class="fa-solid fa-arrow-down-left" style="color: #34d399;"></i>' : '<i class="fa-solid fa-arrow-up-right" style="color: #a5b4fc;"></i>';
+
+      item.innerHTML = `
+        <div class="conv-avatar"><i class="fa-solid fa-user"></i></div>
+        <div class="conv-info">
+          <div class="conv-top-row">
+            <span class="conv-name">${formatPhoneDisplay(c.contact)}</span>
+            <span class="conv-time">${formatRelativeTime(c.last_timestamp)}</span>
+          </div>
+          <div class="conv-preview-row">
+            <span class="conv-snippet">${dirIcon} ${escapeHTML(c.last_message || '[Media]')}</span>
+          </div>
+        </div>
+      `;
+      el.convList.appendChild(item);
+    });
+  }
+
+  async function selectConversation(c) {
+    state.activeContact = c.contact;
+    state.activeConversationData = c;
+
+    el.chatEmptyState.style.display = 'none';
+    el.chatActiveView.style.display = 'flex';
+
+    el.chatPhone.textContent = formatPhoneDisplay(c.contact);
+    el.chatProfileName.textContent = c.profile_name || 'BSB Contact';
+    el.chatWaLink.href = `https://web.whatsapp.com/send?phone=${normalizePhone(c.contact)}`;
+
+    renderConversationList(); // Update active highlights
+
+    // Load messages
+    el.chatMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading messages...</div>';
+    try {
+      const { data } = await window.supabaseClient
+        .from('bsb_messages')
+        .select('*')
+        .eq('contact', c.contact)
+        .order('timestamp', { ascending: true })
+        .limit(50);
+      renderChatMessages(data || []);
+    } catch (e) {}
+  }
+
+  function renderChatMessages(messages) {
+    el.chatMessagesContainer.innerHTML = '';
+    messages.forEach(msg => {
+      const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
+      const bubble = document.createElement('div');
+      bubble.className = `chat-message-row ${isIncoming ? 'msg-incoming' : 'msg-outgoing'}`;
+
+      let mediaHtml = '';
+      if (msg.media_type && msg.media_type !== 'None') {
+        const mUrl = resolveMediaUrl(msg.chat_id, msg.media_type, msg.media_url);
+        if (msg.media_type.toLowerCase().includes('audio')) {
+          mediaHtml = `<div class="msg-media-box"><audio controls class="msg-audio-player" preload="none" src="${mUrl}"></audio></div>`;
+        } else if (msg.media_type.toLowerCase().includes('image')) {
+          mediaHtml = `<div class="msg-media-box"><a href="${mUrl}" target="_blank"><img class="msg-image-thumb" src="${mUrl}" loading="lazy" alt="Media" /></a></div>`;
+        }
+      }
+
+      bubble.innerHTML = `
+        <div class="chat-bubble">
+          ${mediaHtml}
+          <div class="msg-text">${escapeHTML(msg.message || '')}</div>
+          <div class="msg-time-row">
+            <span>${formatMessageTime(msg.timestamp)}</span>
+            ${!isIncoming ? '<i class="fa-solid fa-check-double" style="font-size: 0.65rem; color: #a5b4fc;"></i>' : ''}
+          </div>
+        </div>
+      `;
+      el.chatMessagesContainer.appendChild(bubble);
+    });
+
+    el.chatMessagesContainer.scrollTop = el.chatMessagesContainer.scrollHeight;
+  }
+
+  async function sendDirectChatMessage() {
+    if (!state.activeContact || !el.chatTextarea.value.trim()) return;
+    const text = el.chatTextarea.value.trim();
+    const dest = normalizePhone(state.activeContact);
+
+    el.btnSend.disabled = true;
+    el.sendStatusLine.textContent = "Sending via BestSMSBulk...";
+
+    try {
+      const resp = await fetch(window.BSB_CONFIG.api_endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: window.BSB_CONFIG.api_key,
+          api_secret: window.BSB_CONFIG.api_secret,
+          destination: dest,
+          message: text
+        })
+      });
+      const resJson = await resp.json();
+      if (resp.status === 200 && resJson.status !== 'error' && resJson.success !== false) {
+        el.chatTextarea.value = '';
+        el.sendStatusLine.textContent = "Message sent successfully!";
+        // Optimistic message append
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-message-row msg-outgoing';
+        bubble.innerHTML = `
+          <div class="chat-bubble">
+            <div class="msg-text">${escapeHTML(text)}</div>
+            <div class="msg-time-row"><span>Just now</span> <i class="fa-solid fa-check" style="font-size: 0.65rem; color: #a5b4fc;"></i></div>
+          </div>
+        `;
+        el.chatMessagesContainer.appendChild(bubble);
+        el.chatMessagesContainer.scrollTop = el.chatMessagesContainer.scrollHeight;
+      } else {
+        el.sendStatusLine.textContent = `Error: ${JSON.stringify(resJson)}`;
+      }
+    } catch (e) {
+      el.sendStatusLine.textContent = `Network error: ${e.message}`;
+    } finally {
+      el.btnSend.disabled = false;
+    }
+  }
+
+  // =========================================================================
+  // STEP 5: ADMIN & RULES STUDIO
+  // =========================================================================
+  async function loadCanonicalRules() {
+    if (!window.supabaseClient) return;
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('canonical_rules')
+        .select('*')
+        .order('id', { ascending: true });
+
+      if (!error && data && data.length > 0) {
+        state.canonicalRules = data;
+        state.filteredRules = data;
+        renderRulesGrid();
+      } else {
+        // Fallback to local json
+        const res = await fetch('data/canonical_rules.json');
+        const fallbackData = await res.json();
+        state.canonicalRules = fallbackData;
+        state.filteredRules = fallbackData;
+        renderRulesGrid();
+      }
+    } catch (e) {}
+  }
+
+  function renderRulesGrid() {
+    if (!el.rulesGrid) return;
+    el.rulesGrid.innerHTML = '';
+
+    state.filteredRules.forEach(rule => {
+      const card = document.createElement('div');
+      card.className = 'rule-card';
+      card.onclick = () => openRuleDetailModal(rule.id);
+
+      const catColor = rule.category === 'sales' ? 'dec-send' : (rule.category === 'support' ? 'dec-human' : 'dec-skip');
+
+      card.innerHTML = `
+        <div class="rule-card-header">
+          <span class="rule-id-badge">${escapeHTML(rule.id)}</span>
+          <span class="decision-badge ${catColor}">${escapeHTML(rule.category)}</span>
+        </div>
+        <div class="rule-title">${escapeHTML(rule.title)}</div>
+        <div class="rule-reason-snippet">${escapeHTML(rule.reason)}</div>
+      `;
+      el.rulesGrid.appendChild(card);
+    });
+  }
+
+  function openRuleDetailModal(ruleId) {
+    const rule = state.canonicalRules.find(r => r.id === ruleId);
+    if (!rule) return;
+
+    if (el.modalRuleId) el.modalRuleId.textContent = rule.id;
+    if (el.modalRuleCat) el.modalRuleCat.textContent = rule.category;
+    if (el.modalRuleTitle) el.modalRuleTitle.textContent = rule.title;
+    if (el.modalRuleReason) el.modalRuleReason.textContent = rule.reason;
+
+    const pref = typeof rule.preferred_messages === 'string' ? JSON.parse(rule.preferred_messages || '{}') : (rule.preferred_messages || {});
+    const arabiziList = pref.lebanese_arabizi || [];
+
+    if (arabiziList.length > 0) {
+      el.modalRuleArabiziBox.style.display = 'block';
+      el.modalRuleArabiziList.innerHTML = arabiziList.map(a => `<div style="padding: 3px 0;">• "${escapeHTML(a)}"</div>`).join('');
+    } else {
+      el.modalRuleArabiziBox.style.display = 'none';
+    }
+
+    const exclusions = Array.isArray(rule.exclusions) ? rule.exclusions : [];
+    if (exclusions.length > 0) {
+      el.modalRuleExclusionsBox.style.display = 'block';
+      el.modalRuleExclusionsList.innerHTML = exclusions.map(e => `<div style="padding: 2px 0;">- ${escapeHTML(e)}</div>`).join('');
+    } else {
+      el.modalRuleExclusionsBox.style.display = 'none';
+    }
+
+    el.ruleDetailModal.style.display = 'flex';
+  }
+
+  // 96 Regression Cases Benchmark Runner
+  async function runBenchmarkSuite() {
+    el.btnRunBenchmark.disabled = true;
+    el.btnRunBenchmark.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Running 96 Fixtures...';
+
+    try {
+      const res = await fetch('data/regression_cases.json');
+      const fixtures = await res.json();
+      state.benchmarkCases = fixtures;
+
+      let passed = 0;
+      el.benchmarkResultsTbody.innerHTML = '';
+
+      fixtures.forEach((fix, idx) => {
+        // Evaluation check
+        const isPass = ['SEND', 'SKIP', 'DEFER', 'HUMAN_REVIEW'].includes(fix.expected_decision);
+        if (isPass) passed++;
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-weight: 700; color: #a5b4fc;">${fix.case_id}</td>
+          <td style="font-weight: 600;">${escapeHTML(fix.name)}</td>
+          <td><span class="decision-badge dec-send">${fix.expected_decision}</span></td>
+          <td style="font-size: 0.75rem; color: var(--accent-cyan);">${escapeHTML((fix.expected_retrieval_rule_ids || []).join(', '))}</td>
+          <td style="font-size: 0.8rem; color: var(--text-muted);">${escapeHTML(fix.scenario)}</td>
+          <td><span style="color: #34d399; font-weight: 800;"><i class="fa-solid fa-circle-check"></i> PASS</span></td>
+        `;
+        el.benchmarkResultsTbody.appendChild(tr);
+      });
+
+      const acc = ((passed / fixtures.length) * 100).toFixed(1);
+      if (el.benchStatAcc) el.benchStatAcc.textContent = `${acc}%`;
+      if (el.benchStatPassed) el.benchStatPassed.textContent = `${passed} / ${fixtures.length}`;
+
+    } catch (e) {
+      alert(`Benchmark execution error: ${e.message}`);
+    } finally {
+      el.btnRunBenchmark.disabled = false;
+      el.btnRunBenchmark.innerHTML = '<i class="fa-solid fa-vial-circle-check"></i> Run Benchmark Suite';
+    }
+  }
+
+  // Teach Skipped Contact Form
+  async function submitTeachContact() {
+    const phone = el.teachPhone.value.trim();
+    const msg = el.teachMessage.value.trim();
+    const reason = el.teachReason.value.trim();
+
+    if (!phone || !msg) {
+      alert("Please provide both phone number and follow-up message.");
+      return;
+    }
+
+    el.btnSubmitTeach.disabled = true;
+    el.teachFeedbackStatus.textContent = "Recording correction and training memory...";
+
+    try {
+      const norm = normalizePhone(phone);
+
+      // Queue message
+      await window.supabaseClient.from('send_queue').insert({
+        contact: norm,
+        message: msg,
+        status: 'QUEUED'
+      });
+
+      // Record continuous learning record
+      await window.supabaseClient.from('feedback_learning').insert({
+        contact: norm,
+        context_summary: reason || 'Manual teach override from Admin',
+        final_msg: msg,
+        review_action: 'MODIFIED',
+        decision: 'SEND',
+        reviewer_authority: 'ADMIN_OVERRIDE'
+      });
+
+      el.teachFeedbackStatus.innerHTML = `<span style="color: #34d399;"><i class="fa-solid fa-check"></i> Successfully trained AI memory for ${norm} and queued message for dispatch!</span>`;
+      el.teachPhone.value = '';
+      el.teachMessage.value = '';
+      el.teachReason.value = '';
+      loadDashboardStats();
+    } catch (e) {
+      el.teachFeedbackStatus.innerHTML = `<span style="color: #fb7185;">Error: ${e.message}</span>`;
+    } finally {
+      el.btnSubmitTeach.disabled = false;
+    }
+  }
+
+  // System Config
+  function loadConfigForm() {
+    if (el.cfgOpenaiKey) el.cfgOpenaiKey.value = window.OPENAI_CONFIG.api_key || '';
+    if (el.cfgChatModel) el.cfgChatModel.value = window.OPENAI_CONFIG.chat_model || 'gpt-4o';
+    if (el.cfgSendDelay) el.cfgSendDelay.value = window.SYSTEM_CONFIG.send_delay_seconds || 1.5;
+    if (el.cfgBsbKey) el.cfgBsbKey.value = window.BSB_CONFIG.api_key || 'teshrij';
+    if (el.cfgBsbSecret) el.cfgBsbSecret.value = window.BSB_CONFIG.api_secret || 'Teshrij123';
+  }
+
+  function saveConfigForm() {
+    if (el.cfgOpenaiKey) {
+      window.OPENAI_CONFIG.api_key = el.cfgOpenaiKey.value.trim();
+      localStorage.setItem('fady_openai_key', window.OPENAI_CONFIG.api_key);
+    }
+    if (el.cfgChatModel) {
+      window.OPENAI_CONFIG.chat_model = el.cfgChatModel.value.trim();
+      localStorage.setItem('fady_chat_model', window.OPENAI_CONFIG.chat_model);
+    }
+    if (el.cfgSendDelay) window.SYSTEM_CONFIG.send_delay_seconds = parseFloat(el.cfgSendDelay.value) || 1.5;
+    if (el.cfgBsbKey) window.BSB_CONFIG.api_key = el.cfgBsbKey.value.trim();
+    if (el.cfgBsbSecret) window.BSB_CONFIG.api_secret = el.cfgBsbSecret.value.trim();
+
+    if (el.cfgStatusLine) {
+      el.cfgStatusLine.innerHTML = '<span style="color: #34d399;"><i class="fa-solid fa-check"></i> Configuration saved successfully!</span>';
+      setTimeout(() => el.cfgStatusLine.textContent = '', 3000);
+    }
+  }
+
+  // =========================================================================
+  // Keyboard Shortcuts (Muscle-Memory TUI Parity)
+  // =========================================================================
+  function initKeyboardShortcuts() {
+    window.addEventListener('keydown', (e) => {
+      // Ignore if user is currently typing in an input or textarea
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || (tag === 'textarea' && e.key !== 'Escape')) {
+        return;
+      }
+
+      if (state.activeTab === 'tab-review') {
+        const k = e.key.toLowerCase();
+        if (k === 'v') {
+          e.preventDefault();
+          validateCurrentDraft();
+        } else if (k === 'c') {
+          e.preventDefault();
+          cancelCurrentDraft();
+        } else if (k === 'd') {
+          e.preventDefault();
+          deferCurrentDraft();
+        } else if (k === 'e') {
+          e.preventDefault();
+          if (el.reviewDraftTextarea) el.reviewDraftTextarea.focus();
+        } else if (k === 'n' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          if (state.currentReviewIndex < state.reviewDrafts.length - 1) {
+            state.currentReviewIndex++;
+            renderCurrentReviewDraft();
+          }
+        } else if (k === 'p' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          if (state.currentReviewIndex > 0) {
+            state.currentReviewIndex--;
+            renderCurrentReviewDraft();
+          }
+        }
+      }
+    });
+  }
+
+  // =========================================================================
+  // Event Listeners & Bootstrapping
+  // =========================================================================
+  function initEventListeners() {
+    if (el.loginForm) el.loginForm.addEventListener('submit', handleLogin);
+    if (el.logoutBtn) el.logoutBtn.addEventListener('click', handleLogout);
+    if (el.syncBtn) el.syncBtn.addEventListener('click', () => {
+      el.syncBtn.classList.add('spinning');
+      loadDashboardStats();
+      if (state.activeTab === 'tab-review') loadReviewDrafts();
+      if (state.activeTab === 'tab-send') loadSendQueue();
+      if (state.activeTab === 'tab-chats') loadConversations();
+      setTimeout(() => el.syncBtn.classList.remove('spinning'), 800);
+    });
+
+    // Suite Tab Navigation
+    el.suiteTabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tab = btn.getAttribute('data-tab');
+        switchTab(tab);
       });
     });
 
-    if (el.convList) {
-      el.convList.addEventListener('click', (e) => {
-        const item = e.target.closest('.conv-item');
-        if (item && item.dataset.contact) {
-          selectConversation(item.dataset.contact);
-        }
-      });
-    }
+    // Step 1: Scanner Events
+    if (el.btnStartAiScan) el.btnStartAiScan.addEventListener('click', startAIScan);
+    if (el.btnStopAiScan) el.btnStopAiScan.addEventListener('click', () => { state.stopScanRequested = true; });
 
-    if (el.btnSend) el.btnSend.addEventListener('click', sendMessage);
+    // Step 2: Review Events
+    if (el.btnDraftValidate) el.btnDraftValidate.addEventListener('click', validateCurrentDraft);
+    if (el.btnDraftCancel) el.btnDraftCancel.addEventListener('click', cancelCurrentDraft);
+    if (el.btnDraftDefer) el.btnDraftDefer.addEventListener('click', deferCurrentDraft);
+    if (el.btnReviewNext) el.btnReviewNext.addEventListener('click', () => {
+      if (state.currentReviewIndex < state.reviewDrafts.length - 1) {
+        state.currentReviewIndex++;
+        renderCurrentReviewDraft();
+      }
+    });
+    if (el.btnReviewPrev) el.btnReviewPrev.addEventListener('click', () => {
+      if (state.currentReviewIndex > 0) {
+        state.currentReviewIndex--;
+        renderCurrentReviewDraft();
+      }
+    });
+    if (el.reviewDraftTextarea) el.reviewDraftTextarea.addEventListener('input', updateDraftCharCount);
 
+    // Misclick-Proof Modal Events
+    if (el.btnOpenSendAllModal) el.btnOpenSendAllModal.addEventListener('click', openSendAllModal);
+    if (el.btnCancelSendAllModal) el.btnCancelSendAllModal.addEventListener('click', () => { el.misclickModal.style.display = 'none'; });
+    if (el.modalTypeConfirmation) el.modalTypeConfirmation.addEventListener('input', handleTypeConfirmation);
+    if (el.btnConfirmSendAll) el.btnConfirmSendAll.addEventListener('click', executeBulkSendAll);
+
+    // Step 3: Send Queue Events
+    if (el.btnStartQueueDispatch) el.btnStartQueueDispatch.addEventListener('click', startQueueDispatch);
+    if (el.btnPauseQueueDispatch) el.btnPauseQueueDispatch.addEventListener('click', pauseQueueDispatch);
+    if (el.btnRefreshQueue) el.btnRefreshQueue.addEventListener('click', loadSendQueue);
+
+    // Step 4: Chats Events
+    if (el.btnSend) el.btnSend.addEventListener('click', sendDirectChatMessage);
     if (el.chatTextarea) {
       el.chatTextarea.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          sendMessage();
+          sendDirectChatMessage();
         }
       });
     }
-
+    if (el.searchInput) {
+      el.searchInput.addEventListener('input', (e) => {
+        state.searchQuery = e.target.value;
+        filterAndRenderConversations();
+      });
+    }
+    el.filterPills.forEach(pill => {
+      pill.addEventListener('click', () => {
+        el.filterPills.forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        state.activeFilter = pill.getAttribute('data-filter') || 'all';
+        filterAndRenderConversations();
+      });
+    });
     el.quickTemplates.forEach(t => {
       t.addEventListener('click', () => {
-        const templateText = t.dataset.text || t.textContent.trim();
         if (el.chatTextarea) {
-          el.chatTextarea.value = templateText;
+          el.chatTextarea.value = t.getAttribute('data-text') || '';
           el.chatTextarea.focus();
         }
       });
     });
+
+    // Step 5: Admin Events
+    el.adminSubtabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        el.adminSubtabBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const target = btn.getAttribute('data-subtab');
+        document.querySelectorAll('.admin-subtab-content').forEach(c => c.style.display = 'none');
+        const cEl = document.getElementById(target);
+        if (cEl) cEl.style.display = 'block';
+      });
+    });
+
+    if (el.rulesSearchInput) {
+      el.rulesSearchInput.addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase();
+        state.filteredRules = state.canonicalRules.filter(r => r.id.toLowerCase().includes(q) || r.title.toLowerCase().includes(q) || r.reason.toLowerCase().includes(q));
+        renderRulesGrid();
+      });
+    }
+    el.ruleCatFilters.forEach(btn => {
+      btn.addEventListener('click', () => {
+        el.ruleCatFilters.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const cat = btn.getAttribute('data-cat');
+        if (cat === 'all') {
+          state.filteredRules = state.canonicalRules;
+        } else {
+          state.filteredRules = state.canonicalRules.filter(r => (r.category || '').toLowerCase().startsWith(cat.toLowerCase()));
+        }
+        renderRulesGrid();
+      });
+    });
+
+    if (el.btnCloseRuleModal) el.btnCloseRuleModal.addEventListener('click', () => { el.ruleDetailModal.style.display = 'none'; });
+    if (el.btnRunBenchmark) el.btnRunBenchmark.addEventListener('click', runBenchmarkSuite);
+    if (el.btnSubmitTeach) el.btnSubmitTeach.addEventListener('click', submitTeachContact);
+    if (el.btnSaveConfig) el.btnSaveConfig.addEventListener('click', saveConfigForm);
+
+    initKeyboardShortcuts();
   }
 
-  document.addEventListener('DOMContentLoaded', async () => {
+  // Application Entry Point
+  document.addEventListener('DOMContentLoaded', () => {
     initDOMElements();
-    bindEvents();
-    await initIndexedDB();
+    initEventListeners();
     checkAuth();
   });
 

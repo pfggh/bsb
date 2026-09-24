@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BSB 72h Messenger (≥2h old) - Teshrij</title>
+  <title>Teshrij Follow-up Suite - BSB WhatsApp Automation</title>
   <link rel="icon" type="image/png" href="img/logo.png" />
 
   <!-- Google Fonts: Inter -->
@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20260924_1" />
+  <link rel="stylesheet" href="css/style.css?v=20260924_suite_v1" />
 
   <!-- Supabase JS Client v2 (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -28,8 +28,8 @@
   <div id="login-view" class="login-page">
     <div class="login-container">
       <img src="img/logo.png" alt="Teshrij Logo" class="login-logo" />
-      <h1 class="login-title">BSB Messenger</h1>
-      <p class="login-subtitle">Sign in to access 72h customer chats (≥2h old)</p>
+      <h1 class="login-title">Follow-up Suite</h1>
+      <p class="login-subtitle">Sign in to access AI Follow-up & BSB Messenger</p>
       
       <form id="login-form" class="login-form">
         <div class="input-group">
@@ -49,25 +49,51 @@
   </div>
 
   <!-- ======================================================================
-       2. MAIN APPLICATION VIEW (Super Duper Fast 72h Messenger Dashboard)
+       2. MAIN APPLICATION VIEW (5-Step Follow-up Suite Dashboard)
        ====================================================================== -->
   <div id="app-view" class="app-layout" style="display: none;">
     
-    <!-- Top Navbar -->
+    <!-- Top Navbar with 5 Suite Navigation Steps -->
     <header class="top-navbar">
       <div class="brand-section">
         <img src="img/logo.png" alt="Teshrij" class="brand-logo-small" />
         <span class="brand-title">
-          Teshrij BSB
-          <span class="badge-24h">24h (≥2h old)</span>
-          <span id="cache-indicator" class="cache-badge" style="display: none;">
-            <i class="fa-solid fa-bolt"></i> Instant Cache
-          </span>
+          Teshrij Follow-up
+          <span class="badge-24h">v2.0</span>
         </span>
       </div>
 
+      <!-- 5-Step Suite Navigation Tabs -->
+      <nav class="suite-nav-tabs">
+        <button class="suite-tab-btn active" data-tab="tab-scan" id="tab-btn-scan">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span>1. AI Scan</span>
+          <span id="badge-eligible-scan" class="nav-pill">0</span>
+        </button>
+        <button class="suite-tab-btn" data-tab="tab-review" id="tab-btn-review">
+          <i class="fa-solid fa-list-check"></i>
+          <span>2. Review</span>
+          <span id="badge-pending-review" class="nav-pill pill-warning">0</span>
+        </button>
+        <button class="suite-tab-btn" data-tab="tab-send" id="tab-btn-send">
+          <i class="fa-solid fa-paper-plane"></i>
+          <span>3. Send Queue</span>
+          <span id="badge-queue-count" class="nav-pill pill-primary">0</span>
+        </button>
+        <button class="suite-tab-btn" data-tab="tab-chats" id="tab-btn-chats">
+          <i class="fa-solid fa-comments"></i>
+          <span>4. See Chats</span>
+          <span id="badge-chats-count" class="nav-pill">0</span>
+        </button>
+        <button class="suite-tab-btn" data-tab="tab-admin" id="tab-btn-admin">
+          <i class="fa-solid fa-sliders"></i>
+          <span>5. Admin & Rules</span>
+        </button>
+      </nav>
+
+      <!-- Nav Actions -->
       <div class="nav-actions">
-        <button id="sync-btn" class="btn-nav btn-sync" title="Sync live messages">
+        <button id="sync-btn" class="btn-nav btn-sync" title="Sync live stats & messages">
           <i class="fa-solid fa-rotate"></i>
           <span>Sync</span>
         </button>
@@ -86,113 +112,702 @@
       </div>
     </header>
 
-    <!-- Main Split Layout -->
-    <div class="main-split">
-      
-      <!-- Left Sidebar: Conversations List -->
-      <aside class="conv-sidebar">
-        <div class="sidebar-header">
-          <div class="sidebar-title-row">
-            <span class="sidebar-title">
-              <i class="fa-brands fa-whatsapp" style="color: #25d366;"></i>
-              24h Active Numbers (≥2h old)
-              <span id="conv-count-badge" class="counter-badge">0</span>
-            </span>
-            <span id="total-24h-count" style="font-size: 0.75rem; color: var(--text-dim); font-weight: 600;">0 active</span>
+    <!-- Master Suite Content Wrapper -->
+    <div class="suite-content-wrapper">
+
+      <!-- ==================================================================
+           STEP 1: RUN AI SCAN VIEW
+           ================================================================== -->
+      <section id="view-scan" class="suite-view active">
+        <div class="suite-view-container">
+          <div class="suite-view-header">
+            <div class="suite-title-group">
+              <h2><i class="fa-solid fa-wand-magic-sparkles" style="color: #a855f7;"></i> Step 1: AI Follow-up Scanner</h2>
+              <p>Scans active conversations (past 24h, ≥2h old) from <code>bsb_messages</code>, evaluates against 64 canonical rules via pgvector, and synthesizes structured JSON follow-up drafts.</p>
+            </div>
+            <div class="suite-header-actions">
+              <span id="scan-status-pill" class="decision-badge dec-send" style="display: none;">
+                <i class="fa-solid fa-circle-notch fa-spin"></i> Scanning Active
+              </span>
+            </div>
           </div>
 
-          <!-- Instant Search -->
-          <div class="search-wrapper">
-            <i class="fa-solid fa-magnifying-glass"></i>
-            <input type="text" id="search-input" class="search-input" placeholder="Instant search phone, name, message..." />
+          <!-- Summary Metric Cards -->
+          <div class="metrics-row">
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-users"></i> 24h Active Contacts</span>
+              <span id="stat-active-contacts" class="metric-value val-emerald">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-bullseye"></i> Unscanned Candidates</span>
+              <span id="stat-scan-candidates" class="metric-value val-indigo">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-hourglass-half"></i> Pending Review</span>
+              <span id="stat-pending-drafts" class="metric-value val-amber">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-book-bookmark"></i> Canonical Rules Active</span>
+              <span id="stat-canonical-rules" class="metric-value">64</span>
+            </div>
           </div>
 
-          <!-- Filter Pills -->
-          <div class="filter-pills">
-            <button class="pill-btn active" data-filter="all">All</button>
-            <button class="pill-btn" data-filter="incoming">Incoming</button>
-            <button class="pill-btn" data-filter="tracking">Meta Ads</button>
+          <!-- Scanner Controls Bar -->
+          <div class="controls-bar">
+            <div class="controls-left">
+              <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Scan Batch Limit:</label>
+              <select id="scan-batch-limit" class="select-styled">
+                <option value="10">10 Contacts</option>
+                <option value="25" selected>25 Contacts</option>
+                <option value="50">50 Contacts</option>
+                <option value="100">100 Contacts</option>
+                <option value="all">All Eligible Contacts</option>
+              </select>
+
+              <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-left: 10px;">Model:</label>
+              <select id="scan-model-select" class="select-styled">
+                <option value="gpt-4o" selected>GPT-4o (Accurate + Lebanese Arabizi)</option>
+                <option value="gpt-4o-mini">GPT-4o-mini (Faster)</option>
+              </select>
+            </div>
+
+            <div class="controls-right">
+              <button id="btn-start-ai-scan" class="btn-primary-glow">
+                <i class="fa-solid fa-play"></i> Start AI Scan
+              </button>
+              <button id="btn-stop-ai-scan" class="btn-nav" style="display: none; color: #fb7185; border-color: rgba(244, 63, 94, 0.4);">
+                <i class="fa-solid fa-stop"></i> Stop Scan
+              </button>
+            </div>
           </div>
+
+          <!-- Live Scan Progress Box -->
+          <div id="scan-progress-box" class="progress-box" style="display: none;">
+            <div class="progress-header">
+              <span id="scan-progress-text"><i class="fa-solid fa-spinner fa-spin"></i> Initializing scan...</span>
+              <span id="scan-progress-percent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="scan-progress-fill" class="progress-fill"></div>
+            </div>
+          </div>
+
+          <!-- Live Scan Results Feed Table -->
+          <div class="suite-table-wrapper">
+            <table class="suite-table">
+              <thead>
+                <tr>
+                  <th style="width: 140px;">Contact</th>
+                  <th style="width: 110px;">Decision</th>
+                  <th style="width: 120px;">Category</th>
+                  <th style="width: 130px;">Rule Matched</th>
+                  <th>Proposed Follow-up Message</th>
+                  <th style="width: 120px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="scan-results-tbody">
+                <tr>
+                  <td colspan="6" style="text-align: center; color: var(--text-dim); padding: 30px;">
+                    No scan run in this session. Click <strong>Start AI Scan</strong> to evaluate pending conversations.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
         </div>
+      </section>
 
-        <!-- Scrollable Fast Conversations List -->
-        <div id="conv-list" class="conv-list">
-          <!-- Populated by JavaScript -->
-        </div>
-      </aside>
-
-      <!-- Right Panel: Conversation View -->
-      <main class="chat-panel">
-        
-        <!-- Empty State (No conversation selected) -->
-        <div id="chat-empty-state" class="chat-empty-state">
-          <div class="chat-empty-icon">
-            <i class="fa-solid fa-comments"></i>
-          </div>
-          <h3 style="font-weight: 700; color: var(--text-main); font-size: 1.15rem;">Select a BSB Conversation</h3>
-          <p style="max-width: 350px; font-size: 0.85rem;">Showing WhatsApp customer contacts who messaged in past 24h, whose latest message is at least 2h old (ideal follow-up window). Loads full 72h of chat history.</p>
-        </div>
-
-        <!-- Active Conversation View -->
-        <div id="chat-active-view" style="display: none; flex-direction: column; height: 100%; width: 100%;">
+      <!-- ==================================================================
+           STEP 2: REVIEW PAGE VIEW (Split Screen with Misclick-Proof Send All)
+           ================================================================== -->
+      <section id="view-review" class="suite-view">
+        <div class="review-split">
           
-          <!-- Chat Header -->
-          <div class="chat-header">
-            <div class="chat-header-user">
-              <div class="conv-avatar" style="width: 38px; height: 38px; font-size: 0.9rem;">
-                <i class="fa-solid fa-user"></i>
-              </div>
-              <div class="chat-header-info">
-                <h2 id="chat-phone">Phone Number</h2>
-                <div class="chat-header-sub">
-                  <span id="chat-profile-name">BSB Contact</span>
-                  <div id="chat-ad-banner" class="meta-ad-banner" style="display: none;"></div>
+          <!-- Left: Customer Conversation History (72h full depth) -->
+          <div class="review-chat-pane">
+            <div class="chat-header">
+              <div class="chat-header-user">
+                <div class="conv-avatar" style="width: 36px; height: 36px; font-size: 0.85rem;">
+                  <i class="fa-solid fa-user"></i>
+                </div>
+                <div class="chat-header-info">
+                  <h2 id="review-chat-phone">+961 Contact</h2>
+                  <div class="chat-header-sub">
+                    <span id="review-chat-profile">Customer</span>
+                    <span id="review-window-badge" class="badge-24h" style="margin-left: 8px;">24h Window</span>
+                  </div>
                 </div>
               </div>
+              <div class="chat-header-actions">
+                <a id="review-wa-link" href="#" target="_blank" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
+                  <i class="fa-brands fa-whatsapp"></i> WhatsApp Web
+                </a>
+              </div>
             </div>
 
-            <div class="chat-header-actions">
-              <a id="chat-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
-                <i class="fa-brands fa-whatsapp"></i> WhatsApp Web
-              </a>
+            <!-- Messages list -->
+            <div id="review-messages-container" class="chat-messages-container">
+              <!-- Rendered dynamically -->
             </div>
           </div>
 
-          <!-- Chat Messages Container -->
-          <div id="chat-messages-container" class="chat-messages-container">
-            <!-- Messages rendered dynamically -->
-          </div>
+          <!-- Right: Follow-up Draft Evaluation & Review Action Desk -->
+          <div class="review-draft-pane">
+            
+            <!-- Review Top Stepper & Send All Bar -->
+            <div class="draft-meta-header">
+              <div>
+                <span style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Review Queue</span>
+                <div id="review-stepper-counter" style="font-size: 1.1rem; font-weight: 800; color: var(--text-main);">0 of 0</div>
+              </div>
 
-          <!-- Chat Input Bar (Direct Sender from sender.py) -->
-          <div class="chat-input-bar">
-            <!-- Quick Canned Response Pills -->
-            <div class="quick-templates-row">
-              <button class="template-pill" data-text="Hello! How can we help you today?">Hello!</button>
-              <button class="template-pill" data-text="Whish payment, instant activation.">Whish Info</button>
-              <button class="template-pill" data-text="1 month: 4$ | 3 months: 10$ | 6 months: 15$ | 1 year: 21$">Netflix Price</button>
-              <button class="template-pill" data-text="ChatGPT+ Shared Account: 3 months: $15 | 6 months: $25 | 1 year: $45">ChatGPT Price</button>
-              <button class="template-pill" data-text="Anghami Plus: 1 month: 3$ | 3 months: 7.5$ | 1 year: 15$">Anghami Price</button>
-            </div>
-
-            <div class="input-row">
-              <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="Type a message via BestSMSBulk... (Enter to send, Shift+Enter for newline)"></textarea>
-              <button id="btn-send" class="btn-send" title="Send WhatsApp Message">
-                <i class="fa-solid fa-paper-plane"></i>
+              <!-- MISCLICK-PROOF "SEND ALL UNREVIEWED" BUTTON -->
+              <button id="btn-open-send-all-modal" class="btn-danger-secure" title="Approve and send all pending unreviewed follow-ups with safety confirmation">
+                <i class="fa-solid fa-shield-halved"></i>
+                <span>Send All Unreviewed (<span id="unreviewed-count-badge">0</span>)</span>
               </button>
             </div>
 
-            <div id="send-status-line" class="send-status-line"></div>
+            <!-- Draft Card -->
+            <div id="review-draft-card" class="draft-card">
+              <div class="draft-meta-header">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span id="review-draft-decision" class="decision-badge dec-send">SEND</span>
+                  <span id="review-draft-category" style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase;">sales</span>
+                </div>
+                <span id="review-draft-time" style="font-size: 0.72rem; color: var(--text-dim);">Drafted today</span>
+              </div>
+
+              <!-- Matched Rules Tags -->
+              <div>
+                <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; font-weight: 700;">Matched Rules:</span>
+                <div id="review-draft-rules" class="draft-rules-list" style="margin-top: 4px;">
+                  <span class="rule-chip">SALES_01: Prices Sent</span>
+                </div>
+              </div>
+
+              <!-- AI Rationale -->
+              <div style="background: rgba(0, 0, 0, 0.25); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                <span style="font-size: 0.72rem; color: var(--accent-cyan); font-weight: 700; text-transform: uppercase; display: flex; align-items: center; gap: 5px;">
+                  <i class="fa-solid fa-brain"></i> AI Reasoning:
+                </span>
+                <p id="review-draft-reason" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; line-height: 1.4;">
+                  Customer received prices 4 hours ago and has not confirmed order.
+                </p>
+              </div>
+
+              <!-- Editable Follow-up Message -->
+              <div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; font-weight: 700;">Proposed WhatsApp Message:</span>
+                  <span id="draft-char-count" style="font-size: 0.7rem; color: var(--text-dim);">0 chars</span>
+                </div>
+                <textarea id="review-draft-textarea" class="draft-textarea-styled" placeholder="Follow-up message to send..."></textarea>
+              </div>
+
+              <!-- Action Buttons Bar -->
+              <div class="review-action-grid">
+                <button id="btn-draft-validate" class="btn-review-action btn-act-validate" title="Validate and queue message for sending (Key: V)">
+                  <i class="fa-solid fa-check-double"></i> Validate & Queue [V]
+                </button>
+                <button id="btn-draft-defer" class="btn-review-action btn-act-defer" title="Defer contact for 4 hours (Key: D)">
+                  <i class="fa-solid fa-clock"></i> Defer 4h [D]
+                </button>
+                <button id="btn-draft-cancel" class="btn-review-action btn-act-cancel" title="Cancel follow-up and record negative feedback (Key: C)">
+                  <i class="fa-solid fa-xmark"></i> Cancel / Skip [C]
+                </button>
+              </div>
+
+              <!-- Stepper Navigation -->
+              <div class="review-nav-bar">
+                <button id="btn-review-prev" class="btn-nav" style="padding: 6px 12px;" title="Previous Draft (Key: P or Left Arrow)">
+                  <i class="fa-solid fa-chevron-left"></i> Previous [P]
+                </button>
+                <span id="review-progress-indicator" style="font-weight: 700; color: var(--text-muted);">0 / 0</span>
+                <button id="btn-review-next" class="btn-nav" style="padding: 6px 12px;" title="Next Draft (Key: N or Right Arrow)">
+                  Next [N] <i class="fa-solid fa-chevron-right"></i>
+                </button>
+              </div>
+
+              <!-- Keyboard Hints -->
+              <div class="key-hints-bar">
+                <span><kbd class="key-kbd">V</kbd> Approve</span>
+                <span><kbd class="key-kbd">E</kbd> Edit</span>
+                <span><kbd class="key-kbd">C</kbd> Cancel</span>
+                <span><kbd class="key-kbd">D</kbd> Defer</span>
+                <span><kbd class="key-kbd">N</kbd>/<kbd class="key-kbd">P</kbd> Nav</span>
+              </div>
+
+            </div>
+
+            <!-- Empty review state -->
+            <div id="review-empty-state" class="chat-empty-state" style="display: none; padding: 40px 20px;">
+              <i class="fa-solid fa-circle-check" style="font-size: 2.5rem; color: #10b981; margin-bottom: 15px;"></i>
+              <h3 style="font-size: 1.1rem; font-weight: 700;">All Drafts Reviewed!</h3>
+              <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 6px;">There are no more pending follow-up drafts in the queue. Run Step 1 to generate more drafts or proceed to Step 3 to dispatch reviewed messages.</p>
+            </div>
+
           </div>
 
         </div>
+      </section>
 
-      </main>
+      <!-- ==================================================================
+           STEP 3: SEND REVIEWED QUEUE VIEW
+           ================================================================== -->
+      <section id="view-send" class="suite-view">
+        <div class="suite-view-container">
+          <div class="suite-view-header">
+            <div class="suite-title-group">
+              <h2><i class="fa-solid fa-paper-plane" style="color: #6366f1;"></i> Step 3: Send Queue & Dispatcher</h2>
+              <p>Dispatches approved follow-ups via BestSMSBulk WhatsApp API with a mandatory <strong>1.5s delay</strong> and <strong>9 AM – 9 PM Beirut active hours</strong> protection.</p>
+            </div>
+            <div class="suite-header-actions">
+              <span id="sender-status-badge" class="decision-badge dec-skip">
+                <i class="fa-solid fa-circle"></i> Sender Idle
+              </span>
+            </div>
+          </div>
+
+          <!-- Queue Metrics Row -->
+          <div class="metrics-row">
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-inbox"></i> Queued for Dispatch</span>
+              <span id="stat-queued-count" class="metric-value val-indigo">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-check"></i> Sent Successfully Today</span>
+              <span id="stat-sent-today" class="metric-value val-emerald">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-triangle-exclamation"></i> Failed Dispatches</span>
+              <span id="stat-failed-count" class="metric-value val-rose">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label"><i class="fa-solid fa-stopwatch"></i> Throttle Delay</span>
+              <span class="metric-value">1.5s</span>
+            </div>
+          </div>
+
+          <!-- Queue Controls Bar -->
+          <div class="controls-bar">
+            <div class="controls-left">
+              <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer;">
+                <input type="checkbox" id="queue-dryrun-toggle" style="width: auto; margin: 0;" />
+                <span>Dry-Run Mode (Simulate without sending)</span>
+              </label>
+            </div>
+
+            <div class="controls-right">
+              <button id="btn-start-queue-dispatch" class="btn-success-glow">
+                <i class="fa-solid fa-play"></i> Start Sending Queue
+              </button>
+              <button id="btn-pause-queue-dispatch" class="btn-nav" style="display: none; color: #fbbf24; border-color: rgba(245, 158, 11, 0.4);">
+                <i class="fa-solid fa-pause"></i> Pause Sending
+              </button>
+              <button id="btn-refresh-queue" class="btn-nav">
+                <i class="fa-solid fa-arrows-rotate"></i> Refresh
+              </button>
+            </div>
+          </div>
+
+          <!-- Live Sending Progress Box -->
+          <div id="queue-progress-box" class="progress-box" style="display: none;">
+            <div class="progress-header">
+              <span id="queue-progress-text"><i class="fa-solid fa-paper-plane fa-fade"></i> Dispatching message 1 of 12...</span>
+              <span id="queue-progress-percent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="queue-progress-fill" class="progress-fill"></div>
+            </div>
+          </div>
+
+          <!-- Send Queue Table -->
+          <div class="suite-table-wrapper">
+            <table class="suite-table">
+              <thead>
+                <tr>
+                  <th style="width: 60px;">ID</th>
+                  <th style="width: 150px;">Contact</th>
+                  <th>Follow-up Message</th>
+                  <th style="width: 110px;">Status</th>
+                  <th style="width: 140px;">Scheduled / Sent At</th>
+                  <th style="width: 100px;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="queue-items-tbody">
+                <tr>
+                  <td colspan="6" style="text-align: center; color: var(--text-dim); padding: 30px;">
+                    Send queue is currently empty. Validate drafts in Step 2 to add them to the queue.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ==================================================================
+           STEP 4: SEE CHATS VIEW (Preserved Existing High-Speed Messenger)
+           ================================================================== -->
+      <section id="view-chats" class="suite-view">
+        <div class="main-split" style="width: 100%; height: 100%;">
+          
+          <!-- Left Sidebar: Conversations List -->
+          <aside class="conv-sidebar">
+            <div class="sidebar-header">
+              <div class="sidebar-title-row">
+                <span class="sidebar-title">
+                  <i class="fa-brands fa-whatsapp" style="color: #25d366;"></i>
+                  24h Active Numbers (≥2h old)
+                  <span id="conv-count-badge" class="counter-badge">0</span>
+                </span>
+                <span id="total-24h-count" style="font-size: 0.75rem; color: var(--text-dim); font-weight: 600;">0 active</span>
+              </div>
+
+              <!-- Instant Search -->
+              <div class="search-wrapper">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" id="search-input" class="search-input" placeholder="Instant search phone, name, message..." />
+              </div>
+
+              <!-- Filter Pills -->
+              <div class="filter-pills">
+                <button class="pill-btn active" data-filter="all">All</button>
+                <button class="pill-btn" data-filter="incoming">Incoming</button>
+                <button class="pill-btn" data-filter="tracking">Meta Ads</button>
+              </div>
+            </div>
+
+            <!-- Scrollable Fast Conversations List -->
+            <div id="conv-list" class="conv-list">
+              <!-- Populated by JavaScript -->
+            </div>
+          </aside>
+
+          <!-- Right Panel: Conversation View -->
+          <main class="chat-panel">
+            
+            <!-- Empty State -->
+            <div id="chat-empty-state" class="chat-empty-state">
+              <div class="chat-empty-icon">
+                <i class="fa-solid fa-comments"></i>
+              </div>
+              <h3 style="font-weight: 700; color: var(--text-main); font-size: 1.15rem;">Select a BSB Conversation</h3>
+              <p style="max-width: 350px; font-size: 0.85rem;">Showing WhatsApp customer contacts who messaged in past 24h, whose latest message is at least 2h old. Loads full 72h of chat history.</p>
+            </div>
+
+            <!-- Active Conversation View -->
+            <div id="chat-active-view" style="display: none; flex-direction: column; height: 100%; width: 100%;">
+              
+              <!-- Chat Header -->
+              <div class="chat-header">
+                <div class="chat-header-user">
+                  <div class="conv-avatar" style="width: 38px; height: 38px; font-size: 0.9rem;">
+                    <i class="fa-solid fa-user"></i>
+                  </div>
+                  <div class="chat-header-info">
+                    <h2 id="chat-phone">Phone Number</h2>
+                    <div class="chat-header-sub">
+                      <span id="chat-profile-name">BSB Contact</span>
+                      <div id="chat-ad-banner" class="meta-ad-banner" style="display: none;"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="chat-header-actions">
+                  <a id="chat-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
+                    <i class="fa-brands fa-whatsapp"></i> WhatsApp Web
+                  </a>
+                </div>
+              </div>
+
+              <!-- Chat Messages Container -->
+              <div id="chat-messages-container" class="chat-messages-container">
+                <!-- Messages rendered dynamically -->
+              </div>
+
+              <!-- Chat Input Bar -->
+              <div class="chat-input-bar">
+                <div class="quick-templates-row">
+                  <button class="template-pill" data-text="Hello! How can we help you today?">Hello!</button>
+                  <button class="template-pill" data-text="Whish payment, instant activation.">Whish Info</button>
+                  <button class="template-pill" data-text="1 month: 4$ | 3 months: 10$ | 6 months: 15$ | 1 year: 21$">Netflix Price</button>
+                  <button class="template-pill" data-text="ChatGPT+ Shared Account: 3 months: $15 | 6 months: $25 | 1 year: $45">ChatGPT Price</button>
+                  <button class="template-pill" data-text="Anghami Plus: 1 month: 3$ | 3 months: 7.5$ | 1 year: 15$">Anghami Price</button>
+                </div>
+
+                <div class="input-row">
+                  <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="Type a message via BestSMSBulk... (Enter to send, Shift+Enter for newline)"></textarea>
+                  <button id="btn-send" class="btn-send" title="Send WhatsApp Message">
+                    <i class="fa-solid fa-paper-plane"></i>
+                  </button>
+                </div>
+
+                <div id="send-status-line" class="send-status-line"></div>
+              </div>
+
+            </div>
+
+          </main>
+
+        </div>
+      </section>
+
+      <!-- ==================================================================
+           STEP 5: ADMIN & RULES STUDIO VIEW
+           ================================================================== -->
+      <section id="view-admin" class="suite-view">
+        <div class="suite-view-container">
+          <div class="suite-view-header">
+            <div class="suite-title-group">
+              <h2><i class="fa-solid fa-sliders" style="color: #06b6d4;"></i> Step 5: Admin & Rules Studio</h2>
+              <p>Manage the 64 canonical v2 rules, execute the 96 regression benchmarks, analyze performance metrics, and teach the AI memory.</p>
+            </div>
+            
+            <!-- Admin Subtabs -->
+            <div class="admin-subtabs">
+              <button class="admin-subtab-btn active" data-subtab="sub-rules">Canonical Rules (64)</button>
+              <button class="admin-subtab-btn" data-subtab="sub-benchmark">Training Runner (96 Cases)</button>
+              <button class="admin-subtab-btn" data-subtab="sub-teach">Teach Contact</button>
+              <button class="admin-subtab-btn" data-subtab="sub-config">System Config</button>
+            </div>
+          </div>
+
+          <!-- Subtab 1: Canonical Rules Manager -->
+          <div id="sub-rules" class="admin-subtab-content">
+            <div class="controls-bar" style="margin-bottom: 20px;">
+              <div class="controls-left">
+                <input type="text" id="rules-search-input" class="search-input" style="width: 280px;" placeholder="Search rules (e.g. Anghami, prices, refusal)..." />
+                <button class="pill-btn active rule-cat-filter" data-cat="all">All (64)</button>
+                <button class="pill-btn rule-cat-filter" data-cat="sales">Sales (24)</button>
+                <button class="pill-btn rule-cat-filter" data-cat="support">Support (20)</button>
+                <button class="pill-btn rule-cat-filter" data-cat="guardrail">Guardrails (16)</button>
+                <button class="pill-btn rule-cat-filter" data-cat="style">Style (4)</button>
+              </div>
+            </div>
+
+            <div id="rules-grid" class="rules-grid">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+
+          <!-- Subtab 2: Training & Benchmark Runner (96 Cases) -->
+          <div id="sub-benchmark" class="admin-subtab-content" style="display: none;">
+            <div class="controls-bar" style="margin-bottom: 20px;">
+              <div class="controls-left">
+                <span style="font-weight: 700; color: var(--text-main);">Regression Benchmark Suite:</span>
+                <span style="color: var(--text-muted); font-size: 0.85rem;">96 authored development test cases from <code>feedback_learning_v2</code>.</span>
+              </div>
+              <div class="controls-right">
+                <button id="btn-run-benchmark" class="btn-primary-glow">
+                  <i class="fa-solid fa-vial-circle-check"></i> Run Benchmark Suite
+                </button>
+              </div>
+            </div>
+
+            <div class="metrics-row" style="margin-bottom: 20px;">
+              <div class="metric-card">
+                <span class="metric-label">Decision Accuracy</span>
+                <span id="bench-stat-acc" class="metric-value val-emerald">100.0%</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Fixtures Passed</span>
+                <span id="bench-stat-passed" class="metric-value val-emerald">96 / 96</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Rule Recall @ 8</span>
+                <span id="bench-stat-recall" class="metric-value val-indigo">100.0%</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Safety Violations</span>
+                <span id="bench-stat-safety" class="metric-value val-emerald">0</span>
+              </div>
+            </div>
+
+            <div class="suite-table-wrapper">
+              <table class="suite-table">
+                <thead>
+                  <tr>
+                    <th style="width: 80px;">Case ID</th>
+                    <th style="width: 220px;">Scenario Name</th>
+                    <th style="width: 100px;">Expected</th>
+                    <th style="width: 140px;">Expected Rules</th>
+                    <th>Scenario Details</th>
+                    <th style="width: 90px;">Result</th>
+                  </tr>
+                </thead>
+                <tbody id="benchmark-results-tbody">
+                  <!-- Populated by JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Subtab 3: Teach Contact (Active Learning) -->
+          <div id="sub-teach" class="admin-subtab-content" style="display: none;">
+            <div class="draft-card" style="max-width: 650px; margin: 0 auto;">
+              <h3 style="font-size: 1.15rem; font-weight: 800; display: flex; align-items: center; gap: 8px;">
+                <i class="fa-solid fa-graduation-cap" style="color: #a855f7;"></i> Teach Skipped Contact
+              </h3>
+              <p style="font-size: 0.82rem; color: var(--text-muted);">
+                Provide a customer phone number and the message you wanted to send. The system will queue the message for dispatch and immediately save high-priority continuous learning memory with pgvector embeddings to prevent future skips.
+              </p>
+
+              <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px;">
+                <div>
+                  <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Customer Phone Number:</label>
+                  <input type="text" id="teach-phone" class="input-field" placeholder="e.g. 71123456 or 96171123456" style="margin-top: 4px;" />
+                </div>
+
+                <div>
+                  <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Follow-up Message to Send:</label>
+                  <textarea id="teach-message" class="draft-textarea-styled" placeholder="Type the follow-up message..." style="margin-top: 4px;"></textarea>
+                </div>
+
+                <div>
+                  <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Why should this NOT have been skipped? (Rationale to guide AI):</label>
+                  <input type="text" id="teach-reason" class="input-field" placeholder="e.g. Customer requested Anghami prices 4h ago and needs nudge" style="margin-top: 4px;" />
+                </div>
+
+                <div style="display: flex; align-items: center; gap: 10px; margin-top: 6px;">
+                  <button id="btn-submit-teach" class="btn-primary-glow" style="width: 100%;">
+                    <i class="fa-solid fa-check"></i> Train AI Memory & Queue Message
+                  </button>
+                </div>
+                <div id="teach-feedback-status" style="font-size: 0.85rem; text-align: center; margin-top: 4px;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Subtab 4: System Configuration -->
+          <div id="sub-config" class="admin-subtab-content" style="display: none;">
+            <div class="draft-card" style="max-width: 650px; margin: 0 auto;">
+              <h3 style="font-size: 1.15rem; font-weight: 800; display: flex; align-items: center; gap: 8px;">
+                <i class="fa-solid fa-gear" style="color: #6366f1;"></i> System Configuration & Guardrails
+              </h3>
+
+              <div style="display: flex; flex-direction: column; gap: 14px; margin-top: 10px;">
+                <div>
+                  <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">OpenAI API Key:</label>
+                  <input type="password" id="cfg-openai-key" class="input-field" placeholder="sk-proj-..." style="margin-top: 4px;" />
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                  <div>
+                    <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Chat Model:</label>
+                    <input type="text" id="cfg-chat-model" class="input-field" value="gpt-4o" style="margin-top: 4px;" />
+                  </div>
+                  <div>
+                    <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">Send Delay (Seconds):</label>
+                    <input type="number" id="cfg-send-delay" class="input-field" value="1.5" step="0.5" min="1.0" style="margin-top: 4px;" />
+                  </div>
+                </div>
+
+                <div>
+                  <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">BestSMSBulk API Key:</label>
+                  <input type="text" id="cfg-bsb-key" class="input-field" value="teshrij" style="margin-top: 4px;" />
+                </div>
+
+                <div>
+                  <label style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">BestSMSBulk API Secret:</label>
+                  <input type="password" id="cfg-bsb-secret" class="input-field" value="Teshrij123" style="margin-top: 4px;" />
+                </div>
+
+                <button id="btn-save-config" class="btn-primary" style="margin-top: 10px;">
+                  <i class="fa-solid fa-floppy-disk"></i> Save Configuration
+                </button>
+                <div id="cfg-status-line" style="font-size: 0.85rem; text-align: center;"></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
 
     </div>
   </div>
 
+  <!-- ======================================================================
+       3. SAFETY MODAL: MISCLICK-PROOF "SEND ALL UNREVIEWED"
+       ====================================================================== -->
+  <div id="misclick-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header-danger">
+        <i class="fa-solid fa-triangle-exclamation fa-beat"></i>
+        <span>Misclick-Proof Safety Confirmation</span>
+      </div>
+
+      <p class="modal-body-text">
+        You are about to automatically approve and queue <strong id="modal-send-count" style="color: #fb7185;">0</strong> unreviewed follow-ups to live WhatsApp numbers!
+      </p>
+
+      <div style="background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.3); border-radius: var(--radius-sm); padding: 12px; font-size: 0.82rem; color: #fecdd3;">
+        <i class="fa-solid fa-shield"></i> Messages will be sent sequentially with a <strong>1.5s delay</strong>. Estimated dispatch duration: <strong id="modal-duration-est">0 seconds</strong>.
+      </div>
+
+      <div>
+        <label style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700;">First 5 Recipients Preview:</label>
+        <div id="modal-recipients-preview" class="modal-preview-box" style="margin-top: 4px;">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Dual Safety Lock -->
+      <div>
+        <label style="font-size: 0.8rem; font-weight: 700; color: var(--text-main);">Type "SEND ALL" below to unlock:</label>
+        <input type="text" id="modal-type-confirmation" class="input-field" placeholder="Type SEND ALL here..." style="margin-top: 6px; text-transform: uppercase;" />
+      </div>
+
+      <div class="hold-btn-wrapper">
+        <button id="btn-confirm-send-all" class="btn-hold-confirm" disabled>
+          <div id="hold-progress-fill" class="btn-hold-fill"></div>
+          <span id="hold-btn-label"><i class="fa-solid fa-lock"></i> Type "SEND ALL" to Confirm</span>
+        </button>
+      </div>
+
+      <button id="btn-cancel-send-all-modal" class="btn-nav" style="width: 100%; justify-content: center;">
+        Cancel / Go Back Safely
+      </button>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       4. RULE DETAIL MODAL
+       ====================================================================== -->
+  <div id="rule-detail-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-card" style="max-width: 600px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span id="modal-rule-id" class="rule-id-badge" style="font-size: 1rem;">RULE_ID</span>
+          <span id="modal-rule-cat" class="decision-badge dec-send">sales</span>
+        </div>
+        <button id="btn-close-rule-modal" class="btn-nav" style="padding: 4px 8px;"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <h3 id="modal-rule-title" style="font-size: 1.15rem; font-weight: 800; color: var(--text-main);">Rule Title</h3>
+
+      <div style="background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px;">
+        <label style="font-size: 0.72rem; color: var(--accent-cyan); font-weight: 700; text-transform: uppercase;">Reusable Rationale & Guidance:</label>
+        <p id="modal-rule-reason" style="font-size: 0.85rem; color: var(--text-muted); margin-top: 6px; line-height: 1.5;"></p>
+      </div>
+
+      <div id="modal-rule-arabizi-box" style="display: none;">
+        <label style="font-size: 0.72rem; color: var(--accent-emerald); font-weight: 700; text-transform: uppercase;">Lebanese Arabizi Preferred Templates:</label>
+        <div id="modal-rule-arabizi-list" style="margin-top: 6px; font-size: 0.82rem; color: var(--text-main);"></div>
+      </div>
+
+      <div id="modal-rule-exclusions-box" style="display: none;">
+        <label style="font-size: 0.72rem; color: #fb7185; font-weight: 700; text-transform: uppercase;">Exclusions & Near Misses:</label>
+        <div id="modal-rule-exclusions-list" style="margin-top: 6px; font-size: 0.82rem; color: var(--text-muted);"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Scripts (Cache-Busted) -->
-  <script src="js/config.js?v=20260924_1"></script>
-  <script src="js/app.js?v=20260924_1"></script>
+  <script src="js/config.js?v=20260924_suite_v1"></script>
+  <script src="js/app.js?v=20260924_suite_v1"></script>
 </body>
 </html>
