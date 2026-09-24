@@ -86,12 +86,30 @@ def get_openai_client_and_model() -> tuple[OpenAI, str]:
 
 def load_instructions() -> str:
     policy = ""
-    if os.path.exists(POLICY_PATH):
+    prompt_base = ""
+    
+    # Try loading live from Supabase followup_config first
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT key, value FROM followup_config WHERE key IN ('system_prompt', 'runtime_policy')")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        for r in rows:
+            if r["key"] == "system_prompt" and r.get("value"):
+                prompt_base = r["value"].get("prompt") or ""
+            elif r["key"] == "runtime_policy" and r.get("value"):
+                policy = r["value"].get("policy") or ""
+    except Exception as e:
+        print(f"[WARN] Error fetching prompt/policy from followup_config: {e}")
+
+    # Fallback to local files if not in database
+    if not policy and os.path.exists(POLICY_PATH):
         with open(POLICY_PATH, "r", encoding="utf-8") as f:
             policy = f.read().strip()
 
-    prompt_base = ""
-    if os.path.exists(PROMPT_PATH):
+    if not prompt_base and os.path.exists(PROMPT_PATH):
         with open(PROMPT_PATH, "r", encoding="utf-8") as f:
             prompt_base = f.read().strip()
 
@@ -272,11 +290,37 @@ def process_single_contact(contact: str, profile_name: str, conn_str: str, clien
                 r_lines.append(f"- [{r['id']}] {r['title']}: {r['reason']}{arabizi_txt}")
             rules_str = "\n".join(r_lines)
 
+        # Retrieve past human feedback/corrections
+        feedback_str = ""
+        if query_vector:
+            try:
+                cur.execute("""
+                    SELECT contact, context_summary, original_draft, final_msg, review_action
+                    FROM match_feedback_learning(%s::vector, 0.35, 3)
+                """, (str(query_vector),))
+                fb_records = cur.fetchall()
+                if fb_records:
+                    fb_lines = []
+                    for fb in fb_records:
+                        act = fb.get("review_action") or "OPERATOR"
+                        summary = fb.get("context_summary") or ""
+                        if act == "CANCELLED":
+                            fb_lines.append(f"- [DO NOT MESSAGE] Context: '{summary}' -> Human operator cancelled. Decision: SKIP.")
+                        elif act == "MODIFIED":
+                            fb_lines.append(f"- [HUMAN CORRECTION] Context: '{summary}'. Operator sent: '{fb.get('final_msg')}'.")
+                        elif act == "APPROVED":
+                            fb_lines.append(f"- [APPROVED EXAMPLE] Context: '{summary}'. Sent: '{fb.get('final_msg') or fb.get('original_draft')}'.")
+                    feedback_str = "\n".join(fb_lines)
+            except Exception:
+                pass
+
+        fb_section = f"\n\n### OPERATOR FEEDBACK & PREVIOUS CORRECTIONS:\n{feedback_str}" if feedback_str else ""
+
         # Call OpenAI with strict contract
         system_content = f"""{instructions}
 
 ### RELEVANT CANONICAL RULES (v2.0):
-{rules_str}
+{rules_str or 'No direct rule triggered - apply general policy.'}{fb_section}
 
 ### RESPONSE JSON CONTRACT:
 You must respond strictly with a valid JSON object:

@@ -587,12 +587,14 @@
               <p>Manage the 64 canonical v2 rules, execute the 96 regression benchmarks, analyze performance metrics, and teach the AI memory.</p>
             </div>
             
-            <!-- Admin Subtabs -->
+            <!-- Admin Subtabs (Full Fady_bot Main.py Parity) -->
             <div class="admin-subtabs">
-              <button class="admin-subtab-btn active" data-subtab="sub-rules">Canonical Rules (64)</button>
-              <button class="admin-subtab-btn" data-subtab="sub-benchmark">Training Runner (96 Cases)</button>
-              <button class="admin-subtab-btn" data-subtab="sub-teach">Teach Contact</button>
-              <button class="admin-subtab-btn" data-subtab="sub-config">System Config</button>
+              <button class="admin-subtab-btn active" data-subtab="sub-rules"><i class="fa-solid fa-book"></i> Canonical Rules (64)</button>
+              <button class="admin-subtab-btn" data-subtab="sub-prompts"><i class="fa-solid fa-terminal"></i> System Prompt & Policy</button>
+              <button class="admin-subtab-btn" data-subtab="sub-learning"><i class="fa-solid fa-brain"></i> Learning Log</button>
+              <button class="admin-subtab-btn" data-subtab="sub-benchmark"><i class="fa-solid fa-vial-circle-check"></i> Benchmarks (96)</button>
+              <button class="admin-subtab-btn" data-subtab="sub-teach"><i class="fa-solid fa-graduation-cap"></i> Teach Contact</button>
+              <button class="admin-subtab-btn" data-subtab="sub-config"><i class="fa-solid fa-gear"></i> Config & Actions</button>
             </div>
           </div>
 
@@ -606,6 +608,11 @@
                 <button class="pill-btn rule-cat-filter" data-cat="support">Support (20)</button>
                 <button class="pill-btn rule-cat-filter" data-cat="guardrail">Guardrails (16)</button>
                 <button class="pill-btn rule-cat-filter" data-cat="style">Style (4)</button>
+              </div>
+              <div class="controls-right">
+                <button id="btn-reload-canonical-rules" class="btn-nav" title="Reload Canonical Rules from JSONL directly into Supabase (main.py Option 9)">
+                  <i class="fa-solid fa-arrows-rotate"></i> Reload Canonical Rules
+                </button>
               </div>
             </div>
 
@@ -740,7 +747,97 @@
                   <i class="fa-solid fa-floppy-disk"></i> Save Configuration
                 </button>
                 <div id="cfg-status-line" style="font-size: 0.85rem; text-align: center;"></div>
+
+                <div style="border-top: 1px solid rgba(255,255,255,0.08); margin-top: 15px; padding-top: 15px;">
+                  <h4 style="color: #fb7185; font-size: 0.95rem; margin-bottom: 6px; display: flex; align-items: center; gap: 8px;">
+                    <i class="fa-solid fa-triangle-exclamation"></i> Danger Zone & Database Maintenance
+                  </h4>
+                  <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 12px;">
+                    Equivalent to <code>main.py</code> Option 11: Permanently delete pending and unsent drafts from <code>followup_drafts</code> and <code>send_queue</code>. Completely preserves sent history.
+                  </p>
+                  <button id="btn-clear-unsent-drafts" class="btn-danger-secure" style="font-size: 0.82rem; padding: 8px 14px;">
+                    <i class="fa-solid fa-trash-can"></i> Clear Unsent Drafts & Queue
+                  </button>
+                  <div id="clear-drafts-status" style="font-size: 0.82rem; margin-top: 6px;"></div>
+                </div>
               </div>
+            </div>
+          </div>
+
+          <!-- Subtab 5: System Prompt & Runtime Policy Editor -->
+          <div id="sub-prompts" class="admin-subtab-content" style="display: none;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+              <!-- System Prompt Card -->
+              <div class="draft-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
+                  <h3 style="font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 8px;">
+                    <i class="fa-solid fa-file-code" style="color: #38bdf8;"></i> System Prompt
+                  </h3>
+                  <span style="font-size: 0.72rem; color: var(--text-dim);">prompts/system_prompt.txt</span>
+                </div>
+                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
+                  Core 55-line system instructions governing sales decision boundaries, support resolution, Arabic/English tone, and message length.
+                </p>
+                <textarea id="admin-system-prompt-textarea" class="fady-message-box" style="font-family: monospace; font-size: 0.82rem; height: 380px; margin-top: 10px; line-height: 1.5;" placeholder="Loading system prompt..."></textarea>
+                <button id="btn-save-system-prompt" class="btn-primary-glow" style="margin-top: 8px;">
+                  <i class="fa-solid fa-floppy-disk"></i> Save System Prompt to Supabase
+                </button>
+                <div id="save-prompt-status" style="font-size: 0.82rem; text-align: center; margin-top: 4px;"></div>
+              </div>
+
+              <!-- Runtime Policy Card -->
+              <div class="draft-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
+                  <h3 style="font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 8px;">
+                    <i class="fa-solid fa-shield-halved" style="color: #10b981;"></i> Runtime Policy v2.0
+                  </h3>
+                  <span style="font-size: 0.72rem; color: var(--text-dim);">feedback_learning_v2/runtime_policy.txt</span>
+                </div>
+                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">
+                  Always-on Teshrij v2.0 domain guardrails. Injected directly into model instructions before RAG retrieval.
+                </p>
+                <textarea id="admin-runtime-policy-textarea" class="fady-message-box" style="font-family: monospace; font-size: 0.82rem; height: 380px; margin-top: 10px; line-height: 1.5;" placeholder="Loading runtime policy..."></textarea>
+                <button id="btn-save-runtime-policy" class="btn-success-glow" style="margin-top: 8px;">
+                  <i class="fa-solid fa-floppy-disk"></i> Save Runtime Policy to Supabase
+                </button>
+                <div id="save-policy-status" style="font-size: 0.82rem; text-align: center; margin-top: 4px;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Subtab 6: Continuous Feedback Learning Log -->
+          <div id="sub-learning" class="admin-subtab-content" style="display: none;">
+            <div class="controls-bar" style="margin-bottom: 15px;">
+              <div class="controls-left">
+                <span style="font-weight: 700; color: var(--text-main);"><i class="fa-solid fa-brain" style="color: #a855f7;"></i> Human Continuous Learning Memory:</span>
+                <span style="color: var(--text-muted); font-size: 0.85rem;">Real operator reviews, corrections, and teach overrides stored in <code>feedback_learning</code>.</span>
+              </div>
+              <div class="controls-right">
+                <button id="btn-refresh-learning-log" class="btn-nav">
+                  <i class="fa-solid fa-arrows-rotate"></i> Refresh Log
+                </button>
+              </div>
+            </div>
+            <div class="suite-table-wrapper">
+              <table class="suite-table">
+                <thead>
+                  <tr>
+                    <th style="width: 60px;">ID</th>
+                    <th style="width: 140px;">Contact</th>
+                    <th style="width: 110px;">Action</th>
+                    <th style="width: 200px;">Context Summary</th>
+                    <th>Final Message</th>
+                    <th style="width: 180px;">Notes / Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-log-tbody">
+                  <tr>
+                    <td colspan="6" style="text-align: center; color: var(--text-dim); padding: 30px;">
+                      Loading learning log entries...
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
 

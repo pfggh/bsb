@@ -197,6 +197,17 @@
     el.cfgBsbSecret = document.getElementById('cfg-bsb-secret');
     el.btnSaveConfig = document.getElementById('btn-save-config');
     el.cfgStatusLine = document.getElementById('cfg-status-line');
+    el.btnReloadCanonicalRules = document.getElementById('btn-reload-canonical-rules');
+    el.btnClearUnsentDrafts = document.getElementById('btn-clear-unsent-drafts');
+    el.clearDraftsStatus = document.getElementById('clear-drafts-status');
+    el.adminSystemPromptTextarea = document.getElementById('admin-system-prompt-textarea');
+    el.adminRuntimePolicyTextarea = document.getElementById('admin-runtime-policy-textarea');
+    el.btnSaveSystemPrompt = document.getElementById('btn-save-system-prompt');
+    el.btnSaveRuntimePolicy = document.getElementById('btn-save-runtime-policy');
+    el.savePromptStatus = document.getElementById('save-prompt-status');
+    el.savePolicyStatus = document.getElementById('save-policy-status');
+    el.btnRefreshLearningLog = document.getElementById('btn-refresh-learning-log');
+    el.learningLogTbody = document.getElementById('learning-log-tbody');
 
     // Rule Detail Modal
     el.ruleDetailModal = document.getElementById('rule-detail-modal');
@@ -394,6 +405,12 @@
     if (tabId === 'tab-review') loadReviewDrafts();
     if (tabId === 'tab-send') loadSendQueue();
     if (tabId === 'tab-chats' && state.conversations.length === 0) loadConversations();
+    if (tabId === 'tab-admin') {
+      loadCanonicalRules();
+      loadSystemPromptAndPolicy();
+      loadLearningLog();
+      loadConfigForm();
+    }
   }
 
   // =========================================================================
@@ -1471,6 +1488,218 @@
   // =========================================================================
   // Event Listeners & Bootstrapping
   // =========================================================================
+
+  // =========================================================================
+  // FADY_BOT PARITY: SYSTEM PROMPT & RUNTIME POLICY SYNC
+  // =========================================================================
+  async function loadSystemPromptAndPolicy() {
+    if (!window.supabaseClient) return;
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('followup_config')
+        .select('key, value')
+        .in('key', ['system_prompt', 'runtime_policy']);
+
+      if (!error && data) {
+        data.forEach(item => {
+          if (item.key === 'system_prompt' && el.adminSystemPromptTextarea) {
+            el.adminSystemPromptTextarea.value = (item.value && item.value.prompt) || '';
+          }
+          if (item.key === 'runtime_policy' && el.adminRuntimePolicyTextarea) {
+            el.adminRuntimePolicyTextarea.value = (item.value && item.value.policy) || '';
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('Error loading prompts/policy:', e);
+    }
+  }
+
+  async function saveSystemPrompt() {
+    if (!window.supabaseClient || !el.adminSystemPromptTextarea) return;
+    const txt = el.adminSystemPromptTextarea.value.trim();
+    if (!txt) {
+      alert("System prompt cannot be empty.");
+      return;
+    }
+    el.btnSaveSystemPrompt.disabled = true;
+    el.savePromptStatus.textContent = "Saving system prompt to Supabase followup_config...";
+    try {
+      const { error } = await window.supabaseClient
+        .from('followup_config')
+        .upsert({ key: 'system_prompt', value: { prompt: txt }, updated_at: new Date().toISOString() });
+      if (error) throw error;
+      el.savePromptStatus.innerHTML = '<span style="color: #34d399;"><i class="fa-solid fa-check"></i> Saved system prompt successfully!</span>';
+      setTimeout(() => el.savePromptStatus.textContent = '', 3500);
+    } catch (e) {
+      el.savePromptStatus.innerHTML = '<span style="color: #fb7185;">Error: ' + escapeHTML(e.message) + '</span>';
+    } finally {
+      el.btnSaveSystemPrompt.disabled = false;
+    }
+  }
+
+  async function saveRuntimePolicy() {
+    if (!window.supabaseClient || !el.adminRuntimePolicyTextarea) return;
+    const txt = el.adminRuntimePolicyTextarea.value.trim();
+    if (!txt) {
+      alert("Runtime policy cannot be empty.");
+      return;
+    }
+    el.btnSaveRuntimePolicy.disabled = true;
+    el.savePolicyStatus.textContent = "Saving runtime policy to Supabase followup_config...";
+    try {
+      const { error } = await window.supabaseClient
+        .from('followup_config')
+        .upsert({ key: 'runtime_policy', value: { policy: txt }, updated_at: new Date().toISOString() });
+      if (error) throw error;
+      el.savePolicyStatus.innerHTML = '<span style="color: #34d399;"><i class="fa-solid fa-check"></i> Saved runtime policy successfully!</span>';
+      setTimeout(() => el.savePolicyStatus.textContent = '', 3500);
+    } catch (e) {
+      el.savePolicyStatus.innerHTML = '<span style="color: #fb7185;">Error: ' + escapeHTML(e.message) + '</span>';
+    } finally {
+      el.btnSaveRuntimePolicy.disabled = false;
+    }
+  }
+
+  // =========================================================================
+  // FADY_BOT PARITY: CONTINUOUS LEARNING LOG
+  // =========================================================================
+  async function loadLearningLog() {
+    if (!window.supabaseClient || !el.learningLogTbody) return;
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('feedback_learning')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(50);
+
+      if (error || !data || data.length === 0) {
+        el.learningLogTbody.innerHTML = `
+          <tr>
+            <td colspan="6" style="text-align: center; color: var(--text-dim); padding: 30px;">
+              No feedback learning entries found in database.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      el.learningLogTbody.innerHTML = '';
+      data.forEach(item => {
+        const tr = document.createElement('tr');
+        const act = (item.review_action || item.decision || 'MODIFIED').toUpperCase();
+        const badgeClass = act === 'APPROVED' ? 'dec-send' : (act === 'CANCELLED' ? 'dec-skip' : 'dec-human');
+        tr.innerHTML = `
+          <td style="font-weight: 700; color: #a5b4fc;">#${item.id}</td>
+          <td><strong>${formatPhoneDisplay(item.contact)}</strong></td>
+          <td><span class="decision-badge ${badgeClass}">${act}</span></td>
+          <td style="font-size: 0.8rem; color: var(--text-muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHTML(item.context_summary || '')}</td>
+          <td style="font-size: 0.85rem; font-family: inherit;" dir="auto">${escapeHTML(item.final_msg || item.original_draft || '—')}</td>
+          <td style="font-size: 0.78rem; color: #94a3b8;">${escapeHTML(item.reason_notes || item.reviewer_authority || '—')}</td>
+        `;
+        el.learningLogTbody.appendChild(tr);
+      });
+    } catch (e) {
+      console.warn('Error loading learning log:', e);
+    }
+  }
+
+  // =========================================================================
+  // FADY_BOT PARITY: RELOAD CANONICAL RULES (main.py Option 9)
+  // =========================================================================
+  async function reloadCanonicalRulesFromSource() {
+    if (!window.supabaseClient) return;
+    if (!confirm("Reload all 64 canonical rules from feedback_learning_v2 into Supabase? This will refresh rule titles, guidance, and Arabizi examples.")) return;
+
+    if (el.btnReloadCanonicalRules) {
+      el.btnReloadCanonicalRules.disabled = true;
+      el.btnReloadCanonicalRules.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Reloading...';
+    }
+
+    try {
+      const res = await fetch('data/canonical_rules.json');
+      const rules = await res.json();
+      if (!Array.isArray(rules) || rules.length === 0) throw new Error("Could not load canonical rules JSON");
+
+      // Upsert batch
+      for (const rule of rules) {
+        await window.supabaseClient
+          .from('canonical_rules')
+          .upsert({
+            id: rule.id,
+            title: rule.title,
+            category: rule.category,
+            decision_pattern: rule.decision_pattern || rule.decision || 'SEND_CANDIDATE',
+            version: rule.version || '2.0.0',
+            evidence_basis: rule.evidence_basis || '',
+            required_evidence: rule.required_evidence || [],
+            reason: rule.reason || '',
+            exclusions: rule.exclusions || [],
+            preferred_messages: rule.preferred_messages || {},
+            retrieval_aliases: rule.retrieval_aliases || [],
+            runtime_note: rule.runtime_note || ''
+          });
+      }
+
+      alert(`Successfully reloaded ${rules.length} canonical rules into Supabase!`);
+      loadCanonicalRules();
+      loadDashboardStats();
+    } catch (e) {
+      alert(`Reload error: ${e.message}`);
+    } finally {
+      if (el.btnReloadCanonicalRules) {
+        el.btnReloadCanonicalRules.disabled = false;
+        el.btnReloadCanonicalRules.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Reload Canonical Rules';
+      }
+    }
+  }
+
+  // =========================================================================
+  // FADY_BOT PARITY: CLEAR UNSENT DRAFTS & QUEUE (main.py Option 11)
+  // =========================================================================
+  async function clearUnsentDraftsAndQueue() {
+    if (!window.supabaseClient) return;
+    const confirmed = confirm("Are you sure you want to delete all unsent/pending drafts and send queue items? Sent messages and history will be strictly preserved.");
+    if (!confirmed) return;
+
+    if (el.btnClearUnsentDrafts) el.btnClearUnsentDrafts.disabled = true;
+    if (el.clearDraftsStatus) el.clearDraftsStatus.textContent = "Clearing unsent drafts from Supabase...";
+
+    try {
+      // 1. Delete unsent queued messages
+      await window.supabaseClient
+        .from('send_queue')
+        .delete()
+        .neq('status', 'SENT');
+
+      // 2. Delete pending/unsent followup drafts
+      await window.supabaseClient
+        .from('followup_drafts')
+        .delete()
+        .in('status', ['PENDING', 'APPROVED', 'MODIFIED', 'DEFERRED', 'HUMAN_REVIEW', 'CANCELLED']);
+
+      if (el.clearDraftsStatus) {
+        el.clearDraftsStatus.innerHTML = '<span style="color: #34d399;"><i class="fa-solid fa-check"></i> Successfully cleared all unsent drafts and queue!</span>';
+        setTimeout(() => el.clearDraftsStatus.textContent = '', 4000);
+      }
+
+      state.reviewDrafts = [];
+      state.currentReviewIndex = 0;
+      state.currentReviewDraft = null;
+      renderCurrentReviewDraft();
+      loadSendQueue();
+      loadDashboardStats();
+      loadRecentScanDrafts();
+
+    } catch (e) {
+      if (el.clearDraftsStatus) {
+        el.clearDraftsStatus.innerHTML = '<span style="color: #fb7185;">Error: ' + escapeHTML(e.message) + '</span>';
+      }
+    } finally {
+      if (el.btnClearUnsentDrafts) el.btnClearUnsentDrafts.disabled = false;
+    }
+  }
+
   function initEventListeners() {
     if (el.loginForm) el.loginForm.addEventListener('submit', handleLogin);
     if (el.logoutBtn) el.logoutBtn.addEventListener('click', handleLogout);
@@ -1612,6 +1841,11 @@
     if (el.btnRunBenchmark) el.btnRunBenchmark.addEventListener('click', runBenchmarkSuite);
     if (el.btnSubmitTeach) el.btnSubmitTeach.addEventListener('click', submitTeachContact);
     if (el.btnSaveConfig) el.btnSaveConfig.addEventListener('click', saveConfigForm);
+    if (el.btnSaveSystemPrompt) el.btnSaveSystemPrompt.addEventListener('click', saveSystemPrompt);
+    if (el.btnSaveRuntimePolicy) el.btnSaveRuntimePolicy.addEventListener('click', saveRuntimePolicy);
+    if (el.btnRefreshLearningLog) el.btnRefreshLearningLog.addEventListener('click', loadLearningLog);
+    if (el.btnReloadCanonicalRules) el.btnReloadCanonicalRules.addEventListener('click', reloadCanonicalRulesFromSource);
+    if (el.btnClearUnsentDrafts) el.btnClearUnsentDrafts.addEventListener('click', clearUnsentDraftsAndQueue);
 
     initKeyboardShortcuts();
   }
