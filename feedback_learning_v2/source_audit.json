@@ -1,0 +1,61 @@
+{
+  "source_filename": "Pasted markdown(20260916-131738).md",
+  "source_sha256": "cfda367c8244968d7332633b662cf2061cf3f5cd1c4f4ea0e044a87b8cfeb0b4",
+  "source_bytes": 48484670,
+  "source_line_count": 995,
+  "id_bearing_records": 980,
+  "labeled_records": 978,
+  "original_status_counts": {
+    "APPROVED": 800,
+    "MODIFIED": 79,
+    "CANCELLED": 99,
+    "EMPTY": 2
+  },
+  "repaired_record_ids": [
+    1803,
+    1828
+  ],
+  "empty_record_ids": [
+    2343,
+    2344
+  ],
+  "corrupt_final_message_record_ids": [
+    1389,
+    1935
+  ],
+  "canonical_card_count": 64,
+  "canonical_categories": {
+    "sales": 24,
+    "support": 20,
+    "guardrail": 16,
+    "style": 4
+  },
+  "original_vector_dimensions": 1536,
+  "original_vector_model": "UNKNOWN_NOT_IN_EXPORT",
+  "fresh_embeddings_generated": false,
+  "generic_approval_reason_count": 800,
+  "conditional_professional_rewrite_count": 816,
+  "quality_flag_counts": {
+    "GENERIC_OR_UNINFORMATIVE_ORIGINAL_REASON": 882,
+    "CONTEXT_REDACTED_OR_NORMALIZED": 503,
+    "TIMESTAMP_BASIS_NOT_VERIFIED_DO_NOT_DERIVE_CADENCE": 978,
+    "SNAPSHOT_MAY_NOT_SUPPORT_SPECIFIC_PROPOSED_MESSAGE": 11,
+    "HISTORICAL_FACT_CLAIMS_NOT_CURRENT_CATALOGUE": 23,
+    "FACT_OR_CAPABILITY_BOUNDARY": 42,
+    "VOICE_PRESENT_CHECK_WHETHER_LATEST_UNRESOLVED": 50,
+    "NEGATIVE_EXAMPLE_DO_NOT_SEND_ORIGINAL": 99,
+    "CANCELLATION_CAUSE_NOT_ESTABLISHED": 39,
+    "MEDIA_PRESENT_CONTENT_NOT_IN_SNAPSHOT": 45,
+    "CORRUPT_FINAL_MESSAGE_QUARANTINED": 2,
+    "OWNER_RECOVERED_SKIPPED_CONTACT": 27,
+    "PUNCTUATION_NEEDS_POLISH": 32,
+    "MIXED_SCRIPT_REQUIRES_REVIEW": 2,
+    "SPLIT_MARKDOWN_ROW_RECOVERED": 2,
+    "STYLE_EDIT_DOES_NOT_ESTABLISH_SEND_ELIGIBILITY": 1,
+    "ONE_CHARACTER_REASON_NOT_EXPLAINABLE": 1,
+    "HUMAN_EXAMPLE_NOT_BOT_AUTHORITY": 12
+  },
+  "schema_caveat": "Column meanings inferred positionally; no actual SQL headers or production import contract were supplied.",
+  "privacy_caveat": "Canonical cards contain no customer-specific payloads. Historical audit text is pattern-redacted and remains restricted; redaction is not a formal anonymity guarantee.",
+  "evaluation_caveat": "No production retrieval, embeddings, model outputs, WhatsApp sends or conversion results have been measured."
+}

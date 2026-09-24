@@ -155,28 +155,20 @@
           <!-- Scanner Controls Bar -->
           <div class="controls-bar">
             <div class="controls-left">
-              <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Scan Batch Limit:</label>
-              <select id="scan-batch-limit" class="select-styled">
-                <option value="10">10 Contacts</option>
-                <option value="25" selected>25 Contacts</option>
-                <option value="50">50 Contacts</option>
-                <option value="100">100 Contacts</option>
-                <option value="all">All Eligible Contacts</option>
-              </select>
-
-              <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-left: 10px;">Model:</label>
-              <select id="scan-model-select" class="select-styled">
-                <option value="gpt-4o" selected>GPT-4o (Accurate + Lebanese Arabizi)</option>
-                <option value="gpt-4o-mini">GPT-4o-mini (Faster)</option>
-              </select>
+              <span style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); display: flex; align-items: center; gap: 8px;">
+                <i class="fa-solid fa-server" style="color: #06b6d4;"></i> Server-Side Execution Engine
+              </span>
+              <span style="font-size: 0.8rem; color: var(--text-muted); margin-left: 10px;">
+                Scans all eligible active contacts in background. Multi-threaded with zero browser lock-up.
+              </span>
             </div>
 
             <div class="controls-right">
               <button id="btn-start-ai-scan" class="btn-primary-glow">
-                <i class="fa-solid fa-play"></i> Start AI Scan
+                <i class="fa-solid fa-bolt"></i> Run AI Scan Now
               </button>
-              <button id="btn-stop-ai-scan" class="btn-nav" style="display: none; color: #fb7185; border-color: rgba(244, 63, 94, 0.4);">
-                <i class="fa-solid fa-stop"></i> Stop Scan
+              <button id="btn-refresh-scan" class="btn-nav">
+                <i class="fa-solid fa-arrows-rotate"></i> Refresh Results
               </button>
             </div>
           </div>

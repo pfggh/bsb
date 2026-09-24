@@ -1,0 +1,170 @@
+{
+  "result": "PASS",
+  "checks_passed": 32,
+  "checks_total": 32,
+  "checks": [
+    {
+      "check": "canonical_card_count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "unique_card_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "category_counts",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "labeled_record_count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "unique_historical_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "original_status_counts_preserved",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "all_source_rows_accounted",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "empty_rows_quarantined",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "corrupt_messages_preserved_only_as_history",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "repaired_rows_retained",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "no_cancellation_rewritten_as_positive",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "card_content_hashes",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "no_old_embeddings_reused",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "all_history_has_expanded_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "provenance_separated_from_rewrite",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "all_history_mappings_resolve",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "source_pointers_resolve_exactly",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "original_line_ranges_valid",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "self_contained_cards",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "regression_case_count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "unique_regression_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "case_rules_resolve",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "every_card_has_fixture_coverage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "non_send_fixture_messages_null",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "valid_fixture_decisions",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "template_question_mark_limit",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "canonical_templates_no_raw_urls_or_emails",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "canonical_retrieval_no_customer_phone_like_values",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "redacted_history_no_raw_urls_or_emails",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "redacted_history_no_phone_like_values",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "markdown_has_all_cards",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "pinned_policy_present",
+      "passed": true,
+      "detail": ""
+    }
+  ],
+  "what_was_tested": "Local schema, record accounting, source-pointer consistency, hashes, fixture coverage and limited leakage/format checks.",
+  "what_was_not_tested": "No live retrieval, embeddings, LLM behavior, semantic privacy audit, dispatch integration, WhatsApp delivery or business performance.",
+  "regression_execution_status": "96 fixtures created and structurally checked; no production model predictions were supplied or graded."
+}

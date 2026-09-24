@@ -1,0 +1,38 @@
+[
+  {
+    "source_record_id": 2343,
+    "source_lines": [
+      994,
+      994
+    ],
+    "original_status": null,
+    "reason": "EMPTY_PLACEHOLDER_NO_FEEDBACK_PAYLOAD"
+  },
+  {
+    "source_record_id": 2344,
+    "source_lines": [
+      995,
+      995
+    ],
+    "original_status": null,
+    "reason": "EMPTY_PLACEHOLDER_NO_FEEDBACK_PAYLOAD"
+  },
+  {
+    "source_record_id": 1389,
+    "source_lines": [
+      26,
+      26
+    ],
+    "original_status": "MODIFIED",
+    "reason": "ONE_CHARACTER_FINAL_MESSAGE"
+  },
+  {
+    "source_record_id": 1935,
+    "source_lines": [
+      586,
+      586
+    ],
+    "original_status": "MODIFIED",
+    "reason": "PHONE_NUMBER_IN_FINAL_MESSAGE_FIELD"
+  }
+]

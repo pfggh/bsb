@@ -1,0 +1,49 @@
+{
+  "package_version": "2.0.0",
+  "files": {
+    "README.md": {
+      "bytes": 7496,
+      "sha256": "215002804ccbbab7c2c73648e53fa212b5da8bdddeb3f05269b98a18ce7bf14c"
+    },
+    "feedback_learning_v2.md": {
+      "bytes": 137708,
+      "sha256": "a82cd8c383bbbd3bc5c9a68768d4b61be827ffaf27b257b5b5e3526c54acf348"
+    },
+    "feedback_learning_v2.jsonl": {
+      "bytes": 244564,
+      "sha256": "251e00d3b23eb85453940b3e9c1093012683bc413133a871a15a054d815f57a9"
+    },
+    "feedback_learning_enriched.jsonl": {
+      "bytes": 3126213,
+      "sha256": "d633d6765cefb456272bdc6a513a2dad7b496d84c1f3f53a5db68a8a78693f23"
+    },
+    "runtime_policy.txt": {
+      "bytes": 3314,
+      "sha256": "64e8149da3b531f76483f125192fbb0023994e4ccd47a91103e5cda6a770c6b6"
+    },
+    "regression_cases.jsonl": {
+      "bytes": 71552,
+      "sha256": "be7bd7e8faf45bc9959a85403d7cbc8146181660bf5e1c62d17ee5cdc237400d"
+    },
+    "evaluate_predictions.py": {
+      "bytes": 8272,
+      "sha256": "437905e490cea46c6d574412b9fa66822546400160baf5a747e6059adcb571cf"
+    },
+    "validate_package.py": {
+      "bytes": 7048,
+      "sha256": "d09b054fc75ab15e3d7901df92443e30b9cbdf912723c0a5364b7a31268aa7c9"
+    },
+    "source_audit.json": {
+      "bytes": 2239,
+      "sha256": "536037e2854e146440df99584eed812f04e3553db2a8c9ac782e8d3534b319ab"
+    },
+    "quarantine.json": {
+      "bytes": 689,
+      "sha256": "548121185d24e98702c847922fac80ca8b691c9e0cc73e099a055b97fda447a1"
+    },
+    "validation_report.json": {
+      "bytes": 3731,
+      "sha256": "fa234c6f44a94aea096c012907339be6a8a76db46a834631dccd8a4f90bc719c"
+    }
+  }
+}

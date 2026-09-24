@@ -1,0 +1,28 @@
+analyzer:
+  max_consecutive_outgoing: 3
+  max_hours_old: 24.0
+  max_outgoing_hours_old: 24.0
+  min_hours_old: 2.0
+  require_incoming_last: false
+bestsmsbulk:
+  agent_key: 0670126f7e99ae241c84d3a6d32e84c2
+  api_endpoint: https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php
+  api_key: teshrij
+  api_secret: Teshrij123
+  auto_export_days: 5
+  download_dir: /home/user/Downloads
+database:
+  db_path: data/fady_bot.db
+learning:
+  similarity_threshold: 0.25
+  top_k_rules: 5
+openai:
+  api_key: your_openai_api_key_here
+  chat_model: gpt-5.6-terra
+  embedding_model: text-embedding-3-small
+  max_workers: 5
+  temperature: 1.0
+sender:
+  auto_mode: false
+  max_retries: 3
+  send_delay: 7.0

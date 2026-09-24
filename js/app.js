@@ -93,10 +93,8 @@
     el.statScanCandidates = document.getElementById('stat-scan-candidates');
     el.statPendingDrafts = document.getElementById('stat-pending-drafts');
     el.statCanonicalRules = document.getElementById('stat-canonical-rules');
-    el.scanBatchLimit = document.getElementById('scan-batch-limit');
-    el.scanModelSelect = document.getElementById('scan-model-select');
     el.btnStartAiScan = document.getElementById('btn-start-ai-scan');
-    el.btnStopAiScan = document.getElementById('btn-stop-ai-scan');
+    el.btnRefreshScan = document.getElementById('btn-refresh-scan');
     el.scanProgressBox = document.getElementById('scan-progress-box');
     el.scanProgressText = document.getElementById('scan-progress-text');
     el.scanProgressPercent = document.getElementById('scan-progress-percent');
@@ -308,6 +306,7 @@
 
     // Initialize suite data
     loadDashboardStats();
+    loadRecentScanDrafts();
     loadConversations();
     loadReviewDrafts();
     loadSendQueue();
@@ -425,137 +424,111 @@
   }
 
   // =========================================================================
-  // STEP 1: AI SCANNER
+  // STEP 1: AI SCANNER (Server-Side Execution Engine)
   // =========================================================================
   async function startAIScan() {
     if (state.isScanning) return;
     state.isScanning = true;
-    state.stopScanRequested = false;
 
-    el.btnStartAiScan.style.display = 'none';
-    el.btnStopAiScan.style.display = 'inline-flex';
-    el.scanProgressBox.style.display = 'flex';
-    el.scanStatusPill.style.display = 'inline-flex';
-    el.scanResultsTbody.innerHTML = '';
-
-    const limitVal = el.scanBatchLimit.value;
-    const maxLimit = limitVal === 'all' ? 200 : parseInt(limitVal, 10);
-    const model = el.scanModelSelect.value || 'gpt-4o';
-    const openaiKey = window.OPENAI_CONFIG.api_key;
-
-    if (!openaiKey || openaiKey.includes('your_openai_api_key')) {
-      alert('Please configure your OpenAI API Key in Step 5 (System Config) before scanning.');
-      stopAIScan();
-      return;
+    if (el.btnStartAiScan) {
+      el.btnStartAiScan.disabled = true;
+      el.btnStartAiScan.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Triggering Server Scan...';
+    }
+    if (el.scanProgressBox) el.scanProgressBox.style.display = 'flex';
+    if (el.scanStatusPill) {
+      el.scanStatusPill.style.display = 'inline-flex';
+      el.scanStatusPill.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Server Scan Requested';
     }
 
+    updateScanProgress(15, "Submitting scan request to server background runner...");
+
     try {
-      updateScanProgress(5, "Fetching active conversations from bsb_messages...");
-      
-      // Fetch 24h contacts
-      let convs = [];
-      const rpcRes = await window.supabaseClient.rpc('get_bsb_recent_conversations', {
-        hours_lookback: HOURS_LOOKBACK_CONVS,
-        min_hours_old: MIN_HOURS_OLD
-      });
-      if (!rpcRes.error && rpcRes.data) {
-        convs = rpcRes.data;
+      // 1. Submit scan job to Supabase scan_jobs table
+      const { data, error } = await window.supabaseClient
+        .from('scan_jobs')
+        .insert({ status: 'PENDING' })
+        .select()
+        .single();
+
+      if (error) throw error;
+      const jobId = data.id;
+
+      updateScanProgress(25, `Server Scan Job #${jobId} Queued. Worker analyzing active contacts...`);
+      if (el.scanStatusPill) {
+        el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Server Job #${jobId} Running`;
       }
 
-      // Check existing drafts in past 24h
-      const sinceIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const existingRes = await window.supabaseClient
-        .from('followup_drafts')
-        .select('contact')
-        .gte('created_at', sinceIso);
-      const existingSet = new Set((existingRes.data || []).map(d => d.contact));
-
-      const eligible = convs.filter(c => !existingSet.has(c.contact)).slice(0, maxLimit);
-
-      if (eligible.length === 0) {
-        updateScanProgress(100, "All active contacts already have recent drafts evaluated!");
-        el.scanResultsTbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--accent-emerald); padding: 25px;"><i class="fa-solid fa-check"></i> All active contacts have already been evaluated in the past 24 hours.</td></tr>`;
-        stopAIScan();
-        return;
-      }
-
-      let evaluated = 0;
-      let draftsCreated = 0;
-
-      for (let i = 0; i < eligible.length; i++) {
-        if (state.stopScanRequested) break;
-        const item = eligible[i];
-        const pct = Math.round(((i + 1) / eligible.length) * 100);
-        updateScanProgress(pct, `Evaluating [${i + 1}/${eligible.length}] ${formatPhoneDisplay(item.contact)}...`);
-
-        // Fetch recent messages
-        const msgsRes = await window.supabaseClient
-          .from('bsb_messages')
-          .select('direction, message, timestamp')
-          .eq('contact', item.contact)
-          .order('timestamp', { ascending: true })
-          .limit(10);
-        const history = msgsRes.data || [];
-
-        // Build conversation text
-        const convText = history.map(m => {
-          const dir = String(m.direction).toLowerCase() === 'incoming' ? 'Customer' : 'Business';
-          return `${dir}: ${m.message || '[Media / Audio]'}`;
-        }).join('\n');
-
-        // Evaluate using OpenAI
-        try {
-          const draft = await evaluateWithOpenAI(item.contact, item.profile_name, convText, model, openaiKey);
-          evaluated++;
-
-          if (draft && draft.decision) {
-            let status = 'CANCELLED';
-            if (draft.decision === 'SEND') {
-              status = 'PENDING';
-              draftsCreated++;
-            } else if (draft.decision === 'HUMAN_REVIEW') {
-              status = 'PENDING';
-            }
-
-            // Save to Supabase
-            await window.supabaseClient.from('followup_drafts').insert({
-              contact: item.contact,
-              profile_name: item.profile_name,
-              drafted_msg: draft.message,
-              reasoning: draft.internal_reason,
-              decision: draft.decision,
-              category: draft.category || 'sales',
-              rule_ids: draft.rule_ids || [],
-              internal_reason: draft.internal_reason || '',
-              status: status
-            });
-
-            appendScanResultRow(item.contact, draft.decision, draft.category, draft.rule_ids, draft.message, status);
-          }
-        } catch (err) {
-          appendScanResultRow(item.contact, 'ERROR', 'error', [], err.message, 'FAILED');
-        }
-
-        // Delay to prevent rate limits
-        await new Promise(r => setTimeout(r, 250));
-      }
-
-      updateScanProgress(100, `Scan finished! Evaluated ${evaluated} contacts (${draftsCreated} pending follow-up drafts generated).`);
-      loadDashboardStats();
+      // 2. Poll job status until complete
+      pollServerScanJob(jobId);
 
     } catch (e) {
-      updateScanProgress(100, `Scan error: ${e.message}`);
-    } finally {
-      stopAIScan();
+      updateScanProgress(100, `Scan trigger error: ${e.message}`);
+      resetScanUI();
     }
   }
 
-  function stopAIScan() {
+  async function pollServerScanJob(jobId) {
+    const pollInterval = setInterval(async () => {
+      try {
+        const { data, error } = await window.supabaseClient
+          .from('scan_jobs')
+          .select('*')
+          .eq('id', jobId)
+          .single();
+
+        if (error || !data) return;
+
+        const st = data.status;
+        const evaluated = data.total_evaluated || 0;
+        const created = data.drafts_created || 0;
+        const skipped = data.skipped || 0;
+
+        if (st === 'RUNNING') {
+          updateScanProgress(60, `Server-Side Scan Active: Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped)...`);
+          loadDashboardStats();
+          loadRecentScanDrafts();
+        } else if (st === 'COMPLETED') {
+          clearInterval(pollInterval);
+          updateScanProgress(100, `Server Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped).`);
+          loadDashboardStats();
+          loadRecentScanDrafts();
+          resetScanUI();
+        } else if (st === 'FAILED') {
+          clearInterval(pollInterval);
+          updateScanProgress(100, `Server Scan Failed: ${data.error_message || 'Unknown error'}`);
+          resetScanUI();
+        }
+      } catch (err) {
+        // Continue polling
+      }
+    }, 2000);
+  }
+
+  function resetScanUI() {
     state.isScanning = false;
-    state.stopScanRequested = false;
-    el.btnStartAiScan.style.display = 'inline-flex';
-    el.btnStopAiScan.style.display = 'none';
-    el.scanStatusPill.style.display = 'none';
+    if (el.btnStartAiScan) {
+      el.btnStartAiScan.disabled = false;
+      el.btnStartAiScan.innerHTML = '<i class="fa-solid fa-bolt"></i> Run AI Scan Now';
+    }
+    if (el.scanStatusPill) el.scanStatusPill.style.display = 'none';
+  }
+
+  async function loadRecentScanDrafts() {
+    if (!window.supabaseClient || !el.scanResultsTbody) return;
+    try {
+      const { data, error } = await window.supabaseClient
+        .from('followup_drafts')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(30);
+
+      if (!error && data && data.length > 0) {
+        el.scanResultsTbody.innerHTML = '';
+        data.forEach(d => {
+          appendScanResultRow(d.contact, d.decision, d.category, d.rule_ids, d.drafted_msg, d.status);
+        });
+      }
+    } catch (e) {}
   }
 
   function updateScanProgress(pct, text) {
@@ -565,61 +538,21 @@
   }
 
   function appendScanResultRow(contact, decision, category, ruleIds, message, status) {
+    if (!el.scanResultsTbody) return;
     const tr = document.createElement('tr');
     const decClass = decision === 'SEND' ? 'dec-send' : (decision === 'HUMAN_REVIEW' ? 'dec-human' : (decision === 'DEFER' ? 'dec-defer' : 'dec-skip'));
-    const ruleStr = (ruleIds && ruleIds.length) ? ruleIds.join(', ') : '-';
+    const ruleStr = (ruleIds && Array.isArray(ruleIds) && ruleIds.length) ? ruleIds.join(', ') : '-';
     const msgSnippet = message ? escapeHTML(message) : '<span style="color: var(--text-dim);">[No message / Skipped]</span>';
 
     tr.innerHTML = `
       <td style="font-weight: 700; color: var(--text-main);">${formatPhoneDisplay(contact)}</td>
-      <td><span class="decision-badge ${decClass}">${decision}</span></td>
+      <td><span class="decision-badge ${decClass}">${decision || 'SKIP'}</span></td>
       <td style="text-transform: uppercase; font-size: 0.75rem; color: var(--text-muted);">${escapeHTML(category || 'sales')}</td>
       <td style="font-size: 0.75rem; color: #a5b4fc; font-weight: 700;">${escapeHTML(ruleStr)}</td>
       <td style="font-size: 0.82rem;">${msgSnippet}</td>
       <td><span style="font-size: 0.75rem; font-weight: 700; color: ${status === 'PENDING' ? '#fbbf24' : '#64748b'};">${status}</span></td>
     `;
-    el.scanResultsTbody.prepend(tr);
-  }
-
-  async function evaluateWithOpenAI(contact, profileName, convText, model, apiKey) {
-    const prompt = `You are the Teshrij WhatsApp follow-up assistant.
-Strict Lebanese rules:
-- Sales: follow up with customers who received pricing without purchasing (ask missing choice like private/shared).
-- Support: if problem resolved, customer thanked or sent reaction emoji, STOP (SKIP).
-- Never send links or unvetted prices.
-- Natural short Lebanese Arabizi or clean English.
-
-OUTPUT JSON SCHEMA:
-{
-  "decision": "SEND" | "SKIP" | "DEFER" | "HUMAN_REVIEW",
-  "category": "sales" | "support" | "guardrails" | "style",
-  "message": "followup text" or null,
-  "rule_ids": ["SALES_01"],
-  "internal_reason": "brief rationale"
-}`;
-
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          { role: 'system', content: prompt },
-          { role: 'user', content: `Contact: ${contact} (${profileName})\n\nCONVERSATION:\n${convText}\n\nDecision:` }
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.7,
-        max_tokens: 220
-      })
-    });
-
-    const resJson = await resp.json();
-    if (resJson.error) throw new Error(resJson.error.message);
-    const content = resJson.choices[0].message.content;
-    return JSON.parse(content);
+    el.scanResultsTbody.appendChild(tr);
   }
 
   // =========================================================================
@@ -1515,7 +1448,7 @@ OUTPUT JSON SCHEMA:
 
     // Step 1: Scanner Events
     if (el.btnStartAiScan) el.btnStartAiScan.addEventListener('click', startAIScan);
-    if (el.btnStopAiScan) el.btnStopAiScan.addEventListener('click', () => { state.stopScanRequested = true; });
+    if (el.btnRefreshScan) el.btnRefreshScan.addEventListener('click', loadRecentScanDrafts);
 
     // Step 2: Review Events
     if (el.btnDraftValidate) el.btnDraftValidate.addEventListener('click', validateCurrentDraft);
