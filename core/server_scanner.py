@@ -30,20 +30,36 @@ def get_db():
     return conn
 
 
-def get_openai_client() -> OpenAI:
+def is_fixed_temperature_model(model_name: str) -> bool:
+    if not model_name:
+        return False
+    m = model_name.lower().strip()
+    base_model = m.split("/")[-1].split("\\")[-1]
+    return (
+        base_model.startswith(("o1", "o2", "o3", "o4", "gpt-5"))
+        or "-o1" in base_model
+        or "-o3" in base_model
+        or "-o4" in base_model
+        or "gpt-5" in base_model
+    )
+
+
+def get_openai_client_and_model() -> tuple[OpenAI, str]:
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT value FROM followup_config WHERE key = 'openai'")
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row and row.get("value"):
+    chat_model = "gpt-4o"
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT value FROM followup_config WHERE key = 'openai'")
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row and row.get("value"):
+        if not api_key:
             api_key = row["value"].get("api_key")
+        chat_model = row["value"].get("chat_model") or "gpt-4o"
     if not api_key:
         raise ValueError("OPENAI_API_KEY not configured in environment or followup_config.")
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key), chat_model
 
 
 def load_instructions() -> str:
@@ -161,7 +177,7 @@ def sanitize_message(msg: Optional[str]) -> Optional[str]:
 # Single Contact Evaluation Task
 # ============================================================================
 
-def process_single_contact(contact: str, profile_name: str, conn_str: str, client: OpenAI, instructions: str) -> Dict[str, Any]:
+def process_single_contact(contact: str, profile_name: str, conn_str: str, client: OpenAI, instructions: str, chat_model: str = "gpt-4o") -> Dict[str, Any]:
     conn = psycopg2.connect(conn_str)
     conn.autocommit = True
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -255,16 +271,19 @@ RULES:
 - Never output raw links, fake email addresses, or unvetted prices.
 """
 
-        res = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
+        req_params = {
+            "model": chat_model or "gpt-4o",
+            "messages": [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": f"Customer phone: {contact}\nProfile Name: {profile_name}\n\nCONVERSATION HISTORY:\n{conv_text}\n\nEvaluate decision:"}
             ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-            max_tokens=250
-        )
+            "response_format": {"type": "json_object"},
+            "max_tokens": 250
+        }
+        if not is_fixed_temperature_model(req_params["model"]):
+            req_params["temperature"] = 0.7
+
+        res = client.chat.completions.create(**req_params)
 
         draft = json.loads(res.choices[0].message.content)
         decision = draft.get("decision", "SKIP").upper()
@@ -352,7 +371,7 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
         conn.close()
         return {"total_evaluated": 0, "drafts_created": 0, "skipped": 0, "human_review": 0}
 
-    client = get_openai_client()
+    client, chat_model = get_openai_client_and_model()
     instructions = load_instructions()
 
     stats = {"total_evaluated": 0, "drafts_created": 0, "skipped": 0, "human_review": 0, "errors": 0}
@@ -367,7 +386,8 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
                 c.get("profile_name") or "",
                 DB_URL,
                 client,
-                instructions
+                instructions,
+                chat_model
             ): c["contact"] for c in eligible
         }
 
@@ -412,11 +432,6 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
     return stats
 
 
-# ============================================================================
-# Daemon Listener for UI Scan Requests & 15-Minute Automated Loop
-# ============================================================================
-
-def run_server_daemon(interval_minutes: int = 15):
 # ============================================================================
 # Queue Dispatcher (Server-Side)
 # ============================================================================
