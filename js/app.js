@@ -227,6 +227,22 @@
       .replace(/'/g, "&#039;");
   }
 
+  // Resolves media URL: if already in Supabase Storage CDN, returns it; otherwise routes through on-demand Edge Function
+  function resolveMediaUrl(chatId, mediaType, rawUrl) {
+    const trimmed = (rawUrl || '').trim();
+    if (trimmed.includes('supabase.co/storage/v1/object/public/bsb-media/')) {
+      return trimmed;
+    }
+    if (chatId) {
+      const typeParam = (mediaType || '').toLowerCase().includes('image') ? 'image' : 'audio';
+      return `${window.SUPABASE_URL}/functions/v1/bsb_media?chatid=${encodeURIComponent(chatId)}&type=${typeParam}`;
+    }
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+    return '';
+  }
+
   // =========================================================================
   // Authentication (Matches Admin Panel)
   // =========================================================================
@@ -793,15 +809,14 @@
       const msgDiv = document.createElement('div');
       msgDiv.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
-      // Render media (Voice notes play via Supabase Storage; images render gracefully)
+      // Render media (Playable voice notes & images resolve via Supabase Storage / Edge Function proxy)
       let mediaHTML = '';
       const mType = (msg.media_type || '').toLowerCase();
-      const mUrl = msg.media_url ? String(msg.media_url).trim() : '';
-      const hasValidMediaUrl = mUrl.startsWith('http://') || mUrl.startsWith('https://');
+      const resolvedMediaUrl = resolveMediaUrl(msg.chat_id, mType, msg.media_url);
 
       if (mType && mType !== 'none' && mType !== 'text') {
         if (mType.includes('audio') || mType.includes('voice')) {
-          if (hasValidMediaUrl) {
+          if (resolvedMediaUrl) {
             mediaHTML = `
               <div class="voice-note-card">
                 <div class="voice-note-header">
@@ -809,8 +824,8 @@
                   <span style="font-size:0.7rem; color:var(--text-dim);">WhatsApp Audio</span>
                 </div>
                 <audio class="voice-note-audio" controls preload="none">
-                  <source src="${escapeHTML(mUrl)}" type="audio/ogg">
-                  <source src="${escapeHTML(mUrl)}" type="audio/mpeg">
+                  <source src="${escapeHTML(resolvedMediaUrl)}" type="audio/ogg">
+                  <source src="${escapeHTML(resolvedMediaUrl)}" type="audio/mpeg">
                   Your browser does not support audio playback.
                 </audio>
               </div>
@@ -819,10 +834,10 @@
             mediaHTML = `<div class="media-indicator-badge media-audio"><i class="fa-solid fa-microphone-lines"></i> <span>Voice Note</span></div>`;
           }
         } else if (mType.includes('image') || mType.includes('photo')) {
-          if (hasValidMediaUrl) {
+          if (resolvedMediaUrl) {
             mediaHTML = `
               <div class="chat-media-image-wrap">
-                <img class="chat-media-img" src="${escapeHTML(mUrl)}" loading="lazy" alt="Photo" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-indicator-badge media-image\\'><i class=\\'fa-regular fa-image\\'></i> <span>Photo</span></div>';">
+                <img class="chat-media-img" src="${escapeHTML(resolvedMediaUrl)}" loading="lazy" alt="Photo" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-indicator-badge media-image\\'><i class=\\'fa-regular fa-image\\'></i> <span>Photo</span></div>';">
               </div>
             `;
           } else {
