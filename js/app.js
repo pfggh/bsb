@@ -1395,10 +1395,20 @@
       });
 
       if (!res.error && res.data) {
-        state.conversations = res.data;
+        // Extra safeguard: Filter out any contact that was sent a message in the past 1 hour via dispatcher
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        const { data: recentSentQueue } = await window.supabaseClient
+          .from('send_queue')
+          .select('contact')
+          .eq('status', 'SENT')
+          .gte('sent_at', oneHourAgo);
+
+        const sentContactsSet = new Set((recentSentQueue || []).map(q => normalizePhone(q.contact)));
+
+        state.conversations = res.data.filter(c => !sentContactsSet.has(normalizePhone(c.contact)));
         filterAndRenderConversations();
-        if (el.total24hCount) el.total24hCount.textContent = `${res.data.length} active`;
-        if (el.convCountBadge) el.convCountBadge.textContent = res.data.length;
+        if (el.total24hCount) el.total24hCount.textContent = `${state.conversations.length} active`;
+        if (el.convCountBadge) el.convCountBadge.textContent = state.conversations.length;
       }
     } catch (e) {} finally {
       state.isLoadingConversations = false;
@@ -1437,17 +1447,29 @@
       item.onclick = () => selectConversation(c);
 
       const isIncoming = String(c.last_direction).toLowerCase() === 'incoming';
-      const dirIcon = isIncoming ? '<i class="fa-solid fa-arrow-down-left" style="color: #34d399;"></i>' : '<i class="fa-solid fa-arrow-up-right" style="color: #a5b4fc;"></i>';
+      const dirIcon = isIncoming 
+        ? '<i class="fa-solid fa-arrow-down-left dir-icon dir-incoming"></i>' 
+        : '<i class="fa-solid fa-arrow-up-right dir-icon dir-outgoing"></i>';
+
+      const initial = (c.profile_name || c.contact || '?').trim()[0].toUpperCase();
+      const countBadge = c.msg_count_24h ? `<span class="msg-count-pill">${c.msg_count_24h}</span>` : '';
+      const adBadge = c.has_tracking ? '<span class="ad-pill"><i class="fa-brands fa-meta"></i> Ads</span>' : '';
 
       item.innerHTML = `
-        <div class="conv-avatar"><i class="fa-solid fa-user"></i></div>
+        <div class="conv-avatar ${isIncoming ? 'incoming-indicator' : ''}">
+          ${initial}
+        </div>
         <div class="conv-info">
-          <div class="conv-top-row">
+          <div class="conv-header-line">
             <span class="conv-name">${formatPhoneDisplay(c.contact)}</span>
             <span class="conv-time">${formatRelativeTime(c.last_timestamp)}</span>
           </div>
-          <div class="conv-preview-row">
-            <span class="conv-snippet">${dirIcon} ${escapeHTML(c.last_message || '[Media]')}</span>
+          <div class="conv-subline">
+            <span class="conv-preview">${dirIcon} ${escapeHTML(c.last_message || '[Media]')}</span>
+            <div class="conv-badges">
+              ${adBadge}
+              ${countBadge}
+            </div>
           </div>
         </div>
       `;
@@ -1466,49 +1488,73 @@
     el.chatProfileName.textContent = c.profile_name || 'BSB Contact';
     el.chatWaLink.href = `https://web.whatsapp.com/send?phone=${normalizePhone(c.contact)}`;
 
+    if (el.chatAdBanner) {
+      if (c.has_tracking) {
+        el.chatAdBanner.style.display = 'flex';
+        el.chatAdBanner.innerHTML = `<i class="fa-brands fa-meta"></i> Meta Ad Lead (ID: ${escapeHTML(c.ad_id || 'Active')})`;
+      } else {
+        el.chatAdBanner.style.display = 'none';
+      }
+    }
+
     renderConversationList(); // Update active highlights
 
     // Load messages
-    el.chatMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading messages...</div>';
+    el.chatMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading conversation...</div>';
     try {
       const { data } = await window.supabaseClient
         .from('bsb_messages')
         .select('*')
         .eq('contact', c.contact)
         .order('timestamp', { ascending: true })
-        .limit(50);
+        .limit(100);
       renderChatMessages(data || []);
-    } catch (e) {}
+    } catch (e) {
+      el.chatMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;">Failed to load messages.</div>';
+    }
   }
 
   function renderChatMessages(messages) {
     el.chatMessagesContainer.innerHTML = '';
     messages.forEach(msg => {
       const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
-      const bubble = document.createElement('div');
-      bubble.className = `chat-message-row ${isIncoming ? 'msg-incoming' : 'msg-outgoing'}`;
+      const msgRow = document.createElement('div');
+      msgRow.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
       let mediaHtml = '';
       if (msg.media_type && msg.media_type !== 'None') {
         const mUrl = resolveMediaUrl(msg.chat_id, msg.media_type, msg.media_url);
         if (msg.media_type.toLowerCase().includes('audio')) {
-          mediaHtml = `<div class="msg-media-box"><audio controls class="msg-audio-player" preload="none" src="${mUrl}"></audio></div>`;
+          mediaHtml = `
+            <div class="voice-note-card">
+              <div class="voice-note-header">
+                <span><i class="fa-solid fa-microphone-lines"></i> Voice Note</span>
+              </div>
+              <audio controls class="voice-note-audio" preload="none" src="${mUrl}"></audio>
+            </div>
+          `;
         } else if (msg.media_type.toLowerCase().includes('image')) {
-          mediaHtml = `<div class="msg-media-box"><a href="${mUrl}" target="_blank"><img class="msg-image-thumb" src="${mUrl}" loading="lazy" alt="Media" /></a></div>`;
+          mediaHtml = `
+            <div class="chat-media-image-wrap">
+              <a href="${mUrl}" target="_blank" rel="noopener noreferrer">
+                <img class="chat-media-img" src="${mUrl}" loading="lazy" alt="Image" />
+              </a>
+            </div>
+          `;
         }
       }
 
-      bubble.innerHTML = `
-        <div class="chat-bubble">
+      msgRow.innerHTML = `
+        <div class="msg-bubble">
           ${mediaHtml}
-          <div class="msg-text">${escapeHTML(msg.message || '')}</div>
-          <div class="msg-time-row">
-            <span>${formatMessageTime(msg.timestamp)}</span>
-            ${!isIncoming ? '<i class="fa-solid fa-check-double" style="font-size: 0.65rem; color: #a5b4fc;"></i>' : ''}
-          </div>
+          ${msg.message ? `<div class="msg-text">${escapeHTML(msg.message)}</div>` : ''}
+        </div>
+        <div class="msg-meta">
+          <span>${formatMessageTime(msg.timestamp)}</span>
+          ${!isIncoming ? '<i class="fa-solid fa-check-double msg-status-icon msg-status-read"></i>' : ''}
         </div>
       `;
-      el.chatMessagesContainer.appendChild(bubble);
+      el.chatMessagesContainer.appendChild(msgRow);
     });
 
     el.chatMessagesContainer.scrollTop = el.chatMessagesContainer.scrollHeight;
@@ -1533,23 +1579,47 @@
           message: text
         })
       });
-      const resJson = await resp.json();
-      if (resp.status === 200 && resJson.status !== 'error' && resJson.success !== false) {
+      const resJson = await resp.json().catch(() => ({ raw: 'Non-JSON' }));
+      const isSuccess = resp.status === 200 && resJson.status !== 'error' && resJson.success !== false;
+
+      // Always record outgoing send into send_queue so 1h dispatcher filter tracks it
+      if (window.supabaseClient) {
+        await window.supabaseClient.from('send_queue').insert({
+          contact: dest,
+          message: text,
+          status: isSuccess ? 'SENT' : 'FAILED',
+          sent_at: isSuccess ? new Date().toISOString() : null,
+          api_response: JSON.stringify(resJson),
+          error_message: isSuccess ? null : JSON.stringify(resJson)
+        }).catch(() => {});
+      }
+
+      if (isSuccess) {
         el.chatTextarea.value = '';
-        el.sendStatusLine.textContent = "Message sent successfully!";
+        el.sendStatusLine.textContent = "✓ Message sent successfully!";
+
         // Optimistic message append
-        const bubble = document.createElement('div');
-        bubble.className = 'chat-message-row msg-outgoing';
-        bubble.innerHTML = `
-          <div class="chat-bubble">
+        const msgRow = document.createElement('div');
+        msgRow.className = 'chat-msg outgoing';
+        msgRow.innerHTML = `
+          <div class="msg-bubble">
             <div class="msg-text">${escapeHTML(text)}</div>
-            <div class="msg-time-row"><span>Just now</span> <i class="fa-solid fa-check" style="font-size: 0.65rem; color: #a5b4fc;"></i></div>
+          </div>
+          <div class="msg-meta">
+            <span>Just now</span>
+            <i class="fa-solid fa-check msg-status-icon"></i>
           </div>
         `;
-        el.chatMessagesContainer.appendChild(bubble);
+        el.chatMessagesContainer.appendChild(msgRow);
         el.chatMessagesContainer.scrollTop = el.chatMessagesContainer.scrollHeight;
+
+        // Auto-remove contact from feed if sent within the past hour
+        state.conversations = state.conversations.filter(c => normalizePhone(c.contact) !== dest);
+        filterAndRenderConversations();
+        if (el.total24hCount) el.total24hCount.textContent = `${state.conversations.length} active`;
+        if (el.convCountBadge) el.convCountBadge.textContent = state.conversations.length;
       } else {
-        el.sendStatusLine.textContent = `Error: ${JSON.stringify(resJson)}`;
+        el.sendStatusLine.textContent = `Error: ${resJson.message || JSON.stringify(resJson)}`;
       }
     } catch (e) {
       el.sendStatusLine.textContent = `Network error: ${e.message}`;

@@ -990,7 +990,7 @@ def analyze_contact_thread(
 # ============================================================================
 
 def save_draft(contact: str, profile_name: str, analysis: Dict[str, Any]):
-    """Inserts analysis result into followup_drafts (Supabase)."""
+    """Inserts analysis result into followup_drafts (Supabase). Rescanning replaces previous CANCELLED evaluations."""
     send_followup = analysis.get("send_followup", False)
     message = analysis.get("message", "") or ""
     reasoning = analysis.get("reasoning", "")
@@ -1004,6 +1004,9 @@ def save_draft(contact: str, profile_name: str, analysis: Dict[str, Any]):
     conn = connect_db()
     cur = conn.cursor()
     try:
+        # If there were previous CANCELLED (no-draft) records for this contact, remove them so contact is clean
+        cur.execute("DELETE FROM followup_drafts WHERE contact = %s AND status = 'CANCELLED'", (contact,))
+
         cur.execute("""
             INSERT INTO followup_drafts
                 (contact, profile_name, drafted_msg, reasoning, decision, category,

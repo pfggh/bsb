@@ -597,6 +597,9 @@ async function analyzeContact(
 
 async function saveDraft(contact: string, profileName: string, analysis: AnalysisResult) {
   const sb = getSupabase();
+  // Delete any previous CANCELLED evaluations so rescanning cleanly replaces them
+  await sb.from("followup_drafts").delete().eq("contact", contact).eq("status", "CANCELLED");
+
   await sb.from("followup_drafts").insert({
     contact,
     profile_name: profileName,
