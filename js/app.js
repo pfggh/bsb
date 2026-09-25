@@ -94,6 +94,7 @@
     el.statPendingDrafts = document.getElementById('stat-pending-drafts');
     el.statCanonicalRules = document.getElementById('stat-canonical-rules');
     el.statQueuedCountBanner = document.getElementById('stat-queued-count-banner');
+    el.statLastScanCost = document.getElementById('stat-last-scan-cost');
     el.btnStartAiScan = document.getElementById('btn-start-ai-scan');
     el.btnPauseAiScan = document.getElementById('btn-pause-ai-scan');
     el.btnStopAiScan = document.getElementById('btn-stop-ai-scan');
@@ -449,6 +450,7 @@
     const candidates = Math.max(0, (s.contacts_24h || 0) - (s.pending_drafts || 0));
     if (el.statScanCandidates) el.statScanCandidates.textContent = candidates.toLocaleString();
     if (el.badgeEligibleScan) el.badgeEligibleScan.textContent = candidates;
+    if (el.statLastScanCost) el.statLastScanCost.textContent = `$${parseFloat(s.last_scan_cost || 0).toFixed(4)}`;
   }
 
   // =========================================================================
@@ -704,9 +706,13 @@
           return;
         }
 
+        const costStr = data.total_cost !== undefined && data.total_cost !== null
+          ? ` • Spent: $${parseFloat(data.total_cost).toFixed(4)}`
+          : '';
+
         if (st === 'RUNNING' || (st === 'PENDING' && evaluated > 0)) {
           const pct = total > 0 ? Math.min(98, Math.max(15, Math.round((evaluated / total) * 100))) : 20;
-          updateScanProgress(pct, `Evaluating: ${evaluated}/${total || '?'} (${created} drafts, ${skipped} skipped)${currContact}`);
+          updateScanProgress(pct, `Evaluating: ${evaluated}/${total || '?'} (${created} drafts, ${skipped} skipped)${currContact}${costStr}`);
           if (el.scanStatusPill) {
             el.scanStatusPill.style.display = 'inline-flex';
             el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Running #${jobId} (${evaluated}/${total || '?'})`;
@@ -715,17 +721,19 @@
           loadRecentScanDrafts();
         } else if (st === 'COMPLETED') {
           clearInterval(scanPollTimer);
-          updateScanProgress(100, `Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped).`);
+          const finalCost = data.total_cost ? `$${parseFloat(data.total_cost).toFixed(4)}` : '$0.00';
+          updateScanProgress(100, `Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped) • Total Spent: ${finalCost}`);
           if (el.scanStatusPill) {
             el.scanStatusPill.style.display = 'inline-flex';
-            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-circle-check"></i> Job #${jobId} Complete (${created} Drafts)`;
+            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-circle-check"></i> Job #${jobId} Complete (${finalCost})`;
           }
           loadDashboardStats();
           loadRecentScanDrafts();
           resetScanUI();
         } else if (st === 'STOPPED' || st === 'CANCELLED') {
           clearInterval(scanPollTimer);
-          updateScanProgress(100, `Scan Job #${jobId} was stopped.`);
+          const finalCost = data.total_cost ? ` • Total Spent: $${parseFloat(data.total_cost).toFixed(4)}` : '';
+          updateScanProgress(100, `Scan Job #${jobId} was stopped.${finalCost}`);
           loadDashboardStats();
           loadRecentScanDrafts();
           resetScanUI();
