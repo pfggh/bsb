@@ -1196,9 +1196,53 @@ def normalize_phone(phone_str: str) -> str:
     return digits
 
 
-def process_server_queue(max_items: int = 15):
+def get_bsb_sender_session(agent_key: str = "0670126f7e99ae241c84d3a6d32e84c2"):
+    """Creates an authenticated BestSMSBulk session using valid agent secret key."""
+    import requests
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (X-UA-Compatible; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "Origin": "https://www.bestsmsbulk.com",
+        "Referer": "https://www.bestsmsbulk.com/pro-livechat/users.html"
+    })
+    try:
+        r = s.post("https://www.bestsmsbulk.com/pro-livechat/api/validate-key.php", data={"secret_key": agent_key, "force_login": "1"}, timeout=15)
+        res = r.json()
+        if res.get("success"):
+            return s
+    except Exception as e:
+        print(f"[BSB SESSION ERROR] {e}")
+    return None
+
+
+def send_livechat_message(session, destination: str, message: str) -> Dict[str, Any]:
+    """Sends WhatsApp message via BSB LiveChat OneBox session endpoint."""
+    try:
+        import uuid
+        req_id = "fady_" + uuid.uuid4().hex[:12]
+        res = session.post(
+            "https://www.bestsmsbulk.com/pro-livechat/php/send-message.php",
+            data={
+                "incoming_id": str(destination),
+                "message": message,
+                "request_id": req_id
+            },
+            timeout=25
+        )
+        try:
+            res_json = res.json()
+        except Exception:
+            res_json = {"raw": res.text, "status_code": res.status_code}
+        res_json["status_code"] = res.status_code
+        return res_json
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def process_server_queue(max_items: int = 50, dry_run: bool = False):
     """Dispatches QUEUED messages from send_queue with 1.5s delay during working hours."""
     if not is_beirut_working_hours():
+        print("[QUEUE DISPATCHER] Outside Beirut working hours (09:00 - 21:00). Skipping dispatch.")
         return
 
     import requests
@@ -1212,7 +1256,23 @@ def process_server_queue(max_items: int = 15):
         conn.close()
         return
 
-    print(f"[QUEUE DISPATCHER] Found {len(items)} queued messages. Dispatching...")
+    print(f"[QUEUE DISPATCHER] Found {len(items)} queued messages. Dispatching (dry_run: {dry_run})...")
+
+    # Fetch configured agent key or credentials from followup_config
+    cur.execute("SELECT value FROM followup_config WHERE key = 'bestsmsbulk';")
+    cfg_row = cur.fetchone()
+    sms_cfg = cfg_row["value"] if cfg_row and cfg_row.get("value") else {}
+    agent_key = sms_cfg.get("agent_key", "0670126f7e99ae241c84d3a6d32e84c2")
+    api_key = sms_cfg.get("api_key", "teshrij")
+    api_secret = sms_cfg.get("api_secret", "Teshrij123")
+    api_endpoint = sms_cfg.get("api_endpoint", "https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php")
+
+    # Initialize authenticated session
+    bsb_session = None
+    if not dry_run:
+        bsb_session = get_bsb_sender_session(agent_key)
+        if not bsb_session:
+            print("[QUEUE DISPATCHER] Warning: LiveChat session login failed, will try legacy API endpoint.")
 
     for item in items:
         qid = item["id"]
@@ -1220,26 +1280,54 @@ def process_server_queue(max_items: int = 15):
         msg = item["message"]
         norm = normalize_phone(contact)
 
+        if dry_run:
+            print(f"[QUEUE DISPATCHER DRY-RUN] Would send to {norm}: {msg[:35]}...")
+            cur.execute("UPDATE send_queue SET status = 'SENT', sent_at = NOW() WHERE id = %s", (qid,))
+            if item.get("draft_id"):
+                cur.execute("UPDATE followup_drafts SET status = 'SENT' WHERE id = %s", (item["draft_id"],))
+            time.sleep(1.5)
+            continue
+
         try:
-            resp = requests.post(
-                "https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php",
-                json={
-                    "api_key": "teshrij",
-                    "api_secret": "Teshrij123",
-                    "destination": norm,
-                    "message": msg
-                },
-                timeout=12
-            )
-            res_json = resp.json()
-            if resp.status_code == 200 and res_json.get("status") != "error" and res_json.get("success") is not False:
+            res_json = None
+            success = False
+
+            # Primary dispatcher: LiveChat authenticated session
+            if bsb_session:
+                res_json = send_livechat_message(bsb_session, norm, msg)
+                success = res_json.get("success") is True
+
+            # Fallback dispatcher: Direct sendMessage API
+            if not success:
+                resp = requests.post(
+                    api_endpoint,
+                    json={
+                        "api_key": api_key,
+                        "api_secret": api_secret,
+                        "destination": norm,
+                        "message": msg
+                    },
+                    timeout=15
+                )
+                try:
+                    fallback_json = resp.json()
+                except Exception:
+                    fallback_json = {"raw": resp.text, "status_code": resp.status_code}
+                if resp.status_code == 200 and fallback_json.get("status") != "error" and fallback_json.get("success") is not False:
+                    success = True
+                    res_json = fallback_json
+                elif not res_json:
+                    res_json = fallback_json
+
+            if success:
                 cur.execute("UPDATE send_queue SET status = 'SENT', sent_at = NOW(), api_response = %s WHERE id = %s", (json.dumps(res_json), qid))
                 if item.get("draft_id"):
                     cur.execute("UPDATE followup_drafts SET status = 'SENT' WHERE id = %s", (item["draft_id"],))
                 print(f"[QUEUE DISPATCHER] ✓ Dispatched to {norm}")
             else:
-                cur.execute("UPDATE send_queue SET status = 'FAILED', attempts = COALESCE(attempts,0) + 1, error_message = %s WHERE id = %s", (json.dumps(res_json), qid))
-                print(f"[QUEUE DISPATCHER] ❌ Failed to {norm}: {res_json}")
+                err_text = json.dumps(res_json) if res_json else "Unknown dispatch error"
+                cur.execute("UPDATE send_queue SET status = 'FAILED', attempts = COALESCE(attempts,0) + 1, error_message = %s WHERE id = %s", (err_text, qid))
+                print(f"[QUEUE DISPATCHER] ❌ Failed to {norm}: {err_text}")
         except Exception as e:
             cur.execute("UPDATE send_queue SET status = 'FAILED', attempts = COALESCE(attempts,0) + 1, error_message = %s WHERE id = %s", (str(e), qid))
             print(f"[QUEUE DISPATCHER] ❌ Error to {norm}: {e}")
