@@ -575,10 +575,12 @@
       if (currentStatus === 'PAUSED') {
         // RESUME
         if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Resuming...';
-        await window.supabaseClient
+        const { error: resumeErr } = await window.supabaseClient
           .from('scan_jobs')
           .update({ status: 'RUNNING' })
           .eq('id', activeScanJobId);
+
+        if (resumeErr) throw resumeErr;
 
         // Re-ping edge worker in case it had exited
         triggerEdgeWorker(activeScanJobId);
@@ -594,10 +596,12 @@
       } else {
         // PAUSE
         if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Pausing...';
-        await window.supabaseClient
+        const { error: pauseErr } = await window.supabaseClient
           .from('scan_jobs')
           .update({ status: 'PAUSED' })
           .eq('id', activeScanJobId);
+
+        if (pauseErr) throw pauseErr;
 
         if (btn) {
           btn.innerHTML = '<i class="fa-solid fa-play"></i> Resume';
@@ -610,6 +614,7 @@
       }
     } catch (err) {
       console.error('[PAUSE ERROR]', err);
+      alert(`Could not pause/resume scan: ${err.message || err}`);
     }
   }
 
@@ -627,10 +632,12 @@
     if (stopBtn) stopBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Stopping...';
 
     try {
-      await window.supabaseClient
+      const { error: stopErr } = await window.supabaseClient
         .from('scan_jobs')
         .update({ status: 'STOPPED', completed_at: new Date().toISOString() })
         .eq('id', activeScanJobId);
+
+      if (stopErr) throw stopErr;
 
       if (scanPollTimer) clearInterval(scanPollTimer);
       updateScanProgress(100, `Scan Job #${activeScanJobId} stopped by user.`);
@@ -638,6 +645,7 @@
       loadRecentScanDrafts();
     } catch (err) {
       console.error('[STOP ERROR]', err);
+      alert(`Could not stop scan: ${err.message || err}`);
     } finally {
       resetScanUI();
     }
