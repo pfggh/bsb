@@ -1155,12 +1155,16 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
                     print(f"[JOB UPDATE WARNING] {e}")
 
     if job_id:
-        cur.execute("""
-            UPDATE scan_jobs
-            SET status = 'COMPLETED', completed_at = NOW(),
-                total_evaluated = %s, drafts_created = %s, skipped = %s, human_review = %s, current_contact = ''
-            WHERE id = %s
-        """, (stats["total_evaluated"], stats["drafts_created"], stats["skipped"], stats["human_review"], job_id))
+        cur.execute("SELECT status FROM scan_jobs WHERE id = %s", (job_id,))
+        final_row = cur.fetchone()
+        final_st = (final_row.get("status") or "").upper() if final_row else ""
+        if final_st not in ("STOPPED", "CANCELLED", "STOP"):
+            cur.execute("""
+                UPDATE scan_jobs
+                SET status = 'COMPLETED', completed_at = NOW(),
+                    total_evaluated = %s, drafts_created = %s, skipped = %s, human_review = %s, current_contact = ''
+                WHERE id = %s
+            """, (stats["total_evaluated"], stats["drafts_created"], stats["skipped"], stats["human_review"], job_id))
 
     cur.close()
     conn.close()

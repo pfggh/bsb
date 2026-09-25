@@ -670,6 +670,13 @@ Deno.serve(async (req: Request) => {
     const total = eligible.length;
     console.log(`[EDGE SCAN] Found ${total} eligible contacts to evaluate.`);
 
+    if (jobId) {
+      await sb.from("scan_jobs").update({
+        total_contacts: total,
+        status: "RUNNING"
+      }).eq("id", jobId);
+    }
+
     if (total === 0) {
       if (jobId) {
         await sb.from("scan_jobs").update({
