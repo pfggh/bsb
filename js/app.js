@@ -483,7 +483,20 @@
         el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Server Job #${jobId} Running`;
       }
 
-      // 2. Poll job status until complete
+      // 2. Trigger Edge Function worker directly
+      fetch(`${window.SUPABASE_URL}/functions/v1/scan`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': window.SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${window.SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({ job_id: jobId })
+      }).catch(err => {
+        console.warn('[SCAN EDGE TRIGGER WARNING]', err);
+      });
+
+      // 3. Poll job status until complete
       pollServerScanJob(jobId);
 
     } catch (e) {

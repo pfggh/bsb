@@ -641,48 +641,38 @@ Deno.serve(async (req: Request) => {
       await sb.from("scan_jobs").update({ status: "RUNNING", started_at: new Date().toISOString() }).eq("id", jobId);
     }
 
-    console.log("[EDGE SCAN] Querying eligible contacts...");
+    console.log("[EDGE SCAN] Querying eligible contacts via get_eligible_scan_contacts RPC...");
 
-    // 1. Eligible contacts: activity in last 24h, last message >= 2h ago
-    const since24h = new Date(Date.now() - 24 * 3_600_000).toISOString();
-    const since2h = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    // 1. Fetch eligible contacts directly via fast SQL function
+    const { data: eligibleContacts, error: rpcErr } = await sb.rpc("get_eligible_scan_contacts", {
+      p_hours_lookback: 24,
+      p_min_hours_old: 2.0
+    });
 
-    const { data: allRecent } = await sb.from("bsb_messages")
-      .select("contact, profile_name, timestamp")
-      .gte("timestamp", since24h)
-      .order("timestamp", { ascending: false });
-
-    // Group by contact, pick max timestamp
-    const contactMap = new Map<string, { profile_name: string; last_ts: string }>();
-    for (const r of allRecent || []) {
-      if (!contactMap.has(r.contact)) {
-        contactMap.set(r.contact, { profile_name: r.profile_name || "", last_ts: r.timestamp });
-      }
+    if (rpcErr) {
+      console.error("[EDGE SCAN RPC ERROR]", rpcErr);
+      throw rpcErr;
     }
 
-    // Filter: last message >= 2h ago
-    const candidates = [...contactMap.entries()]
-      .filter(([, v]) => v.last_ts <= since2h)
-      .map(([contact, v]) => ({ contact, profile_name: v.profile_name, last_ts: v.last_ts }))
-      .sort((a, b) => b.last_ts.localeCompare(a.last_ts));
+    let eligible = (eligibleContacts || []).map((c: Record<string, unknown>) => ({
+      contact: String(c.contact),
+      profile_name: String(c.profile_name || ""),
+      last_ts: String(c.last_ts || "")
+    }));
 
-    // 2. Filter out contacts already drafted in last 24h
-    const { data: existingDrafts } = await sb.from("followup_drafts")
-      .select("contact")
-      .gte("created_at", since24h);
-    const existingContacts = new Set((existingDrafts || []).map((d: { contact: string }) => d.contact));
-
-    let eligible = candidates.filter(c => !existingContacts.has(c.contact));
-    if (limit) eligible = eligible.slice(0, limit);
+    if (limit && limit > 0) {
+      eligible = eligible.slice(0, limit);
+    }
 
     const total = eligible.length;
-    console.log(`[EDGE SCAN] Found ${total} eligible contacts.`);
+    console.log(`[EDGE SCAN] Found ${total} eligible contacts to evaluate.`);
 
     if (total === 0) {
       if (jobId) {
         await sb.from("scan_jobs").update({
           status: "COMPLETED", completed_at: new Date().toISOString(),
-          total_contacts: 0, total_evaluated: 0, drafts_created: 0, skipped: 0, human_review: 0
+          total_contacts: 0, total_evaluated: 0, drafts_created: 0, skipped: 0, human_review: 0,
+          current_contact: ""
         }).eq("id", jobId);
       }
       return new Response(JSON.stringify({ total_evaluated: 0, drafts_created: 0, skipped: 0 }), {
@@ -703,52 +693,93 @@ Deno.serve(async (req: Request) => {
 
     const stats: ScanStats = { total_evaluated: 0, drafts_created: 0, skipped: 0, errors: 0 };
 
-    // Process in batches of 5 concurrently (same as Fady_bot max_workers=5)
-    const CONCURRENCY = 5;
-    for (let i = 0; i < eligible.length; i += CONCURRENCY) {
-      const batch = eligible.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async (c) => {
-        try {
-          const analysis = await analyzeContact(c.contact, c.profile_name, client, model, temperature, systemPrompt, refNow);
-          await saveDraft(c.contact, c.profile_name, analysis);
+    // Asynchronous worker processor
+    const runProcessing = async () => {
+      const CONCURRENCY = 6;
+      for (let i = 0; i < eligible.length; i += CONCURRENCY) {
+        const batch = eligible.slice(i, i + CONCURRENCY);
+        const batchDrafts: Array<Record<string, unknown>> = [];
 
-          stats.total_evaluated++;
-          if (analysis.decision === "SEND") stats.drafts_created++;
-          else stats.skipped++;
+        await Promise.all(batch.map(async (c) => {
+          try {
+            const analysis = await analyzeContact(c.contact, c.profile_name, client, model, temperature, systemPrompt, refNow);
+            batchDrafts.push({
+              contact: c.contact,
+              profile_name: c.profile_name,
+              drafted_msg: analysis.send_followup ? analysis.message : null,
+              reasoning: analysis.reasoning,
+              decision: analysis.decision,
+              category: analysis.category,
+              rule_ids: analysis.rule_ids,
+              internal_reason: analysis.internal_reason,
+              status: analysis.send_followup ? "PENDING" : "CANCELLED"
+            });
 
-          console.log(`[${stats.total_evaluated}/${total}] ${c.contact} -> ${analysis.decision}`);
+            stats.total_evaluated++;
+            if (analysis.decision === "SEND") stats.drafts_created++;
+            else stats.skipped++;
 
-          if (jobId) {
+            console.log(`[${stats.total_evaluated}/${total}] ${c.contact} -> ${analysis.decision}`);
+          } catch (e) {
+            stats.errors++;
+            stats.total_evaluated++;
+            console.error(`[ERROR] ${c.contact}: ${e}`);
+          }
+        }));
+
+        // Batch insert drafts to minimize DB roundtrips
+        if (batchDrafts.length > 0) {
+          try {
+            const { error: insErr } = await sb.from("followup_drafts").insert(batchDrafts);
+            if (insErr) console.error("[DRAFT INSERT ERROR]", insErr);
+          } catch (e) {
+            console.error("[DRAFT INSERT EXCEPTION]", e);
+          }
+        }
+
+        // Update scan_jobs progress
+        if (jobId) {
+          const lastContact = batch[batch.length - 1]?.contact || "";
+          try {
             await sb.from("scan_jobs").update({
               status: "RUNNING",
               total_evaluated: stats.total_evaluated,
               drafts_created: stats.drafts_created,
               skipped: stats.skipped,
               human_review: 0,
-              current_contact: c.contact
-            }).eq("id", jobId).catch(() => {});
+              current_contact: lastContact
+            }).eq("id", jobId);
+          } catch (_) {
+            // Non-fatal progress update failure
           }
-        } catch (e) {
-          stats.errors++;
-          stats.total_evaluated++;
-          console.error(`[ERROR] ${c.contact}: ${e}`);
         }
-      }));
+      }
+
+      if (jobId) {
+        await sb.from("scan_jobs").update({
+          status: "COMPLETED", completed_at: new Date().toISOString(),
+          total_evaluated: stats.total_evaluated, drafts_created: stats.drafts_created,
+          skipped: stats.skipped, human_review: 0, current_contact: ""
+        }).eq("id", jobId);
+      }
+
+      console.log(`[EDGE SCAN COMPLETE] Evaluated: ${stats.total_evaluated}, Drafts: ${stats.drafts_created}, Skipped: ${stats.skipped}`);
+    };
+
+    // If invoked with a jobId from UI, execute worker with EdgeRuntime.waitUntil if available or await it
+    // @ts-ignore
+    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil && jobId) {
+      // @ts-ignore
+      EdgeRuntime.waitUntil(runProcessing());
+      return new Response(JSON.stringify({ status: "ACCEPTED", job_id: jobId, total_contacts: total }), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    } else {
+      await runProcessing();
+      return new Response(JSON.stringify(stats), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
     }
-
-    if (jobId) {
-      await sb.from("scan_jobs").update({
-        status: "COMPLETED", completed_at: new Date().toISOString(),
-        total_evaluated: stats.total_evaluated, drafts_created: stats.drafts_created,
-        skipped: stats.skipped, human_review: 0, current_contact: ""
-      }).eq("id", jobId);
-    }
-
-    console.log(`[EDGE SCAN COMPLETE] Evaluated: ${stats.total_evaluated}, Drafts: ${stats.drafts_created}, Skipped: ${stats.skipped}`);
-
-    return new Response(JSON.stringify(stats), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-    });
 
   } catch (err) {
     console.error("[EDGE SCAN ERROR]", err);

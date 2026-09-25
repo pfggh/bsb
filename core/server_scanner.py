@@ -1042,26 +1042,12 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
 
     print(f"\n[SERVER SCANNER] Querying eligible 24h contacts (≥2h old) from bsb_messages...")
 
-    # 1. Fetch contacts with activity in the last 24h, last message >= 2h ago
+    # 1. Fetch eligible contacts directly via fast SQL RPC function
     cur.execute("""
-        SELECT DISTINCT contact, MAX(profile_name) as profile_name, MAX(timestamp) as last_ts
-        FROM bsb_messages
-        WHERE timestamp >= NOW() - INTERVAL '24 hours'
-        GROUP BY contact
-        HAVING MAX(timestamp) <= NOW() - INTERVAL '2 hours'
-        ORDER BY last_ts DESC
+        SELECT contact, profile_name, last_ts
+        FROM get_eligible_scan_contacts(24, 2.0);
     """)
-    candidates = cur.fetchall()
-
-    # 2. Filter out contacts with drafts created in past 24 hours
-    cur.execute("""
-        SELECT DISTINCT contact
-        FROM followup_drafts
-        WHERE created_at >= NOW() - INTERVAL '24 hours'
-    """)
-    existing_contacts = {r["contact"] for r in cur.fetchall()}
-
-    eligible = [c for c in candidates if c["contact"] not in existing_contacts]
+    eligible = cur.fetchall()
     if limit:
         eligible = eligible[:limit]
 
