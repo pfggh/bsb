@@ -31,6 +31,9 @@ interface AnalysisResult {
   reasoning: string;
   cancel_reason: string;
   context_summary: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cost?: number;
 }
 
 interface ScanStats {
@@ -38,6 +41,9 @@ interface ScanStats {
   drafts_created: number;
   skipped: number;
   errors: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_cost: number;
 }
 
 // ============================================================================
@@ -508,6 +514,25 @@ async function analyzeContact(
     `Full Conversation History:\n${transcript}\n\n` +
     `Analyze this conversation and generate follow-up decision according to guidelines. Output must be a valid JSON object.`;
 
+  // === OPTIMIZATION: Check cancellation guards BEFORE LLM call (zero tokens if customer already refused, paid, voice message, or resolved) ===
+  const preGuard = checkCancellationGuards(messages, null);
+  if (preGuard) {
+    return {
+      decision: "SKIP",
+      send_followup: false,
+      message: null,
+      category: preGuard.category,
+      rule_ids: preGuard.rule_ids,
+      internal_reason: preGuard.internal_reason,
+      reasoning: preGuard.cancel_reason,
+      cancel_reason: preGuard.cancel_reason,
+      context_summary: contextSummary,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cost: 0
+    };
+  }
+
   // === STEP 6: OpenAI call ===
   const params: Record<string, unknown> = {
     model,
@@ -520,8 +545,15 @@ async function analyzeContact(
   if (temperature !== 1.0 && !isFixedTemperatureModel(model)) params.temperature = temperature;
 
   // @ts-ignore
-  const response = await chatWithRetry(client, params) as { choices: Array<{ message: { content: string } }> };
+  const response = await chatWithRetry(client, params) as {
+    choices: Array<{ message: { content: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
   const content = response.choices[0].message.content || "{}";
+  const promptTokens = response.usage?.prompt_tokens || 0;
+  const completionTokens = response.usage?.completion_tokens || 0;
+  // Cost based on gpt-5 / gpt-4o tier ($2.50 / 1M in, $10.00 / 1M out) + embedding ($0.02 / 1M)
+  const contactCost = (promptTokens * 0.0000025) + (completionTokens * 0.00001) + 0.000006;
 
   let rawResult: Record<string, unknown> = {};
   try { rawResult = JSON.parse(content); } catch { rawResult = {}; }
@@ -587,7 +619,10 @@ async function analyzeContact(
     internal_reason,
     reasoning,
     cancel_reason: cancelReason,
-    context_summary: contextSummary
+    context_summary: contextSummary,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    cost: contactCost
   };
 }
 
@@ -597,9 +632,6 @@ async function analyzeContact(
 
 async function saveDraft(contact: string, profileName: string, analysis: AnalysisResult) {
   const sb = getSupabase();
-  // Delete any previous CANCELLED evaluations so rescanning cleanly replaces them
-  await sb.from("followup_drafts").delete().eq("contact", contact).eq("status", "CANCELLED");
-
   await sb.from("followup_drafts").insert({
     contact,
     profile_name: profileName,
@@ -701,7 +733,15 @@ Deno.serve(async (req: Request) => {
     const systemPrompt = await loadSystemPrompt();
     const refNow = new Date();
 
-    const stats: ScanStats = { total_evaluated: 0, drafts_created: 0, skipped: 0, errors: 0 };
+    const stats: ScanStats = {
+      total_evaluated: 0,
+      drafts_created: 0,
+      skipped: 0,
+      errors: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_cost: 0.0
+    };
 
     // Asynchronous worker processor
     const runProcessing = async () => {
@@ -726,10 +766,14 @@ Deno.serve(async (req: Request) => {
             });
 
             stats.total_evaluated++;
+            stats.prompt_tokens += (analysis.prompt_tokens || 0);
+            stats.completion_tokens += (analysis.completion_tokens || 0);
+            stats.total_cost += (analysis.cost || 0);
+
             if (analysis.decision === "SEND") stats.drafts_created++;
             else stats.skipped++;
 
-            console.log(`[${stats.total_evaluated}/${total}] ${c.contact} -> ${analysis.decision}`);
+            console.log(`[${stats.total_evaluated}/${total}] ${c.contact} -> ${analysis.decision} ($${(analysis.cost || 0).toFixed(4)})`);
           } catch (e) {
             stats.errors++;
             stats.total_evaluated++;
@@ -776,7 +820,7 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // Update scan_jobs progress
+        // Update scan_jobs progress & cost
         if (jobId) {
           const lastContact = batch[batch.length - 1]?.contact || "";
           try {
@@ -786,7 +830,10 @@ Deno.serve(async (req: Request) => {
               drafts_created: stats.drafts_created,
               skipped: stats.skipped,
               human_review: 0,
-              current_contact: lastContact
+              current_contact: lastContact,
+              total_cost: parseFloat(stats.total_cost.toFixed(4)),
+              prompt_tokens: stats.prompt_tokens,
+              completion_tokens: stats.completion_tokens
             }).eq("id", jobId);
           } catch (_) {
             // Non-fatal progress update failure
@@ -798,7 +845,10 @@ Deno.serve(async (req: Request) => {
         await sb.from("scan_jobs").update({
           status: "COMPLETED", completed_at: new Date().toISOString(),
           total_evaluated: stats.total_evaluated, drafts_created: stats.drafts_created,
-          skipped: stats.skipped, human_review: 0, current_contact: ""
+          skipped: stats.skipped, human_review: 0, current_contact: "",
+          total_cost: parseFloat(stats.total_cost.toFixed(4)),
+          prompt_tokens: stats.prompt_tokens,
+          completion_tokens: stats.completion_tokens
         }).eq("id", jobId);
       }
 

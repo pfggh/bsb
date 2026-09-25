@@ -123,9 +123,9 @@ def run_ai_scan(limit: int = 50, dry_run: bool = False) -> Dict[str, Any]:
 
     print(f"[AI SCAN] Found {len(convs)} active contacts in the 2h–24h follow-up window.")
 
-    # Check which contacts already have a pending or approved draft created in the past 24 hours (allow rescanning un-drafted/skipped)
+    # Check which contacts already have ANY draft created in the past 24 hours (no rescan: each contact is scanned once)
     since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    existing_drafts = sb.from_("followup_drafts").select("contact, status").in_("status", ["PENDING", "APPROVED", "MODIFIED", "SENT"]).gte("created_at", since_24h).execute()
+    existing_drafts = sb.from_("followup_drafts").select("contact").gte("created_at", since_24h).execute()
     existing_contacts = {d["contact"] for d in (existing_drafts.data or [])}
 
     eligible = [c for c in convs if c["contact"] not in existing_contacts][:limit]
