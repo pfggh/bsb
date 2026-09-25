@@ -95,6 +95,8 @@
     el.statCanonicalRules = document.getElementById('stat-canonical-rules');
     el.statQueuedCountBanner = document.getElementById('stat-queued-count-banner');
     el.btnStartAiScan = document.getElementById('btn-start-ai-scan');
+    el.btnPauseAiScan = document.getElementById('btn-pause-ai-scan');
+    el.btnStopAiScan = document.getElementById('btn-stop-ai-scan');
     el.btnRefreshScan = document.getElementById('btn-refresh-scan');
     el.btnDeleteAllDrafts = document.getElementById('btn-delete-all-drafts');
     el.scanProgressBox = document.getElementById('scan-progress-box');
@@ -330,6 +332,7 @@
     loadSendQueue();
     loadCanonicalRules();
     loadConfigForm();
+    checkForActiveScanJobOnBoot();
   }
 
   function setUnauthenticated() {
@@ -451,24 +454,46 @@
   // =========================================================================
   // STEP 1: AI SCANNER (Server-Side Execution Engine)
   // =========================================================================
+  // =========================================================================
+  // STEP 1: AI SCANNER (Resilient, Stoppable, Pausable Serverless Engine)
+  // =========================================================================
+  let scanPollTimer = null;
+  let activeScanJobId = null;
+
   async function startAIScan() {
     if (state.isScanning) return;
     state.isScanning = true;
 
-    if (el.btnStartAiScan) {
-      el.btnStartAiScan.disabled = true;
-      el.btnStartAiScan.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Triggering Server Scan...';
-    }
-    if (el.scanProgressBox) el.scanProgressBox.style.display = 'flex';
-    if (el.scanStatusPill) {
-      el.scanStatusPill.style.display = 'inline-flex';
-      el.scanStatusPill.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Server Scan Requested';
-    }
+    // Check if there is already a RUNNING or PAUSED job in the database to resume
+    try {
+      const { data: existingActive } = await window.supabaseClient
+        .from('scan_jobs')
+        .select('*')
+        .in('status', ['RUNNING', 'PAUSED', 'PENDING'])
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-    updateScanProgress(15, "Submitting scan request to server background runner...");
+      if (existingActive) {
+        activeScanJobId = existingActive.id;
+        console.log(`[SCAN RECONNECT] Reconnecting to existing active scan job #${activeScanJobId} (${existingActive.status})`);
+        
+        // If it was PENDING or RUNNING but stalled, re-trigger edge function
+        if (existingActive.status === 'PENDING' || existingActive.status === 'RUNNING') {
+          triggerEdgeWorker(activeScanJobId);
+        }
+        
+        showScanRunningUI(existingActive.status);
+        pollServerScanJob(activeScanJobId);
+        return;
+      }
+    } catch (_) {}
+
+    // No existing active job: create fresh job
+    showScanRunningUI('PENDING');
+    updateScanProgress(10, "Submitting scan request to Supabase...");
 
     try {
-      // 1. Submit scan job to Supabase scan_jobs table
       const { data, error } = await window.supabaseClient
         .from('scan_jobs')
         .insert({ status: 'PENDING' })
@@ -476,28 +501,15 @@
         .single();
 
       if (error) throw error;
-      const jobId = data.id;
+      activeScanJobId = data.id;
 
-      updateScanProgress(25, `Server Scan Job #${jobId} Queued. Worker analyzing active contacts...`);
-      if (el.scanStatusPill) {
-        el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Server Job #${jobId} Running`;
-      }
+      updateScanProgress(18, `Scan Job #${activeScanJobId} initiated. Querying eligible 24h contacts...`);
 
-      // 2. Trigger Edge Function worker directly
-      fetch(`${window.SUPABASE_URL}/functions/v1/scan`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': window.SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${window.SUPABASE_ANON_KEY}`
-        },
-        body: JSON.stringify({ job_id: jobId })
-      }).catch(err => {
-        console.warn('[SCAN EDGE TRIGGER WARNING]', err);
-      });
+      // Trigger Edge Function directly
+      triggerEdgeWorker(activeScanJobId);
 
-      // 3. Poll job status until complete
-      pollServerScanJob(jobId);
+      // Start continuous poll loop with fallback heartbeat
+      pollServerScanJob(activeScanJobId);
 
     } catch (e) {
       updateScanProgress(100, `Scan trigger error: ${e.message}`);
@@ -505,8 +517,138 @@
     }
   }
 
+  function triggerEdgeWorker(jobId) {
+    if (!jobId) return;
+    fetch(`${window.SUPABASE_URL}/functions/v1/scan`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': window.SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${window.SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({ job_id: jobId })
+    }).catch(err => {
+      console.warn('[SCAN EDGE TRIGGER WARNING]', err);
+    });
+  }
+
+  function showScanRunningUI(status) {
+    if (el.btnStartAiScan) {
+      el.btnStartAiScan.disabled = true;
+      el.btnStartAiScan.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Scanning Active...';
+    }
+    if (el.btnPauseAiScan) {
+      el.btnPauseAiScan.style.display = 'inline-flex';
+      if (status === 'PAUSED') {
+        el.btnPauseAiScan.innerHTML = '<i class="fa-solid fa-play"></i> Resume';
+        el.btnPauseAiScan.classList.add('btn-primary');
+      } else {
+        el.btnPauseAiScan.innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+        el.btnPauseAiScan.classList.remove('btn-primary');
+      }
+    }
+    if (el.btnStopAiScan) {
+      el.btnStopAiScan.style.display = 'inline-flex';
+    }
+    if (el.scanProgressBox) el.scanProgressBox.style.display = 'flex';
+    if (el.scanStatusPill) {
+      el.scanStatusPill.style.display = 'inline-flex';
+      el.scanStatusPill.innerHTML = status === 'PAUSED'
+        ? '<i class="fa-solid fa-pause"></i> Scan Paused'
+        : '<i class="fa-solid fa-server fa-beat"></i> Scan Running';
+    }
+  }
+
+  async function togglePauseAiScan() {
+    if (!activeScanJobId || !window.supabaseClient) return;
+    const btn = el.btnPauseAiScan;
+
+    try {
+      const { data: job } = await window.supabaseClient
+        .from('scan_jobs')
+        .select('status')
+        .eq('id', activeScanJobId)
+        .single();
+
+      const currentStatus = (job?.status || '').toUpperCase();
+
+      if (currentStatus === 'PAUSED') {
+        // RESUME
+        if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Resuming...';
+        await window.supabaseClient
+          .from('scan_jobs')
+          .update({ status: 'RUNNING' })
+          .eq('id', activeScanJobId);
+
+        // Re-ping edge worker in case it had exited
+        triggerEdgeWorker(activeScanJobId);
+
+        if (btn) {
+          btn.innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+          btn.classList.remove('btn-primary');
+        }
+        if (el.scanStatusPill) {
+          el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Job #${activeScanJobId} Resumed`;
+        }
+        updateScanProgress(null, `Job #${activeScanJobId} resumed by user.`);
+      } else {
+        // PAUSE
+        if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Pausing...';
+        await window.supabaseClient
+          .from('scan_jobs')
+          .update({ status: 'PAUSED' })
+          .eq('id', activeScanJobId);
+
+        if (btn) {
+          btn.innerHTML = '<i class="fa-solid fa-play"></i> Resume';
+          btn.classList.add('btn-primary');
+        }
+        if (el.scanStatusPill) {
+          el.scanStatusPill.innerHTML = `<i class="fa-solid fa-circle-pause"></i> Job #${activeScanJobId} Paused`;
+        }
+        updateScanProgress(null, `Job #${activeScanJobId} paused. Click Resume to continue.`);
+      }
+    } catch (err) {
+      console.error('[PAUSE ERROR]', err);
+    }
+  }
+
+  async function stopAiScan() {
+    if (!activeScanJobId || !window.supabaseClient) {
+      resetScanUI();
+      return;
+    }
+
+    if (!confirm(`Stop Scan Job #${activeScanJobId}? Current progress and all saved drafts will be retained.`)) {
+      return;
+    }
+
+    const stopBtn = el.btnStopAiScan;
+    if (stopBtn) stopBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Stopping...';
+
+    try {
+      await window.supabaseClient
+        .from('scan_jobs')
+        .update({ status: 'STOPPED', completed_at: new Date().toISOString() })
+        .eq('id', activeScanJobId);
+
+      if (scanPollTimer) clearInterval(scanPollTimer);
+      updateScanProgress(100, `Scan Job #${activeScanJobId} stopped by user.`);
+      loadDashboardStats();
+      loadRecentScanDrafts();
+    } catch (err) {
+      console.error('[STOP ERROR]', err);
+    } finally {
+      resetScanUI();
+    }
+  }
+
   async function pollServerScanJob(jobId) {
-    const pollInterval = setInterval(async () => {
+    if (scanPollTimer) clearInterval(scanPollTimer);
+    let lastEvaluated = -1;
+    let staleCount = 0;
+
+    scanPollTimer = setInterval(async () => {
       try {
         const { data, error } = await window.supabaseClient
           .from('scan_jobs')
@@ -516,26 +658,56 @@
 
         if (error || !data) return;
 
-        const st = data.status;
+        const st = (data.status || '').toUpperCase();
         const total = data.total_contacts || 0;
         const evaluated = data.total_evaluated || 0;
         const created = data.drafts_created || 0;
         const skipped = data.skipped || 0;
-        const human = data.human_review || 0;
         const currContact = data.current_contact ? ` • Contact: ${formatPhoneDisplay(data.current_contact)}` : '';
 
-        if (st === 'RUNNING' || (st === 'PENDING' && evaluated > 0)) {
-          const pct = total > 0 ? Math.min(95, Math.max(15, Math.round((evaluated / total) * 100))) : 25;
-          updateScanProgress(pct, `Server Scan Running: ${evaluated}/${total || '?'} evaluated (${created} drafts created, ${skipped} skipped)${currContact}`);
+        // Heartbeat check: if running but no progress for 12 seconds, ping edge worker
+        if (st === 'RUNNING' || st === 'PENDING') {
+          if (evaluated === lastEvaluated) {
+            staleCount++;
+            if (staleCount >= 10) {
+              console.log(`[HEARTBEAT RECOVERY] Job #${jobId} appears stalled. Pinging worker...`);
+              triggerEdgeWorker(jobId);
+              staleCount = 0;
+            }
+          } else {
+            staleCount = 0;
+            lastEvaluated = evaluated;
+          }
+        }
+
+        if (st === 'PAUSED') {
+          if (el.btnPauseAiScan) {
+            el.btnPauseAiScan.innerHTML = '<i class="fa-solid fa-play"></i> Resume';
+            el.btnPauseAiScan.classList.add('btn-primary');
+          }
           if (el.scanStatusPill) {
             el.scanStatusPill.style.display = 'inline-flex';
-            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Job #${jobId} Running (${evaluated}/${total || '?'})`;
+            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-circle-pause"></i> Job #${jobId} Paused (${evaluated}/${total || '?'})`;
+          }
+          const pct = total > 0 ? Math.round((evaluated / total) * 100) : 0;
+          updateScanProgress(pct, `Scan Paused: ${evaluated}/${total || '?'} evaluated (${created} drafts created, ${skipped} skipped).`);
+          loadDashboardStats();
+          loadRecentScanDrafts();
+          return;
+        }
+
+        if (st === 'RUNNING' || (st === 'PENDING' && evaluated > 0)) {
+          const pct = total > 0 ? Math.min(98, Math.max(15, Math.round((evaluated / total) * 100))) : 20;
+          updateScanProgress(pct, `Evaluating: ${evaluated}/${total || '?'} (${created} drafts, ${skipped} skipped)${currContact}`);
+          if (el.scanStatusPill) {
+            el.scanStatusPill.style.display = 'inline-flex';
+            el.scanStatusPill.innerHTML = `<i class="fa-solid fa-server fa-beat"></i> Running #${jobId} (${evaluated}/${total || '?'})`;
           }
           loadDashboardStats();
           loadRecentScanDrafts();
         } else if (st === 'COMPLETED') {
-          clearInterval(pollInterval);
-          updateScanProgress(100, `Server Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped, ${human} human review).`);
+          clearInterval(scanPollTimer);
+          updateScanProgress(100, `Scan Complete! Evaluated ${evaluated} contacts (${created} drafts created, ${skipped} skipped).`);
           if (el.scanStatusPill) {
             el.scanStatusPill.style.display = 'inline-flex';
             el.scanStatusPill.innerHTML = `<i class="fa-solid fa-circle-check"></i> Job #${jobId} Complete (${created} Drafts)`;
@@ -543,24 +715,66 @@
           loadDashboardStats();
           loadRecentScanDrafts();
           resetScanUI();
+        } else if (st === 'STOPPED' || st === 'CANCELLED') {
+          clearInterval(scanPollTimer);
+          updateScanProgress(100, `Scan Job #${jobId} was stopped.`);
+          loadDashboardStats();
+          loadRecentScanDrafts();
+          resetScanUI();
         } else if (st === 'FAILED') {
-          clearInterval(pollInterval);
+          clearInterval(scanPollTimer);
           updateScanProgress(100, `Server Scan Failed: ${data.error_message || 'Unknown error'}`);
           resetScanUI();
         }
       } catch (err) {
-        // Continue polling
+        // Network blip / offline: keep polling silently
       }
     }, 1200);
   }
 
   function resetScanUI() {
     state.isScanning = false;
+    activeScanJobId = null;
+    if (scanPollTimer) {
+      clearInterval(scanPollTimer);
+      scanPollTimer = null;
+    }
     if (el.btnStartAiScan) {
       el.btnStartAiScan.disabled = false;
       el.btnStartAiScan.innerHTML = '<i class="fa-solid fa-bolt"></i> Run AI Scan Now';
     }
+    if (el.btnPauseAiScan) {
+      el.btnPauseAiScan.style.display = 'none';
+      el.btnPauseAiScan.innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+      el.btnPauseAiScan.classList.remove('btn-primary');
+    }
+    if (el.btnStopAiScan) {
+      el.btnStopAiScan.style.display = 'none';
+      el.btnStopAiScan.innerHTML = '<i class="fa-solid fa-stop"></i> Stop';
+    }
     if (el.scanStatusPill) el.scanStatusPill.style.display = 'none';
+  }
+
+  // Auto-reconnect: if page is refreshed while scan is running or paused, resume tracking
+  async function checkForActiveScanJobOnBoot() {
+    if (!window.supabaseClient) return;
+    try {
+      const { data: activeJob } = await window.supabaseClient
+        .from('scan_jobs')
+        .select('*')
+        .in('status', ['RUNNING', 'PAUSED', 'PENDING'])
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (activeJob) {
+        activeScanJobId = activeJob.id;
+        state.isScanning = true;
+        console.log(`[BOOT SYNC] Found active scan job #${activeScanJobId} with status ${activeJob.status}`);
+        showScanRunningUI(activeJob.status);
+        pollServerScanJob(activeScanJobId);
+      }
+    } catch (_) {}
   }
 
   async function deleteAllDrafts() {
@@ -1760,6 +1974,8 @@
 
     // Step 1: Scanner Events
     if (el.btnStartAiScan) el.btnStartAiScan.addEventListener('click', startAIScan);
+    if (el.btnPauseAiScan) el.btnPauseAiScan.addEventListener('click', togglePauseAiScan);
+    if (el.btnStopAiScan) el.btnStopAiScan.addEventListener('click', stopAiScan);
     if (el.btnRefreshScan) el.btnRefreshScan.addEventListener('click', loadRecentScanDrafts);
     if (el.btnDeleteAllDrafts) el.btnDeleteAllDrafts.addEventListener('click', deleteAllDrafts);
 
