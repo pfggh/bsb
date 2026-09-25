@@ -1120,9 +1120,24 @@ def execute_server_scan(limit: Optional[int] = None, job_id: Optional[int] = Non
 
             print(f"[{completed_count}/{total_eligible}] {res.get('contact')} -> {dec}")
 
-            # Live progress update for UI
+            # Live progress update and status check for UI pause/stop
             if job_id:
                 try:
+                    cur.execute("SELECT status FROM scan_jobs WHERE id = %s", (job_id,))
+                    row = cur.fetchone()
+                    st = (row.get("status") or "").upper() if row else ""
+                    if st in ("STOPPED", "CANCELLED", "STOP"):
+                        print(f"[SERVER SCANNER] Job #{job_id} stopped by user. Halting scan.")
+                        break
+                    while st == "PAUSED":
+                        time.sleep(2.0)
+                        cur.execute("SELECT status FROM scan_jobs WHERE id = %s", (job_id,))
+                        r2 = cur.fetchone()
+                        st = (r2.get("status") or "").upper() if r2 else ""
+                        if st in ("STOPPED", "CANCELLED", "STOP"):
+                            print(f"[SERVER SCANNER] Job #{job_id} stopped while paused. Halting.")
+                            break
+
                     cur.execute("""
                         UPDATE scan_jobs
                         SET status = 'RUNNING', total_evaluated = %s, drafts_created = %s,

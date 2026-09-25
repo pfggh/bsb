@@ -727,6 +727,35 @@ Deno.serve(async (req: Request) => {
           }
         }));
 
+        // Check job status in Supabase before processing to allow Pause/Stop/Cancel
+        if (jobId) {
+          try {
+            const { data: jobRow } = await sb.from("scan_jobs").select("status").eq("id", jobId).single();
+            const currentStatus = (jobRow?.status || "").toUpperCase();
+            if (currentStatus === "STOPPED" || currentStatus === "CANCELLED" || currentStatus === "STOP") {
+              console.log(`[EDGE SCAN] Job #${jobId} was stopped by user. Halting scan immediately.`);
+              return;
+            }
+            if (currentStatus === "PAUSED") {
+              console.log(`[EDGE SCAN] Job #${jobId} is paused. Waiting for resume or stop...`);
+              let isStillPaused = true;
+              while (isStillPaused) {
+                await new Promise(r => setTimeout(r, 2000));
+                const { data: refreshedJob } = await sb.from("scan_jobs").select("status").eq("id", jobId).single();
+                const refreshedStatus = (refreshedJob?.status || "").toUpperCase();
+                if (refreshedStatus === "STOPPED" || refreshedStatus === "CANCELLED" || refreshedStatus === "STOP") {
+                  console.log(`[EDGE SCAN] Job #${jobId} stopped during pause. Halting.`);
+                  return;
+                }
+                if (refreshedStatus === "RUNNING") {
+                  console.log(`[EDGE SCAN] Job #${jobId} resumed. Continuing scan.`);
+                  isStillPaused = false;
+                }
+              }
+            }
+          } catch (_) {}
+        }
+
         // Batch insert drafts to minimize DB roundtrips
         if (batchDrafts.length > 0) {
           try {
