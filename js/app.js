@@ -96,6 +96,7 @@
     el.statQueuedCountBanner = document.getElementById('stat-queued-count-banner');
     el.btnStartAiScan = document.getElementById('btn-start-ai-scan');
     el.btnRefreshScan = document.getElementById('btn-refresh-scan');
+    el.btnDeleteAllDrafts = document.getElementById('btn-delete-all-drafts');
     el.scanProgressBox = document.getElementById('scan-progress-box');
     el.scanProgressText = document.getElementById('scan-progress-text');
     el.scanProgressPercent = document.getElementById('scan-progress-percent');
@@ -547,6 +548,30 @@
       el.btnStartAiScan.innerHTML = '<i class="fa-solid fa-bolt"></i> Run AI Scan Now';
     }
     if (el.scanStatusPill) el.scanStatusPill.style.display = 'none';
+  }
+
+  async function deleteAllDrafts() {
+    if (!window.supabaseClient) return;
+    if (!confirm('Delete ALL drafts from the database? This cannot be undone.')) return;
+
+    const btn = el.btnDeleteAllDrafts;
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Deleting...'; }
+
+    try {
+      const { error } = await window.supabaseClient
+        .from('followup_drafts')
+        .delete()
+        .gt('id', 0);
+
+      if (error) throw error;
+
+      await loadDashboardStats();
+      await loadRecentScanDrafts();
+    } catch (e) {
+      alert('Error deleting drafts: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete All Drafts'; }
+    }
   }
 
   async function loadRecentScanDrafts() {
@@ -1723,6 +1748,7 @@
     // Step 1: Scanner Events
     if (el.btnStartAiScan) el.btnStartAiScan.addEventListener('click', startAIScan);
     if (el.btnRefreshScan) el.btnRefreshScan.addEventListener('click', loadRecentScanDrafts);
+    if (el.btnDeleteAllDrafts) el.btnDeleteAllDrafts.addEventListener('click', deleteAllDrafts);
 
     // Step 2: Review Events
     if (el.btnDraftValidate) el.btnDraftValidate.addEventListener('click', validateCurrentDraft);
