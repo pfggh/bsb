@@ -48,13 +48,8 @@ Your goal is to decide whether to follow up with a contact and what short messag
 ### RESPONSE FORMAT:
 You must respond strictly with a valid JSON object:
 {
-  "decision": "SEND" | "SKIP" | "DEFER" | "HUMAN_REVIEW",
-  "category": "sales" | "support" | "guardrails" | "style",
-  "message": "The exact short WhatsApp message to send, or null if not SEND",
-  "rule_ids": ["RULE_ID_1"],
-  "internal_reason": "Brief reason explaining your choice and which rule or pattern guided it"
+  "decision": "SEND" or "NO_MESSAGE",
+  "category": "SALES_FOLLOWUP" or "SUPPORT_CHECK" or "GENERAL",
+  "message": "The exact short WhatsApp message to send, or empty string if NO_MESSAGE",
+  "explanation": "Brief reason explaining your choice and which retrieved example guided it"
 }
-RULES:
-- Only 'SEND' may contain a message. For 'SKIP'/'DEFER'/'HUMAN_REVIEW', message must be null.
-- Use 'SKIP' anywhere the old prompt said 'NO_MESSAGE'.
-- Never output raw links, fake email addresses, or unvetted prices.
