@@ -1322,6 +1322,65 @@
     }
   }
 
+  // Individual Queue Item Dispatch
+  window.dispatchSingleQueueItem = async function(itemId) {
+    if (!window.supabaseClient) return;
+    const item = state.queueItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    if (window.SYSTEM_CONFIG.enforce_beirut_hours && !isBeirutWorkingHours()) {
+      const proceed = confirm("⚠️ Current time is outside Beirut business hours (09:00 - 21:00). Send now?");
+      if (!proceed) return;
+    }
+
+    const dryRun = el.queueDryrunToggle?.checked || false;
+    try {
+      if (dryRun) {
+        await window.supabaseClient.from('send_queue').update({ status: 'SENT', sent_at: new Date().toISOString() }).eq('id', itemId);
+        item.status = 'SENT';
+        alert('Dispatched in dry-run mode (simulated).');
+      } else {
+        const resp = await fetch(window.BSB_CONFIG.api_endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: window.BSB_CONFIG.api_key,
+            api_secret: window.BSB_CONFIG.api_secret,
+            destination: normalizePhone(item.contact),
+            message: item.message
+          })
+        });
+        const resJson = await resp.json().catch(() => ({ raw: 'Non-JSON response' }));
+        if (resp.status === 200 && resJson.status !== 'error' && resJson.success !== false) {
+          await window.supabaseClient.from('send_queue').update({
+            status: 'SENT',
+            sent_at: new Date().toISOString(),
+            api_response: JSON.stringify(resJson)
+          }).eq('id', itemId);
+          if (item.draft_id) {
+            await window.supabaseClient.from('followup_drafts').update({ status: 'SENT' }).eq('id', item.draft_id);
+          }
+          item.status = 'SENT';
+          alert('✓ Message sent successfully!');
+        } else {
+          const errDetail = resJson.message || JSON.stringify(resJson);
+          await window.supabaseClient.from('send_queue').update({
+            status: 'FAILED',
+            error_message: errDetail
+          }).eq('id', itemId);
+          item.status = 'FAILED';
+          alert(`❌ Dispatch failed: ${errDetail}`);
+        }
+      }
+    } catch (e) {
+      await window.supabaseClient.from('send_queue').update({ status: 'FAILED', error_message: e.message }).eq('id', itemId);
+      item.status = 'FAILED';
+      alert(`Network error: ${e.message}`);
+    }
+    renderSendQueueTable();
+    loadDashboardStats();
+  };
+
   // =========================================================================
   // STEP 4: SEE CHATS (Preserved 72h Chat Messenger Engine)
   // =========================================================================
