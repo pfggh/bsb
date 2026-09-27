@@ -1389,12 +1389,31 @@ def run_server_daemon(interval_minutes: int = 15):
     listener_thread = threading.Thread(target=on_demand_listener_loop, daemon=True)
     listener_thread.start()
 
+    from core.bsb_sync import sync_chats_to_db
+
+    # Run initial sync on boot
+    try:
+        print("[DAEMON] Running initial BestSMSBulk chat sync...")
+        sync_chats_to_db(days_back=2)
+    except Exception as e:
+        print(f"[DAEMON SYNC ERROR] {e}")
+
     last_scheduled_scan = datetime.now(timezone.utc)
+    last_chat_sync = datetime.now(timezone.utc)
     last_queue_check = 0
 
     while True:
         try:
             now = datetime.now(timezone.utc)
+
+            # Continuous Chat Sync (every 2 minutes)
+            if (now - last_chat_sync).total_seconds() >= 120:
+                try:
+                    sync_chats_to_db(days_back=1)
+                except Exception as sync_e:
+                    print(f"[DAEMON PERIODIC SYNC ERROR] {sync_e}")
+                last_chat_sync = now
+
             if (now - last_scheduled_scan).total_seconds() >= interval_minutes * 60:
                 print(f"[DAEMON] {interval_minutes}-minute scheduled scan interval reached. Starting...")
                 execute_server_scan(limit=None)
