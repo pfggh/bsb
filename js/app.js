@@ -998,13 +998,30 @@
       row.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
       let mediaContent = '';
-      if (msg.media_type && msg.media_type !== 'None') {
-        const mUrl = resolveMediaUrl(msg.chat_id, msg.media_type, msg.media_url);
-        if (msg.media_type.toLowerCase().includes('audio')) {
-          mediaContent = `<div class="msg-media-box"><audio controls class="msg-audio-player" preload="none" src="${mUrl}"></audio></div>`;
-        } else if (msg.media_type.toLowerCase().includes('image')) {
-          mediaContent = `<div class="msg-media-box"><a href="${mUrl}" target="_blank"><img class="msg-image-thumb" src="${mUrl}" loading="lazy" alt="Media" /></a></div>`;
-        }
+      const isAudio = (msg.media_type && msg.media_type.toLowerCase().includes('audio')) || 
+                      (msg.message && (msg.message.includes('🎤') || msg.message.toLowerCase().includes('voice message')));
+      const isImage = (msg.media_type && msg.media_type.toLowerCase().includes('image')) ||
+                      (msg.media_url && (msg.media_url.endsWith('.jpg') || msg.media_url.endsWith('.jpeg') || msg.media_url.endsWith('.png')));
+
+      if (isAudio && msg.chat_id) {
+        const mUrl = resolveMediaUrl(msg.chat_id, 'audio', msg.media_url);
+        mediaContent = `
+          <div class="voice-note-card">
+            <div class="voice-note-header">
+              <span><i class="fa-solid fa-microphone-lines"></i> Voice Note</span>
+            </div>
+            <audio controls class="voice-note-audio" preload="none" src="${mUrl}"></audio>
+          </div>
+        `;
+      } else if (isImage && msg.chat_id) {
+        const mUrl = resolveMediaUrl(msg.chat_id, 'image', msg.media_url);
+        mediaContent = `
+          <div class="chat-media-image-wrap">
+            <a href="${mUrl}" target="_blank" rel="noopener noreferrer">
+              <img class="chat-media-img" src="${mUrl}" loading="lazy" alt="Media" />
+            </a>
+          </div>
+        `;
       }
 
       row.innerHTML = `
@@ -1538,26 +1555,30 @@
       msgRow.className = `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`;
 
       let mediaHtml = '';
-      if (msg.media_type && msg.media_type !== 'None') {
-        const mUrl = resolveMediaUrl(msg.chat_id, msg.media_type, msg.media_url);
-        if (msg.media_type.toLowerCase().includes('audio')) {
-          mediaHtml = `
-            <div class="voice-note-card">
-              <div class="voice-note-header">
-                <span><i class="fa-solid fa-microphone-lines"></i> Voice Note</span>
-              </div>
-              <audio controls class="voice-note-audio" preload="none" src="${mUrl}"></audio>
+      const isAudio = (msg.media_type && msg.media_type.toLowerCase().includes('audio')) || 
+                      (msg.message && (msg.message.includes('🎤') || msg.message.toLowerCase().includes('voice message')));
+      const isImage = (msg.media_type && msg.media_type.toLowerCase().includes('image')) ||
+                      (msg.media_url && (msg.media_url.endsWith('.jpg') || msg.media_url.endsWith('.jpeg') || msg.media_url.endsWith('.png')));
+
+      if (isAudio && msg.chat_id) {
+        const mUrl = resolveMediaUrl(msg.chat_id, 'audio', msg.media_url);
+        mediaHtml = `
+          <div class="voice-note-card">
+            <div class="voice-note-header">
+              <span><i class="fa-solid fa-microphone-lines"></i> Voice Note</span>
             </div>
-          `;
-        } else if (msg.media_type.toLowerCase().includes('image')) {
-          mediaHtml = `
-            <div class="chat-media-image-wrap">
-              <a href="${mUrl}" target="_blank" rel="noopener noreferrer">
-                <img class="chat-media-img" src="${mUrl}" loading="lazy" alt="Image" />
-              </a>
-            </div>
-          `;
-        }
+            <audio controls class="voice-note-audio" preload="none" src="${mUrl}"></audio>
+          </div>
+        `;
+      } else if (isImage && msg.chat_id) {
+        const mUrl = resolveMediaUrl(msg.chat_id, 'image', msg.media_url);
+        mediaHtml = `
+          <div class="chat-media-image-wrap">
+            <a href="${mUrl}" target="_blank" rel="noopener noreferrer">
+              <img class="chat-media-img" src="${mUrl}" loading="lazy" alt="Image" />
+            </a>
+          </div>
+        `;
       }
 
       msgRow.innerHTML = `
@@ -1600,14 +1621,18 @@
 
       // Always record outgoing send into send_queue so 1h dispatcher filter tracks it
       if (window.supabaseClient) {
-        await window.supabaseClient.from('send_queue').insert({
-          contact: dest,
-          message: text,
-          status: isSuccess ? 'SENT' : 'FAILED',
-          sent_at: isSuccess ? new Date().toISOString() : null,
-          api_response: JSON.stringify(resJson),
-          error_message: isSuccess ? null : JSON.stringify(resJson)
-        }).catch(() => {});
+        try {
+          await window.supabaseClient.from('send_queue').insert({
+            contact: dest,
+            message: text,
+            status: isSuccess ? 'SENT' : 'FAILED',
+            sent_at: isSuccess ? new Date().toISOString() : null,
+            api_response: JSON.stringify(resJson),
+            error_message: isSuccess ? null : JSON.stringify(resJson)
+          });
+        } catch (dbErr) {
+          console.warn('[SEND_QUEUE INSERT ERROR]', dbErr);
+        }
       }
 
       if (isSuccess) {
