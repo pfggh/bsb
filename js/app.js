@@ -1465,8 +1465,21 @@
     renderConversationList();
   }
 
-  function renderConversationList() {
+  function updateActiveConversationHighlight(contact) {
     if (!el.convList) return;
+    const items = el.convList.querySelectorAll('.conv-item');
+    items.forEach(item => {
+      if (item.dataset.contact === String(contact)) {
+        item.classList.add('active');
+      } else {
+        item.classList.remove('active');
+      }
+    });
+  }
+
+  function renderConversationList(preserveScroll = true) {
+    if (!el.convList) return;
+    const prevScroll = preserveScroll ? el.convList.scrollTop : 0;
     el.convList.innerHTML = '';
 
     if (state.filteredConversations.length === 0) {
@@ -1476,6 +1489,7 @@
 
     state.filteredConversations.forEach(c => {
       const item = document.createElement('div');
+      item.dataset.contact = String(c.contact);
       item.className = `conv-item ${state.activeContact === c.contact ? 'active' : ''}`;
       item.onclick = () => selectConversation(c);
 
@@ -1508,6 +1522,10 @@
       `;
       el.convList.appendChild(item);
     });
+
+    if (preserveScroll && prevScroll > 0) {
+      el.convList.scrollTop = prevScroll;
+    }
   }
 
   async function selectConversation(c) {
@@ -1530,7 +1548,7 @@
       }
     }
 
-    renderConversationList(); // Update active highlights
+    updateActiveConversationHighlight(c.contact); // In-place highlight without touching scroll position
 
     // Load messages
     el.chatMessagesContainer.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 40px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading conversation...</div>';

@@ -456,20 +456,15 @@ html, body {
   border-color: var(--primary);
 }
 
-/* Conversations List (Virtualized / Performant) */
+/* Conversations List */
 .conv-list {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 6px 8px;
-  /* Ultra-low CPU rendering performance */
-  contain: strict;
 }
 
 .conv-item {
-  /* CSS Content Visibility: skips layout & painting of offscreen elements on slow PCs */
-  content-visibility: auto;
-  contain-intrinsic-size: 0 74px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
