@@ -1047,13 +1047,16 @@
   // Review Actions
   async function validateCurrentDraft() {
     const draft = state.currentReviewDraft;
-    if (!draft) return;
+    if (!draft || state.isActionProcessing) return;
 
     const finalMsg = el.reviewDraftTextarea.value.trim();
     if (!finalMsg) {
       alert("Cannot approve an empty follow-up message.");
       return;
     }
+
+    state.isActionProcessing = true;
+    if (el.btnDraftValidate) el.btnDraftValidate.disabled = true;
 
     const action = finalMsg !== draft.drafted_msg ? 'MODIFIED' : 'APPROVED';
 
@@ -1072,13 +1075,25 @@
         updated_at: new Date().toISOString()
       }).eq('id', draft.id);
 
-      // Queue into send_queue
-      await window.supabaseClient.from('send_queue').insert({
-        draft_id: draft.id,
-        contact: draft.contact,
-        message: finalMsg,
-        status: 'QUEUED'
-      });
+      // Check if contact already has an active queued or sending item
+      const { data: existingQueue } = await window.supabaseClient
+        .from('send_queue')
+        .select('id')
+        .eq('contact', draft.contact)
+        .in('status', ['QUEUED', 'SENDING'])
+        .limit(1);
+
+      if (!existingQueue || existingQueue.length === 0) {
+        // Queue into send_queue
+        await window.supabaseClient.from('send_queue').insert({
+          draft_id: draft.id,
+          contact: draft.contact,
+          message: finalMsg,
+          status: 'QUEUED'
+        });
+      } else {
+        console.warn(`[VALIDATE] Contact ${draft.contact} is already in send_queue. Duplicate insertion suppressed.`);
+      }
 
       // Record feedback learning for continuous training
       await window.supabaseClient.from('feedback_learning').insert({
@@ -1092,7 +1107,12 @@
       });
 
       loadDashboardStats();
-    } catch (e) {}
+    } catch (e) {
+      console.error("[VALIDATE] Error validating draft:", e);
+    } finally {
+      state.isActionProcessing = false;
+      if (el.btnDraftValidate) el.btnDraftValidate.disabled = false;
+    }
   }
 
   async function cancelCurrentDraft() {
@@ -1293,10 +1313,47 @@
 
     const dryRun = el.queueDryrunToggle?.checked || false;
     const queued = state.queueItems.filter(i => i.status === 'QUEUED');
+    const dispatchedInSession = new Set();
 
     for (let i = 0; i < queued.length; i++) {
       if (state.pauseDispatchRequested) break;
       const item = queued[i];
+      const normPhone = normalizePhone(item.contact);
+
+      // Guard 1: In-session deduplication
+      if (dispatchedInSession.has(normPhone)) {
+        console.warn(`[DISPATCH] Suppressing duplicate queue item #${item.id} for ${normPhone}: already dispatched in this batch.`);
+        await window.supabaseClient.from('send_queue').update({
+          status: 'CANCELLED',
+          error_message: 'Duplicate queue item suppressed: contact already processed in current batch'
+        }).eq('id', item.id);
+        item.status = 'CANCELLED';
+        continue;
+      }
+
+      // Guard 2: 12-hour sent check
+      const since12h = new Date(Date.now() - 12 * 3600 * 1000).toISOString();
+      const { data: recentSent } = await window.supabaseClient
+        .from('send_queue')
+        .select('id')
+        .eq('contact', item.contact)
+        .eq('status', 'SENT')
+        .gte('sent_at', since12h)
+        .neq('id', item.id)
+        .limit(1);
+
+      if (recentSent && recentSent.length > 0) {
+        console.warn(`[DISPATCH] Suppressing duplicate queue item #${item.id} for ${normPhone}: already sent within last 12h.`);
+        await window.supabaseClient.from('send_queue').update({
+          status: 'CANCELLED',
+          error_message: 'Duplicate queue item suppressed: message already sent within last 12 hours'
+        }).eq('id', item.id);
+        item.status = 'CANCELLED';
+        continue;
+      }
+
+      dispatchedInSession.add(normPhone);
+
       const pct = Math.round(((i + 1) / queued.length) * 100);
 
       if (el.queueProgressFill) el.queueProgressFill.style.width = `${pct}%`;
@@ -1885,6 +1942,9 @@
   // =========================================================================
   function initKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
+      // Prevent rapid-fire repeat when holding down keys
+      if (e.repeat) return;
+
       const tag = (e.target.tagName || '').toLowerCase();
       if ((tag === 'input' || tag === 'textarea') && e.key === 'Escape') {
         e.target.blur();
@@ -2151,6 +2211,64 @@
       if (state.activeTab === 'tab-chats') loadConversations();
       setTimeout(() => el.syncBtn.classList.remove('spinning'), 800);
     });
+
+    const btnIngestBackup = document.getElementById('btn-ingest-backup');
+    const followupBackupInput = document.getElementById('followup-backup-input');
+    if (btnIngestBackup && followupBackupInput) {
+      btnIngestBackup.addEventListener('click', () => {
+        followupBackupInput.value = '';
+        followupBackupInput.click();
+      });
+
+      followupBackupInput.addEventListener('change', async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+
+        const confirmed = confirm(
+          `Ingest BSB chat export "${file.name}" (${(file.size / 1024 / 1024).toFixed(2)} MB) into bsb_messages?\n\nAll messages will be safely merged and deduplicated by chat_id.`
+        );
+        if (!confirmed) {
+          followupBackupInput.value = '';
+          return;
+        }
+
+        const originalText = btnIngestBackup.innerHTML;
+        btnIngestBackup.disabled = true;
+        btnIngestBackup.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Ingesting...`;
+
+        try {
+          const session = await window.supabaseClient.auth.getSession();
+          const token = session.data?.session?.access_token || window.SUPABASE_ANON_KEY;
+
+          const formData = new FormData();
+          formData.append('file', file);
+
+          const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/ingest_backup`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`
+            },
+            body: formData
+          });
+
+          const data = await resp.json();
+          if (!resp.ok || data.error) {
+            throw new Error(data.error || 'Failed to ingest backup file');
+          }
+
+          alert(data.message || `Ingested successfully! ${data.inserted || 0} new, ${data.updated || 0} updated.`);
+          loadDashboardStats();
+          if (state.activeTab === 'tab-chats') loadConversations();
+        } catch (err) {
+          console.error('[ingest_backup error]', err);
+          alert(`Error ingesting backup: ${err.message}`);
+        } finally {
+          btnIngestBackup.disabled = false;
+          btnIngestBackup.innerHTML = originalText;
+          followupBackupInput.value = '';
+        }
+      });
+    }
 
     // Suite Tab Navigation
     el.suiteTabBtns.forEach(btn => {
