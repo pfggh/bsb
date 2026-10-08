@@ -1,6 +1,6 @@
 /**
  * Teshrij Follow-up Suite Configuration
- * Connected to Supabase PostgreSQL, BestSMSBulk API & OpenAI
+ * Connected to Supabase PostgreSQL & BestSMSBulk API
  */
 
 window.SUPABASE_URL = "https://kfgswynickhywzhneltu.supabase.co";
@@ -13,14 +13,6 @@ window.BSB_CONFIG = {
   api_secret: "Teshrij123"
 };
 
-// OpenAI API configuration (Loaded from localStorage or fetched securely from Supabase followup_config)
-window.OPENAI_CONFIG = {
-  api_key: localStorage.getItem("fady_openai_key") || "",
-  chat_model: localStorage.getItem("fady_chat_model") || "gpt-4o",
-  embedding_model: "text-embedding-3-small",
-  temperature: 0.7
-};
-
 // Anti-Ban & System Guardrails
 window.SYSTEM_CONFIG = {
   send_delay_seconds: 1.5,
@@ -31,6 +23,12 @@ window.SYSTEM_CONFIG = {
   max_hours_old: 24.0
 };
 
+// The OpenAI key used to be cached in the browser for the old bot tabs; remove it
+try {
+  localStorage.removeItem("fady_openai_key");
+  localStorage.removeItem("fady_chat_model");
+} catch (e) {}
+
 // Initialize Supabase Client
 if (window.supabase && window.supabase.createClient) {
   window.supabaseClient = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, {
@@ -39,16 +37,4 @@ if (window.supabase && window.supabase.createClient) {
       autoRefreshToken: true
     }
   });
-
-  // Automatically sync OpenAI key from Supabase followup_config if not yet set in browser
-  if (!window.OPENAI_CONFIG.api_key) {
-    window.supabaseClient.from('followup_config').select('value').eq('key', 'openai').maybeSingle()
-      .then(({ data }) => {
-        if (data && data.value && data.value.api_key) {
-          window.OPENAI_CONFIG.api_key = data.value.api_key;
-          localStorage.setItem("fady_openai_key", data.value.api_key);
-        }
-      })
-      .catch(() => {});
-  }
 }
