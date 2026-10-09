@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20261009_triage" />
+  <link rel="stylesheet" href="css/style.css?v=20261009_keys" />
 
   <!-- Supabase JS Client v2 (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -151,7 +151,8 @@
                 </div>
 
                 <div class="chat-header-actions">
-                  <button id="btn-mark-done" class="btn-nav" title="Hide this chat until the customer writes again">
+                  <span class="shortcut-hint"><kbd>C</kbd> next · <kbd>V</kbd> done &amp; next</span>
+                  <button id="btn-mark-done" class="btn-nav" title="Hide this chat until the customer writes again (V = mark done and open next)">
                     <i class="fa-solid fa-check"></i> Mark done
                   </button>
                   <button id="btn-show-again" class="btn-nav" style="display: none;" title="Bring this chat back to the follow-up list">
@@ -200,7 +201,7 @@
   </div>
 
   <!-- Scripts (Cache-Busted) -->
-  <script src="js/config.js?v=20261009_triage"></script>
-  <script src="js/app.js?v=20261009_triage"></script>
+  <script src="js/config.js?v=20261009_keys"></script>
+  <script src="js/app.js?v=20261009_keys"></script>
 </body>
 </html>

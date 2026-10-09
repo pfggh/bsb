@@ -443,10 +443,49 @@
       Object.assign(c, { triage_verdict: verdict, triage_status: row.status, triage_reason: row.reason, triage_method: 'manual', triage_fresh: true });
       filterAndRenderConversations();
       renderTriageBar(c);
+      return true;
     } catch (e) {
       alert(`Could not save: ${e.message || e}`);
+      return false;
     } finally {
       btn.disabled = false;
+    }
+  }
+
+  // Keyboard: C = next chat, V = mark done and go to the next chat
+  function nextConversationAfter(contact) {
+    const list = state.filteredConversations;
+    const idx = list.findIndex(c => c.contact === contact);
+    if (idx === -1) return list[0] || null;
+    return list[idx + 1] || null;
+  }
+
+  function openConversation(c) {
+    if (!c) return;
+    selectConversation(c);
+    const item = el.convList && el.convList.querySelector(`.conv-item[data-contact="${CSS.escape(String(c.contact))}"]`);
+    if (item) item.scrollIntoView({ block: 'nearest' });
+  }
+
+  async function markDoneAndNext() {
+    const c = state.activeConversationData;
+    if (!c) return openConversation(state.filteredConversations[0]);
+    const next = nextConversationAfter(c.contact);
+    if (!isHidden(c) && !(await setManualVerdict('HIDE'))) return;
+    if (next) openConversation(next);
+  }
+
+  function handleShortcut(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !state.session) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    const key = e.key.toLowerCase();
+    if (key === 'c') {
+      e.preventDefault();
+      openConversation(nextConversationAfter(state.activeContact));
+    } else if (key === 'v') {
+      e.preventDefault();
+      markDoneAndNext();
     }
   }
 
@@ -683,6 +722,7 @@
 
     if (el.btnMarkDone) el.btnMarkDone.addEventListener('click', () => setManualVerdict('HIDE'));
     if (el.btnShowAgain) el.btnShowAgain.addEventListener('click', () => setManualVerdict('SHOW'));
+    document.addEventListener('keydown', handleShortcut);
 
     if (el.btnSend) el.btnSend.addEventListener('click', sendDirectChatMessage);
     if (el.chatTextarea) {
