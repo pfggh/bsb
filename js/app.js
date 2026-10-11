@@ -139,7 +139,9 @@
     if (trimmed.includes('supabase.co/storage/v1/object/public/bsb-media/')) return trimmed;
     if (chatId) {
       const typeParam = (mediaType || '').toLowerCase().includes('image') ? 'image' : 'audio';
-      return `${window.SUPABASE_URL}/functions/v1/bsb_media?chatid=${encodeURIComponent(chatId)}&type=${typeParam}`;
+      // bsb_media requires the admin session: <img>/<audio> can't send headers, so the token rides in the URL
+      const token = state.session?.access_token || '';
+      return `${window.SUPABASE_URL}/functions/v1/bsb_media?chatid=${encodeURIComponent(chatId)}&type=${typeParam}&token=${encodeURIComponent(token)}`;
     }
     return trimmed;
   }
@@ -158,6 +160,10 @@
   // =========================================================================
   async function checkAuth() {
     if (!window.supabaseClient) return;
+    // Keep state.session current after token refreshes (media URLs embed the access token)
+    window.supabaseClient.auth.onAuthStateChange((_event, session) => {
+      if (session && session.access_token && state.session) state.session = session;
+    });
     try {
       const { data: { session } } = await window.supabaseClient.auth.getSession();
       if (session && session.access_token) {
@@ -590,18 +596,27 @@
     el.sendStatusLine.textContent = "Sending via BestSMSBulk...";
 
     try {
-      const resp = await fetch(window.BSB_CONFIG.api_endpoint, {
+      // BSB credentials live server-side: the bsb_send edge function forwards the message
+      const { data: { session } } = await window.supabaseClient.auth.getSession();
+      const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/bsb_send`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token || ''}`,
+          apikey: window.SUPABASE_ANON_KEY
+        },
         body: JSON.stringify({
-          api_key: window.BSB_CONFIG.api_key,
-          api_secret: window.BSB_CONFIG.api_secret,
           destination: dest,
           message: text
         })
       });
-      const resJson = await resp.json().catch(() => ({ raw: 'Non-JSON' }));
-      const isSuccess = resp.status === 200 && resJson.status !== 'error' && resJson.success !== false;
+      const data = await resp.json().catch(() => ({}));
+      const edgeOk = resp.status === 200 && data && typeof data.upstream_status === 'number';
+      // resJson is BestSMSBulk's own answer (or the edge function's error when it never reached BSB)
+      const resJson = edgeOk
+        ? ((data.result && typeof data.result === 'object') ? data.result : { raw: 'Non-JSON' })
+        : { status: 'error', message: (data && (data.error || data.message)) || `HTTP ${resp.status}` };
+      const isSuccess = edgeOk && data.upstream_status === 200 && resJson.status !== 'error' && resJson.success !== false;
 
       // Record every send in send_queue: keeps the 1h dispatcher filter working and gives the
       // AI check the text of follow-ups sent from this panel (BSB webhooks don't include it)
