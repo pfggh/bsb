@@ -2366,3 +2366,16 @@ html, body {
   border-radius: 4px;
   color: var(--text-muted);
 }
+
+/* Protected media (fetched with the admin session, shown from a blob: URL) */
+.media-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.media-status-error {
+  opacity: 0.85;
+}

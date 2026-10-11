@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Content-Security-Policy: no inline/eval script, only the hosts this page really uses.
+       (frame-ancestors cannot be set from a <meta>; js/config.js has a frame guard instead.) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; img-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; media-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; connect-src 'self' https://kfgswynickhywzhneltu.supabase.co wss://kfgswynickhywzhneltu.supabase.co; base-uri 'self'; form-action 'self'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'self'" />
+  <meta name="referrer" content="no-referrer" />
   <title>Teshrij Follow-up - Live Chat Panel</title>
   <link rel="icon" type="image/png" href="img/logo.png" />
 
@@ -12,13 +16,13 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
   <!-- FontAwesome 6 Icons -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20261011_sec" />
+  <link rel="stylesheet" href="css/style.css?v=20261011_hard" />
 
-  <!-- Supabase JS Client v2 (CDN) -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Supabase JS Client v2 (CDN, pinned to an exact version + Subresource Integrity) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 <body>
 
@@ -31,7 +35,7 @@
       <h1 class="login-title">Follow-up Panel</h1>
       <p class="login-subtitle">Sign in to open the live chat follow-up panel</p>
 
-      <form id="login-form" class="login-form">
+      <form id="login-form" class="login-form" method="post">
         <div class="input-group">
           <i class="fa-solid fa-envelope"></i>
           <input type="email" id="login-email" class="input-field" placeholder="Email address" required autocomplete="email" />
@@ -74,14 +78,14 @@
           <i class="fa-solid fa-file-arrow-up"></i>
           <span>Ingest Backup</span>
         </button>
-        <input type="file" id="followup-backup-input" accept=".csv" style="display: none;" />
-        <a href="https://teshrij.xyz/pnl/" target="_blank" class="btn-nav" title="Open Main Admin Panel">
+        <input type="file" id="followup-backup-input" accept=".csv,text/csv" style="display: none;" />
+        <a href="https://teshrij.xyz/pnl/" target="_blank" rel="noopener noreferrer" class="btn-nav" title="Open Main Admin Panel">
           <i class="fa-solid fa-gauge-high"></i>
           <span>Admin Panel</span>
         </a>
         <div class="btn-nav" style="cursor: default; opacity: 0.85;">
           <i class="fa-regular fa-user"></i>
-          <span id="user-email-display">admin@teshrij.com</span>
+          <span id="user-email-display">Admin</span>
         </div>
         <button id="logout-btn" class="btn-nav" title="Sign Out">
           <i class="fa-solid fa-arrow-right-from-bracket"></i>
@@ -108,7 +112,7 @@
 
               <div class="search-wrapper">
                 <i class="fa-solid fa-magnifying-glass"></i>
-                <input type="text" id="search-input" class="search-input" placeholder="Search phone, name, message..." />
+                <input type="text" id="search-input" class="search-input" placeholder="Search phone, name, message..." autocomplete="off" spellcheck="false" maxlength="200" />
               </div>
 
               <div class="filter-pills">
@@ -201,7 +205,7 @@
   </div>
 
   <!-- Scripts (Cache-Busted) -->
-  <script src="js/config.js?v=20261011_sec"></script>
-  <script src="js/app.js?v=20261011_sec"></script>
+  <script src="js/config.js?v=20261011_hard"></script>
+  <script src="js/app.js?v=20261011_hard"></script>
 </body>
 </html>
