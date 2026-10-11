@@ -4,6 +4,7 @@ Handles immediate and queued sending, rate limit delays, retry attempts,
 and supports both Manual Review Mode and Automatic Unreviewed Mode.
 """
 
+import os
 import time
 import json
 import logging
@@ -11,6 +12,22 @@ from typing import Dict, Any, List, Optional
 import requests
 from core.db import get_db_connection, DEFAULT_DB_PATH, delete_unsent_drafts
 from core.importer import normalize_phone
+
+def _load_env_file():
+    """Loads KEY=VALUE pairs from core/.env without overriding the real environment."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, ".env"), "/home/user/Projects/Fady_bot/.env"):
+        if os.path.isfile(path):
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            return
+
+_load_env_file()
 
 
 logger = logging.getLogger(__name__)
@@ -20,8 +37,8 @@ def send_whatsapp_message(
     destination: str,
     message: str,
     api_endpoint: str = "https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php",
-    api_key: str = "teshrij",
-    api_secret: str = "Teshrij123",
+    api_key: str = os.environ.get("BSB_API_KEY", ""),
+    api_secret: str = os.environ.get("BSB_API_SECRET", ""),
     timeout: int = 25
 ) -> Dict[str, Any]:
     """
@@ -207,8 +224,8 @@ def process_send_queue(
     """
     sms_cfg = config.get("bestsmsbulk", {})
     endpoint = sms_cfg.get("api_endpoint", "https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php")
-    api_key = sms_cfg.get("api_key", "teshrij")
-    api_secret = sms_cfg.get("api_secret", "Teshrij123")
+    api_key = sms_cfg.get("api_key") or os.environ.get("BSB_API_KEY", "")
+    api_secret = sms_cfg.get("api_secret") or os.environ.get("BSB_API_SECRET", "")
 
     sender_cfg = config.get("sender", {})
     send_delay = float(sender_cfg.get("send_delay", 1.5))

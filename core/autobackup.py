@@ -36,7 +36,29 @@ from core.db import (
 )
 from core.importer import import_csv_chats
 
-DEFAULT_AGENT_KEY = os.environ.get("BSB_AGENT_KEY", "0670126f7e99ae241c84d3a6d32e84c2")
+def _load_env_file():
+    """Load KEY=VALUE lines from the first existing .env (real environment wins)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for path in (os.path.join(here, ".env"), os.path.join(root, "core", ".env"), "/home/user/Projects/Fady_bot/.env"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name, value = name.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(name, value)
+        break
+
+
+_load_env_file()
+
+DEFAULT_AGENT_KEY = os.environ.get("BSB_AGENT_KEY", "")
 DEFAULT_DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
 BASE_URL = "https://www.bestsmsbulk.com/pro-livechat"
 
@@ -50,6 +72,8 @@ def get_agent_key(config: Optional[Dict[str, Any]] = None) -> str:
         cfg_key = config.get("bestsmsbulk", {}).get("agent_key")
         if cfg_key:
             return str(cfg_key).strip()
+    if not DEFAULT_AGENT_KEY:
+        raise RuntimeError("Set BSB_AGENT_KEY in core/.env")
     return DEFAULT_AGENT_KEY
 
 
@@ -79,7 +103,7 @@ def export_via_direct_api(
     Directly authenticates with BSB and fetches the exported chats CSV.
     Ultra-fast (5-8s), rock-solid, completely headless, zero browser overhead.
     """
-    key = (agent_key or DEFAULT_AGENT_KEY).strip()
+    key = (agent_key or get_agent_key()).strip()
     target_dir = os.path.expanduser(download_dir or DEFAULT_DOWNLOAD_DIR)
     os.makedirs(target_dir, exist_ok=True)
     target_filepath = os.path.join(target_dir, filename)
@@ -221,7 +245,7 @@ def export_via_browser(
 
     target_dir = os.path.expanduser(download_dir or DEFAULT_DOWNLOAD_DIR)
     os.makedirs(target_dir, exist_ok=True)
-    key = (agent_key or DEFAULT_AGENT_KEY).strip()
+    key = (agent_key or get_agent_key()).strip()
 
     log(f"Starting Selenium Browser Exporter ({'Headless' if headless else 'Headed GUI'})...")
 

@@ -3,3 +3,10 @@ __pycache__/
 config.yaml
 *.log
 daemon.log
+.env
+core/.env
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+.env.*

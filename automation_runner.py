@@ -22,20 +22,44 @@ import requests
 from supabase import create_client, Client
 from openai import OpenAI
 
-# Supabase Credentials (from config.js)
-SUPABASE_URL = "https://kfgswynickhywzhneltu.supabase.co"
-SUPABASE_SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtmZ3N3eW5pY2toeXd6aG5lbHR1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczNTUwNjA1MywiZXhwIjoyMDUxMDgyMDUzfQ.0Fu7UKwXf9ZAPQ0OTCxpXh6P7aWGW1A8jTX8FxZqhis"
+def _load_env_file():
+    """Load KEY=VALUE lines from the first existing .env (real environment wins)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = here
+    for path in (os.path.join(here, ".env"), os.path.join(root, "core", ".env"), "/home/user/Projects/Fady_bot/.env"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name, value = name.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(name, value)
+        break
+
+
+_load_env_file()
+
+# Supabase Credentials (from environment / core/.env)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kfgswynickhywzhneltu.supabase.co")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 # BestSMSBulk Credentials
 BSB_ENDPOINT = "https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php"
-BSB_API_KEY = "teshrij"
-BSB_API_SECRET = "Teshrij123"
+BSB_API_KEY = os.environ.get("BSB_API_KEY", "")
+BSB_API_SECRET = os.environ.get("BSB_API_SECRET", "")
 
 DEFAULT_POLICY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Fady_bot", "feedback_learning_v2", "runtime_policy.txt")
 REGRESSION_CASES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Fady_bot", "feedback_learning_v2", "regression_cases.jsonl")
 
 
 def get_supabase() -> Client:
+    if not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("Set SUPABASE_SERVICE_ROLE_KEY in core/.env")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
@@ -107,6 +131,7 @@ def run_ai_scan(limit: int = 50, dry_run: bool = False) -> Dict[str, Any]:
     # Fetch recent conversations from RPC or fallback
     try:
         rpc_res = sb.rpc("get_bsb_recent_conversations", {"hours_lookback": 24, "min_hours_old": 2.0}).execute()
+        # RPC already filters incoming_count_24h > 0 at the DB level
         convs = rpc_res.data or []
     except Exception as e:
         print(f"[AI SCAN] RPC fallback due to: {e}")
@@ -115,11 +140,17 @@ def run_ai_scan(limit: int = 50, dry_run: bool = False) -> Dict[str, Any]:
         res = sb.from_("bsb_messages").select("contact, profile_name, message, direction, timestamp")\
             .gte("timestamp", lookback).lte("timestamp", min_old).order("timestamp", desc=True).limit(500).execute()
         seen = set()
+        contact_incoming = {}  # track whether each contact had any incoming message in 24h
         convs = []
         for r in (res.data or []):
-            if r["contact"] not in seen:
-                seen.add(r["contact"])
+            contact = r["contact"]
+            if (r.get("direction") or "").lower() == "incoming":
+                contact_incoming[contact] = True
+            if contact not in seen:
+                seen.add(contact)
                 convs.append(r)
+        # Exclude contacts that only have outgoing messages in the 24h window (no customer reply)
+        convs = [c for c in convs if contact_incoming.get(c["contact"])]
 
     print(f"[AI SCAN] Found {len(convs)} active contacts in the 2h–24h follow-up window.")
 
@@ -292,13 +323,38 @@ def process_send_queue(dry_run: bool = False, max_messages: int = 50) -> Dict[st
         return {"sent": 0, "failed": 0, "status": "empty"}
 
     print(f"[SENDER] Found {len(queue_items)} queued message(s). Starting dispatch (delay: 1.5s)...")
-    stats = {"sent": 0, "failed": 0}
+    stats = {"sent": 0, "failed": 0, "skipped_duplicates": 0}
+    dispatched_in_batch = set()
 
     for item in queue_items:
         qid = item["id"]
         raw_contact = item["contact"]
         msg = item["message"]
         norm_phone = normalize_phone(raw_contact)
+
+        # 1. In-batch deduplication guard
+        if norm_phone in dispatched_in_batch:
+            print(f"[SENDER] ⚠️ Suppressing duplicate queue item #{qid} for {norm_phone}: already processed in this batch.")
+            sb.from_("send_queue").update({
+                "status": "CANCELLED",
+                "error_message": "Duplicate queue item suppressed: contact already processed in current batch"
+            }).eq("id", qid).execute()
+            stats["skipped_duplicates"] += 1
+            continue
+
+        # 2. Recent dispatch guard: check if message was already sent to this contact within last 12 hours
+        since_12h = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        recent_sent = sb.from_("send_queue").select("id").eq("contact", raw_contact).eq("status", "SENT").gte("sent_at", since_12h).neq("id", qid).limit(1).execute()
+        if recent_sent.data:
+            print(f"[SENDER] ⚠️ Suppressing duplicate queue item #{qid} for {norm_phone}: already sent within last 12h.")
+            sb.from_("send_queue").update({
+                "status": "CANCELLED",
+                "error_message": "Duplicate queue item suppressed: message already sent within last 12 hours"
+            }).eq("id", qid).execute()
+            stats["skipped_duplicates"] += 1
+            continue
+
+        dispatched_in_batch.add(norm_phone)
 
         print(f"[SENDER] Dispatching to {norm_phone}... ", end="", flush=True)
 

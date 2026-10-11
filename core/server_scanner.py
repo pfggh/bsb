@@ -22,7 +22,39 @@ from openai import OpenAI
 # DB Connection
 # ============================================================================
 
-DB_URL = "postgresql://postgres.kfgswynickhywzhneltu:raise%20unable%20duck%20fanatical%20arrest%20yard%20maid%20stunner%20truffle@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
+def _load_env_file():
+    """Load KEY=VALUE lines from the first existing .env (real environment wins)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for path in (os.path.join(here, ".env"), os.path.join(root, "core", ".env"), "/home/user/Projects/Fady_bot/.env"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name, value = name.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(name, value)
+        break
+
+
+_load_env_file()
+
+DB_URL = os.environ.get("SUPABASE_DB_URL", "")
+BSB_AGENT_KEY = os.environ.get("BSB_AGENT_KEY", "")
+
+
+def _db_password() -> str:
+    """Extracts the Postgres password from SUPABASE_DB_URL."""
+    from urllib.parse import urlsplit, unquote
+    password = urlsplit(DB_URL).password if DB_URL else None
+    if not password:
+        raise RuntimeError("Set SUPABASE_DB_URL in core/.env")
+    return unquote(password)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 POLICY_PATH = os.path.join(BASE_DIR, "feedback_learning_v2", "runtime_policy.txt")
@@ -30,6 +62,7 @@ PROMPT_PATH = os.path.join(BASE_DIR, "prompts", "system_prompt.txt")
 
 
 def connect_db():
+    db_password = _db_password()
     addrs = ["18.198.145.223", "52.59.152.35", "18.198.30.239", ""]
     last_err = None
     for addr in addrs:
@@ -37,7 +70,7 @@ def connect_db():
             params = {
                 "dbname": "postgres",
                 "user": "postgres.kfgswynickhywzhneltu",
-                "password": "raise unable duck fanatical arrest yard maid stunner truffle",
+                "password": db_password,
                 "host": "aws-0-eu-central-1.pooler.supabase.com",
                 "port": 5432,
                 "connect_timeout": 8
@@ -1203,8 +1236,10 @@ def normalize_phone(phone_str: str) -> str:
     return digits
 
 
-def get_bsb_sender_session(agent_key: str = "0670126f7e99ae241c84d3a6d32e84c2"):
+def get_bsb_sender_session(agent_key: str = BSB_AGENT_KEY):
     """Creates an authenticated BestSMSBulk session using valid agent secret key."""
+    if not agent_key:
+        raise RuntimeError("Set BSB_AGENT_KEY in core/.env")
     import requests
     s = requests.Session()
     s.headers.update({
@@ -1269,9 +1304,9 @@ def process_server_queue(max_items: int = 50, dry_run: bool = False):
     cur.execute("SELECT value FROM followup_config WHERE key = 'bestsmsbulk';")
     cfg_row = cur.fetchone()
     sms_cfg = cfg_row["value"] if cfg_row and cfg_row.get("value") else {}
-    agent_key = sms_cfg.get("agent_key", "0670126f7e99ae241c84d3a6d32e84c2")
-    api_key = sms_cfg.get("api_key", "teshrij")
-    api_secret = sms_cfg.get("api_secret", "Teshrij123")
+    agent_key = sms_cfg.get("agent_key") or BSB_AGENT_KEY
+    api_key = sms_cfg.get("api_key") or os.environ.get("BSB_API_KEY", "")
+    api_secret = sms_cfg.get("api_secret") or os.environ.get("BSB_API_SECRET", "")
     api_endpoint = sms_cfg.get("api_endpoint", "https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php")
 
     # Initialize authenticated session
@@ -1281,11 +1316,34 @@ def process_server_queue(max_items: int = 50, dry_run: bool = False):
         if not bsb_session:
             print("[QUEUE DISPATCHER] Warning: LiveChat session login failed, will try legacy API endpoint.")
 
+    # Track dispatched contacts in current run to prevent sending to same recipient twice
+    dispatched_in_batch = set()
+
     for item in items:
         qid = item["id"]
         contact = item["contact"]
         msg = item["message"]
         norm = normalize_phone(contact)
+
+        # 1. In-batch deduplication guard
+        if norm in dispatched_in_batch:
+            print(f"[QUEUE DISPATCHER] ⚠️ Suppressing duplicate queue item #{qid} for {norm}: already dispatched in this batch.")
+            cur.execute("UPDATE send_queue SET status = 'CANCELLED', error_message = 'Duplicate queue item suppressed: contact already processed in current batch' WHERE id = %s", (qid,))
+            continue
+
+        # 2. Recent dispatch guard: check if message was already sent to this contact within last 12 hours
+        cur.execute("""
+            SELECT id FROM send_queue 
+            WHERE contact = %s AND status = 'SENT' AND sent_at >= NOW() - INTERVAL '12 hours' AND id != %s
+            LIMIT 1;
+        """, (contact, qid))
+        recent_sent = cur.fetchone()
+        if recent_sent:
+            print(f"[QUEUE DISPATCHER] ⚠️ Suppressing duplicate queue item #{qid} for {norm}: already sent within last 12h (item #{recent_sent['id']}).")
+            cur.execute("UPDATE send_queue SET status = 'CANCELLED', error_message = 'Duplicate queue item suppressed: message already sent within last 12 hours' WHERE id = %s", (qid,))
+            continue
+
+        dispatched_in_batch.add(norm)
 
         if dry_run:
             print(f"[QUEUE DISPATCHER DRY-RUN] Would send to {norm}: {msg[:35]}...")

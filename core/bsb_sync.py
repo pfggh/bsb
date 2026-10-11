@@ -18,12 +18,43 @@ import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor
 
 BASE_URL = "https://www.bestsmsbulk.com/pro-livechat"
-DEFAULT_AGENT_KEY = "0670126f7e99ae241c84d3a6d32e84c2"
+def _load_env_file():
+    """Load KEY=VALUE lines from the first existing .env (real environment wins)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for path in (os.path.join(here, ".env"), os.path.join(root, "core", ".env"), "/home/user/Projects/Fady_bot/.env"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name, value = name.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(name, value)
+        break
+
+
+_load_env_file()
+
+DEFAULT_AGENT_KEY = os.environ.get("BSB_AGENT_KEY", "")
+
+
+def _db_password() -> str:
+    """Extracts the Postgres password from SUPABASE_DB_URL (empty if unset)."""
+    from urllib.parse import urlsplit, unquote
+    db_url = os.environ.get("SUPABASE_DB_URL", "")
+    password = urlsplit(db_url).password if db_url else None
+    return unquote(password) if password else ""
+
 
 DB_CONFIG = {
     "dbname": "postgres",
     "user": "postgres.kfgswynickhywzhneltu",
-    "password": "raise unable duck fanatical arrest yard maid stunner truffle",
+    "password": _db_password(),
     "host": "aws-0-eu-central-1.pooler.supabase.com",
     "port": 5432,
     "connect_timeout": 15
@@ -31,6 +62,8 @@ DB_CONFIG = {
 
 
 def get_db():
+    if not DB_CONFIG.get("password"):
+        raise RuntimeError("Set SUPABASE_DB_URL in core/.env")
     addrs = ["18.198.145.223", "52.59.152.35", "18.198.30.239", ""]
     last_err = None
     for addr in addrs:
@@ -69,6 +102,8 @@ def normalize_phone(phone_str: str) -> str:
 
 def get_authenticated_session(agent_key: str = DEFAULT_AGENT_KEY) -> Optional[requests.Session]:
     """Completes BSB Human Check challenge and authenticates agent session."""
+    if not agent_key:
+        raise RuntimeError("Set BSB_AGENT_KEY in core/.env")
     s = requests.Session()
     headers = {
         "User-Agent": "Mozilla/5.0 (X-UA-Compatible; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",

@@ -5,10 +5,10 @@ analyzer:
   min_hours_old: 2.0
   require_incoming_last: false
 bestsmsbulk:
-  agent_key: 0670126f7e99ae241c84d3a6d32e84c2
+  agent_key: YOUR_BSB_AGENT_KEY
   api_endpoint: https://www.bestsmsbulk.com/bestsmsbulkapi/whatsappmsging/sendMessage.php
   api_key: teshrij
-  api_secret: Teshrij123
+  api_secret: YOUR_BSB_API_SECRET
   auto_export_days: 5
   download_dir: /home/user/Downloads
 database:

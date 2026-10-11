@@ -1,10 +1,35 @@
+import os
 import time
 import requests
 from supabase import create_client
 
-SUPABASE_URL = 'https://kfgswynickhywzhneltu.supabase.co'
-SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtmZ3N3eW5pY2toeXd6aG5lbHR1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczNTUwNjA1MywiZXhwIjoyMDUxMDgyMDUzfQ.0Fu7UKwXf9ZAPQ0OTCxpXh6P7aWGW1A8jTX8FxZqhis'
-BSB_AGENT_KEY = 'bdf2422d9dd8f215a583c1a37727d658'
+def _load_env_file():
+    """Load KEY=VALUE lines from the first existing .env (real environment wins)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = here
+    for path in (os.path.join(here, ".env"), os.path.join(root, "core", ".env"), "/home/user/Projects/Fady_bot/.env"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name, value = name.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(name, value)
+        break
+
+
+_load_env_file()
+
+SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://kfgswynickhywzhneltu.supabase.co')
+SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+if not SERVICE_KEY:
+    raise RuntimeError('Set SUPABASE_SERVICE_ROLE_KEY in core/.env')
+BSB_AGENT_KEY = os.environ.get('BSB_MEDIA_AGENT_KEY') or os.environ.get('BSB_AGENT_KEY', '')
 BUCKET_NAME = 'bsb-media'
 
 sb = create_client(SUPABASE_URL, SERVICE_KEY)
