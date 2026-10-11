@@ -1,12 +1,21 @@
-__pycache__/
-*.pyc
-config.yaml
-*.log
-daemon.log
+# Only the web interface is published. Everything else stays local.
+# This is a WHITELIST: anything not listed below is ignored and cannot be
+# added by accident (Python automation, config, data, .env, supabase/ ...).
+/*
+!/.gitignore
+!/index.html
+!/js/
+!/css/
+!/img/
+
+# Never publish these, even inside the whitelisted folders
 .env
-core/.env
+.env.*
+*.py
+*.pyc
+__pycache__/
+*.log
 *.db
 *.sqlite
 *.sqlite3
-data/*.db
-.env.*
+*.map
