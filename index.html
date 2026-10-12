@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20261011_hard" />
+  <link rel="stylesheet" href="css/style.css?v=20261012_support" />
 
   <!-- Supabase JS Client v2 (CDN, pinned to an exact version + Subresource Integrity) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -65,6 +65,18 @@
           <span class="badge-24h">Live chats</span>
         </span>
       </div>
+
+      <nav class="suite-nav-tabs" role="tablist" aria-label="Panels">
+        <button type="button" class="suite-tab-btn active" data-tab="followup" role="tab" aria-selected="true" title="Chats that need a follow-up">
+          <i class="fa-solid fa-comments"></i>
+          <span>Follow-up</span>
+        </button>
+        <button type="button" class="suite-tab-btn" data-tab="support" role="tab" aria-selected="false" title="AI-drafted replies and chats that need a human">
+          <i class="fa-solid fa-headset"></i>
+          <span>Support</span>
+          <span id="tab-count-support" class="nav-pill" title="Drafts to review + chats that need a human">0</span>
+        </button>
+      </nav>
 
       <div class="nav-actions">
         <span id="triage-status" class="triage-status" title="AI check that hides finished chats">
@@ -201,11 +213,107 @@
 
         </div>
       </section>
+
+      <!-- ====================================================================
+           3. SUPPORT COPILOT: assisted-reply inbox (js/support.js)
+           ==================================================================== -->
+      <section id="view-support" class="suite-view">
+        <div class="main-split" style="width: 100%; height: 100%;">
+
+          <!-- Left Sidebar: open drafts, escalations and "no reply needed" items -->
+          <aside class="conv-sidebar">
+            <div class="sidebar-header">
+              <div class="sidebar-title-row">
+                <span class="sidebar-title">
+                  <i class="fa-solid fa-headset" style="color: var(--accent-cyan);"></i>
+                  Support inbox
+                  <span id="sup-count-badge" class="counter-badge">0</span>
+                </span>
+                <span id="sup-updated" class="sup-updated"></span>
+              </div>
+
+              <div class="search-wrapper">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" id="sup-search-input" class="search-input" placeholder="Search phone, name, message, reason..." autocomplete="off" spellcheck="false" maxlength="200" />
+              </div>
+
+              <div class="filter-pills">
+                <button type="button" class="pill-btn active" data-sup-filter="draft" title="The AI wrote a reply: review, edit and send">Drafts <span id="sup-count-draft" class="pill-count">0</span></button>
+                <button type="button" class="pill-btn" data-sup-filter="escalate" title="The AI did not answer: a person has to">Needs human <span id="sup-count-escalate" class="pill-count">0</span></button>
+                <button type="button" class="pill-btn" data-sup-filter="no_reply" title="The AI thinks the customer's message needs no answer">No reply needed <span id="sup-count-no_reply" class="pill-count">0</span></button>
+              </div>
+
+              <div id="sup-flash" class="sup-flash" role="status"></div>
+            </div>
+
+            <div id="sup-list" class="conv-list">
+              <!-- Populated by JavaScript -->
+            </div>
+          </aside>
+
+          <!-- Right Panel: conversation + review desk -->
+          <main id="sup-panel" class="chat-panel">
+
+            <div id="sup-empty-state" class="chat-empty-state">
+              <div class="chat-empty-icon">
+                <i id="sup-empty-icon" class="fa-solid fa-headset"></i>
+              </div>
+              <h3 id="sup-empty-title" class="sup-empty-title">Select a chat</h3>
+              <p id="sup-empty-text" class="sup-empty-text"></p>
+            </div>
+
+            <div id="sup-active-view" class="sup-active-view" style="display: none;">
+
+              <div class="chat-header">
+                <div class="chat-header-user">
+                  <button type="button" id="sup-back-btn" class="btn-nav sup-back-btn" title="Back to the list">
+                    <i class="fa-solid fa-arrow-left"></i>
+                  </button>
+                  <div class="conv-avatar sup-header-avatar">
+                    <i class="fa-solid fa-user"></i>
+                  </div>
+                  <div class="chat-header-info">
+                    <h2 id="sup-phone"></h2>
+                    <div class="chat-header-sub">
+                      <span id="sup-profile-name"></span>
+                      <span id="sup-header-pills" class="conv-badges"></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="chat-header-actions">
+                  <a id="sup-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
+                    <i class="fa-brands fa-whatsapp"></i> <span>WhatsApp Web</span>
+                  </a>
+                </div>
+              </div>
+
+              <div id="sup-banner" class="sup-banner" style="display: none;" role="status"></div>
+
+              <div id="sup-messages" class="chat-messages-container">
+                <!-- Messages rendered dynamically -->
+              </div>
+
+              <div id="sup-review" class="sup-review">
+                <!-- Review desk rendered dynamically -->
+              </div>
+
+              <div class="sup-hint-bar">
+                <span class="shortcut-hint"><kbd>J</kbd>/<kbd>K</kbd> next / previous · <kbd>E</kbd> edit · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> send · <kbd>X</kbd> reject · <kbd>H</kbd> handled · <kbd>Esc</kbd> leave the text box</span>
+              </div>
+
+            </div>
+
+          </main>
+
+        </div>
+      </section>
     </div>
   </div>
 
   <!-- Scripts (Cache-Busted) -->
-  <script src="js/config.js?v=20261011_hard"></script>
-  <script src="js/app.js?v=20261011_hard"></script>
+  <script src="js/config.js?v=20261012_support"></script>
+  <script src="js/app.js?v=20261012_support"></script>
+  <script src="js/support.js?v=20261012_support"></script>
 </body>
 </html>
