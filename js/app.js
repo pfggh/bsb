@@ -42,10 +42,12 @@
     refreshTimer: null,
     triageTimer: null,
     authEpoch: 0,          // bumped on every login/logout so stale async work is dropped
-    mediaRenderToken: 0,   // identifies the current chat render; late media downloads are dropped
-    mediaObjectUrls: [],   // blob: URLs created for the open chat (revoked on re-render)
-    mediaObserver: null
+    activeTab: 'followup'  // 'followup' or the id of a view registered by another script
   };
+
+  const TAB_STORAGE_KEY = 'followup_active_tab';
+  const views = {};        // extra top-bar tabs (js/support.js), see registerView()
+  let chatView = null;     // message renderer of the follow-up chat pane
 
   const el = {};
 
@@ -66,7 +68,7 @@
     el.total24hCount = document.getElementById('total-24h-count');
     el.searchInput = document.getElementById('search-input');
     el.convList = document.getElementById('conv-list');
-    el.filterPills = document.querySelectorAll('.pill-btn');
+    el.filterPills = document.querySelectorAll('#view-chats .pill-btn');
     el.pillCountTodo = document.getElementById('pill-count-todo');
     el.pillCountUnanswered = document.getElementById('pill-count-unanswered');
     el.pillCountHidden = document.getElementById('pill-count-hidden');
@@ -84,7 +86,12 @@
     el.chatTextarea = document.getElementById('chat-textarea');
     el.btnSend = document.getElementById('btn-send');
     el.sendStatusLine = document.getElementById('send-status-line');
-    el.quickTemplates = document.querySelectorAll('.template-pill');
+    el.quickTemplates = document.querySelectorAll('#view-chats .template-pill');
+    chatView = createChatRenderer(el.chatMessagesContainer);
+
+    el.viewChats = document.getElementById('view-chats');
+    el.triageStatus = document.getElementById('triage-status');
+    el.tabButtons = document.querySelectorAll('.suite-tab-btn[data-tab]');
   }
 
   // =========================================================================
@@ -202,15 +209,6 @@
     return null;
   }
 
-  function releaseMediaResources() {
-    if (state.mediaObserver) {
-      state.mediaObserver.disconnect();
-      state.mediaObserver = null;
-    }
-    state.mediaObjectUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
-    state.mediaObjectUrls = [];
-  }
-
   async function fetchProtectedMedia(url, expectedType) {
     const { data: { session } } = await window.supabaseClient.auth.getSession();
     const token = session && session.access_token;
@@ -245,84 +243,191 @@
     holder.appendChild(note);
   }
 
-  // Download one protected media item and attach it as a blob: URL
-  async function loadProtectedMedia(node) {
-    const job = node.__mediaJob;
-    if (!job || job.started) return;
-    job.started = true;
-    const epoch = state.authEpoch;
-    const renderToken = job.renderToken;
-    const status = job.holder.querySelector('.media-status');
-    try {
-      const blob = await fetchProtectedMedia(job.url, job.type);
-      // The chat was re-rendered or the user logged out while downloading: drop the result
-      if (epoch !== state.authEpoch || renderToken !== state.mediaRenderToken || !node.isConnected) return;
-      const objectUrl = URL.createObjectURL(blob);
-      state.mediaObjectUrls.push(objectUrl);
-      node.src = objectUrl;
-      if (job.link) job.link.href = objectUrl;
-      node.style.display = '';
-      if (status) status.remove();
-    } catch (e) {
-      if (epoch !== state.authEpoch || renderToken !== state.mediaRenderToken) return;
-      node.style.display = 'none';
-      showMediaError(job.holder, job.type === 'image' ? 'Image unavailable' : 'Voice note unavailable');
-    }
+  function buildMessageRow(isIncoming, bubbleChildren, timeText, statusIconClasses) {
+    const row = createEl('div', `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`);
+    const bubble = createEl('div', 'msg-bubble');
+    bubbleChildren.forEach(child => { if (child) bubble.appendChild(child); });
+    const meta = createEl('div', 'msg-meta');
+    meta.appendChild(createEl('span', '', timeText));
+    if (statusIconClasses) meta.appendChild(icon(statusIconClasses));
+    row.append(bubble, meta);
+    return row;
   }
 
-  function queueProtectedMedia(node) {
-    if (state.mediaObserver) state.mediaObserver.observe(node.__mediaJob.holder);
-    else loadProtectedMedia(node);
-  }
+  // One renderer per message pane (follow-up chat, support chat). Each keeps its own media
+  // bookkeeping, so re-rendering one pane never drops or leaks the downloads of the other.
+  function createChatRenderer(container) {
+    const media = {
+      renderToken: 0,   // identifies the current chat render; late media downloads are dropped
+      objectUrls: [],   // blob: URLs created for the open chat (revoked on re-render)
+      observer: null
+    };
 
-  function buildMediaElement(msg, kind) {
-    const media = resolveMedia(msg.chat_id, kind, msg.media_url);
-    if (!media) return null;
-    const isImage = kind === 'image';
-    const holder = createEl('div', isImage ? 'chat-media-image-wrap' : 'voice-note-card');
-    let node;
-    let link = null;
-
-    if (isImage) {
-      link = document.createElement('a');
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      node = createEl('img', 'chat-media-img');
-      node.alt = 'Image';
-      node.referrerPolicy = 'no-referrer';
-      link.appendChild(node);
-      holder.appendChild(link);
-    } else {
-      const header = createEl('div', 'voice-note-header');
-      const title = document.createElement('span');
-      title.append(icon('fa-solid fa-microphone-lines'), ' Voice Note');
-      header.appendChild(title);
-      node = createEl('audio', 'voice-note-audio');
-      node.controls = true;
-      node.preload = 'none';
-      holder.append(header, node);
-    }
-
-    if (media.kind === 'direct') {
-      if (isImage) {
-        node.loading = 'lazy';
-        link.href = media.url;
+    function releaseMediaResources() {
+      if (media.observer) {
+        media.observer.disconnect();
+        media.observer = null;
       }
-      node.addEventListener('error', () => {
-        node.style.display = 'none';
-        showMediaError(holder, isImage ? 'Image unavailable' : 'Voice note unavailable');
-      }, { once: true });
-      node.src = media.url;
-    } else {
-      node.style.display = 'none';
-      const status = createEl('div', 'media-status');
-      status.append(icon('fa-solid fa-spinner fa-spin'), isImage ? ' Loading image...' : ' Loading voice note...');
-      holder.appendChild(status);
-      node.__mediaJob = { url: media.url, type: media.type, holder, link, started: false, renderToken: state.mediaRenderToken };
-      holder.__mediaNode = node;
-      queueProtectedMedia(node);
+      media.objectUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+      media.objectUrls = [];
     }
-    return holder;
+
+    // Download one protected media item and attach it as a blob: URL
+    async function loadProtectedMedia(node) {
+      const job = node.__mediaJob;
+      if (!job || job.started) return;
+      job.started = true;
+      const epoch = state.authEpoch;
+      const renderToken = job.renderToken;
+      const status = job.holder.querySelector('.media-status');
+      try {
+        const blob = await fetchProtectedMedia(job.url, job.type);
+        // The chat was re-rendered or the user logged out while downloading: drop the result
+        if (epoch !== state.authEpoch || renderToken !== media.renderToken || !node.isConnected) return;
+        const objectUrl = URL.createObjectURL(blob);
+        media.objectUrls.push(objectUrl);
+        node.src = objectUrl;
+        if (job.link) job.link.href = objectUrl;
+        node.style.display = '';
+        if (status) status.remove();
+      } catch (e) {
+        if (epoch !== state.authEpoch || renderToken !== media.renderToken) return;
+        node.style.display = 'none';
+        showMediaError(job.holder, job.type === 'image' ? 'Image unavailable' : 'Voice note unavailable');
+      }
+    }
+
+    function queueProtectedMedia(node) {
+      if (media.observer) media.observer.observe(node.__mediaJob.holder);
+      else loadProtectedMedia(node);
+    }
+
+    function buildMediaElement(msg, kind) {
+      const resolved = resolveMedia(msg.chat_id, kind, msg.media_url);
+      if (!resolved) return null;
+      const isImage = kind === 'image';
+      const holder = createEl('div', isImage ? 'chat-media-image-wrap' : 'voice-note-card');
+      let node;
+      let link = null;
+
+      if (isImage) {
+        link = document.createElement('a');
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        node = createEl('img', 'chat-media-img');
+        node.alt = 'Image';
+        node.referrerPolicy = 'no-referrer';
+        link.appendChild(node);
+        holder.appendChild(link);
+      } else {
+        const header = createEl('div', 'voice-note-header');
+        const title = document.createElement('span');
+        title.append(icon('fa-solid fa-microphone-lines'), ' Voice Note');
+        header.appendChild(title);
+        node = createEl('audio', 'voice-note-audio');
+        node.controls = true;
+        node.preload = 'none';
+        holder.append(header, node);
+      }
+
+      if (resolved.kind === 'direct') {
+        if (isImage) {
+          node.loading = 'lazy';
+          link.href = resolved.url;
+        }
+        node.addEventListener('error', () => {
+          node.style.display = 'none';
+          showMediaError(holder, isImage ? 'Image unavailable' : 'Voice note unavailable');
+        }, { once: true });
+        node.src = resolved.url;
+      } else {
+        node.style.display = 'none';
+        const status = createEl('div', 'media-status');
+        status.append(icon('fa-solid fa-spinner fa-spin'), isImage ? ' Loading image...' : ' Loading voice note...');
+        holder.appendChild(status);
+        node.__mediaJob = { url: resolved.url, type: resolved.type, holder, link, started: false, renderToken: media.renderToken };
+        holder.__mediaNode = node;
+        queueProtectedMedia(node);
+      }
+      return holder;
+    }
+
+    // Drop the media of the current render (downloads still in flight are ignored when they land)
+    function reset() {
+      releaseMediaResources();
+      media.renderToken++;
+    }
+
+    function notice(text, iconClasses) {
+      const note = document.createElement('div');
+      note.style.cssText = 'text-align: center; color: var(--text-dim); padding: 40px;';
+      if (iconClasses) note.append(icon(iconClasses), ' ');
+      note.append(text);
+      container.replaceChildren(note);
+    }
+
+    // Built with DOM nodes + textContent only: customer text and media URLs are never parsed as HTML
+    function render(messages) {
+      reset();
+      container.replaceChildren();
+
+      // Protected media is downloaded only when its bubble comes near the visible area
+      if ('IntersectionObserver' in window) {
+        media.observer = new IntersectionObserver((entries, observer) => {
+          entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            if (entry.target.__mediaNode) loadProtectedMedia(entry.target.__mediaNode);
+          });
+        }, { root: container, rootMargin: '300px 0px' });
+      }
+
+      const frag = document.createDocumentFragment();
+      messages.forEach(msg => {
+        if (!msg || typeof msg !== 'object') return;
+        const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
+        const text = typeof msg.message === 'string' ? msg.message : (msg.message === null || msg.message === undefined ? '' : String(msg.message));
+        const mediaType = typeof msg.media_type === 'string' ? msg.media_type.toLowerCase() : '';
+        const mediaUrl = typeof msg.media_url === 'string' ? msg.media_url : '';
+        const mediaPath = mediaUrl.split(/[?#]/)[0].toLowerCase();
+
+        const isAudio = mediaType.includes('audio') || text.includes('🎤') || text.toLowerCase().includes('voice message');
+        const isImage = mediaType.includes('image') || mediaPath.endsWith('.jpg') || mediaPath.endsWith('.jpeg') || mediaPath.endsWith('.png');
+
+        let mediaEl = null;
+        if (msg.chat_id && (isAudio || isImage)) {
+          mediaEl = buildMediaElement(msg, isAudio ? 'audio' : 'image');
+        }
+
+        const notSynced = !isIncoming && text === '[Outgoing Message]';
+        let textEl = null;
+        if (notSynced) textEl = createEl('div', 'msg-text msg-not-synced', 'Message text not synced from BSB yet');
+        else if (text) textEl = createEl('div', 'msg-text', text);
+
+        frag.appendChild(buildMessageRow(
+          isIncoming,
+          [mediaEl, textEl],
+          formatMessageTime(msg.timestamp),
+          isIncoming ? '' : 'fa-solid fa-check-double msg-status-icon msg-status-read'
+        ));
+      });
+      container.appendChild(frag);
+
+      container.scrollTop = container.scrollHeight;
+    }
+
+    // A just-sent message, shown before the next sync brings the stored row
+    function appendOutgoing(text) {
+      container.appendChild(buildMessageRow(
+        false,
+        [createEl('div', 'msg-text', text)],
+        'Just now',
+        'fa-solid fa-check msg-status-icon'
+      ));
+      container.scrollTop = container.scrollHeight;
+    }
+
+    return { render, notice, reset, appendOutgoing };
   }
 
   // A conversation is hidden only by a fresh HIDE verdict (fresh = no new message since it was checked)
@@ -332,6 +437,62 @@
 
   function isUnanswered(c) {
     return c.triage_fresh ? c.triage_status === 'NEEDS_REPLY' : String(c.last_direction).toLowerCase() === 'incoming';
+  }
+
+  // =========================================================================
+  // Top-bar tabs: "Follow-up" (this file) and views registered by other scripts
+  // =========================================================================
+  // def: { onSignIn(), onSignOut(), onShow(), onHide(), refresh() }, all optional. The view's
+  // markup is the <section id="view-{id}"> in index.html, its tab the button with data-tab="{id}".
+  function registerView(id, def) {
+    const key = String(id || '');
+    if (!/^[a-z]{1,20}$/.test(key) || key === 'followup' || views[key] || !def || typeof def !== 'object') return false;
+    views[key] = def;
+    return true;
+  }
+
+  function callView(id, hook) {
+    const view = views[id];
+    if (!view || typeof view[hook] !== 'function') return undefined;
+    try {
+      return view[hook]();
+    } catch (e) {
+      console.warn(`[view ${id}.${hook}]`, safeErrorText(e));
+      return undefined;
+    }
+  }
+
+  function storedTab() {
+    try {
+      const tab = localStorage.getItem(TAB_STORAGE_KEY);
+      return tab && views[tab] ? tab : 'followup';
+    } catch (e) {
+      return 'followup';
+    }
+  }
+
+  function switchTab(tab, remember) {
+    const next = views[tab] ? tab : 'followup';
+    const prev = state.activeTab;
+    state.activeTab = next;
+    el.tabButtons.forEach(btn => {
+      const on = btn.getAttribute('data-tab') === next;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    if (el.viewChats) el.viewChats.classList.toggle('active', next === 'followup');
+    Object.keys(views).forEach(id => {
+      const section = document.getElementById(`view-${id}`);
+      if (section) section.classList.toggle('active', id === next);
+    });
+    if (el.triageStatus) el.triageStatus.style.display = next === 'followup' ? '' : 'none';
+    if (remember) {
+      try { localStorage.setItem(TAB_STORAGE_KEY, next); } catch (e) {}
+    }
+    if (prev !== next) {
+      callView(prev, 'onHide');
+      callView(next, 'onShow');
+    }
   }
 
   // =========================================================================
@@ -360,7 +521,8 @@
   }
 
   function setAuthenticated(session) {
-    if (!state.session) state.authEpoch++;
+    const wasSignedOut = !state.session;
+    if (wasSignedOut) state.authEpoch++;
     state.session = session;
     if (el.userEmailDisplay) el.userEmailDisplay.textContent = session.user?.email || "Admin";
     if (el.passwordInput) el.passwordInput.value = '';
@@ -368,6 +530,10 @@
     el.appView.style.display = 'flex';
     refreshInbox();
     if (!state.refreshTimer) state.refreshTimer = setInterval(refreshInbox, REFRESH_MS);
+    if (wasSignedOut) {
+      Object.keys(views).forEach(id => callView(id, 'onSignIn'));
+      switchTab(storedTab(), false);
+    }
   }
 
   // Wipes everything that belongs to the signed-in admin: timers, data in memory and on screen
@@ -382,8 +548,7 @@
       clearTimeout(state.triageTimer);
       state.triageTimer = null;
     }
-    releaseMediaResources();
-    state.mediaRenderToken++;
+    chatView.reset();
     state.conversations = [];
     state.filteredConversations = [];
     state.activeContact = null;
@@ -409,6 +574,9 @@
     el.loginView.style.display = 'flex';
     el.appView.style.display = 'none';
     if (el.loginError) el.loginError.textContent = '';
+    // Other tabs wipe their own state and DOM; the next sign-in reopens the remembered tab
+    Object.keys(views).forEach(id => callView(id, 'onSignOut'));
+    switchTab('followup', false);
   }
 
   async function handleLogin(e) {
@@ -743,6 +911,7 @@
 
   function handleShortcut(e) {
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !state.session) return;
+    if (state.activeTab !== 'followup') return; // the keys belong to the visible tab only
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     const key = String(e.key || '').toLowerCase();
@@ -780,9 +949,8 @@
 
     updateActiveConversationHighlight(c.contact); // In-place highlight without touching scroll position
 
-    releaseMediaResources();
-    state.mediaRenderToken++;
-    showChatNotice('Loading conversation...', 'fa-solid fa-spinner fa-spin');
+    chatView.reset();
+    chatView.notice('Loading conversation...', 'fa-solid fa-spinner fa-spin');
     const epoch = state.authEpoch;
     try {
       const { data, error } = await window.supabaseClient
@@ -793,80 +961,10 @@
         .limit(100);
       if (epoch !== state.authEpoch || state.activeContact !== c.contact) return;
       if (error) throw error;
-      renderChatMessages((Array.isArray(data) ? data : []).reverse());
+      chatView.render((Array.isArray(data) ? data : []).reverse());
     } catch (e) {
-      if (epoch === state.authEpoch && state.activeContact === c.contact) showChatNotice('Failed to load messages.');
+      if (epoch === state.authEpoch && state.activeContact === c.contact) chatView.notice('Failed to load messages.');
     }
-  }
-
-  function showChatNotice(text, iconClasses) {
-    const notice = document.createElement('div');
-    notice.style.cssText = 'text-align: center; color: var(--text-dim); padding: 40px;';
-    if (iconClasses) notice.append(icon(iconClasses), ' ');
-    notice.append(text);
-    el.chatMessagesContainer.replaceChildren(notice);
-  }
-
-  function buildMessageRow(isIncoming, bubbleChildren, timeText, statusIconClasses) {
-    const row = createEl('div', `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`);
-    const bubble = createEl('div', 'msg-bubble');
-    bubbleChildren.forEach(child => { if (child) bubble.appendChild(child); });
-    const meta = createEl('div', 'msg-meta');
-    meta.appendChild(createEl('span', '', timeText));
-    if (statusIconClasses) meta.appendChild(icon(statusIconClasses));
-    row.append(bubble, meta);
-    return row;
-  }
-
-  // Built with DOM nodes + textContent only: customer text and media URLs are never parsed as HTML
-  function renderChatMessages(messages) {
-    releaseMediaResources();
-    state.mediaRenderToken++;
-    el.chatMessagesContainer.replaceChildren();
-
-    // Protected media is downloaded only when its bubble comes near the visible area
-    if ('IntersectionObserver' in window) {
-      state.mediaObserver = new IntersectionObserver((entries, observer) => {
-        entries.forEach(entry => {
-          if (!entry.isIntersecting) return;
-          observer.unobserve(entry.target);
-          if (entry.target.__mediaNode) loadProtectedMedia(entry.target.__mediaNode);
-        });
-      }, { root: el.chatMessagesContainer, rootMargin: '300px 0px' });
-    }
-
-    const frag = document.createDocumentFragment();
-    messages.forEach(msg => {
-      if (!msg || typeof msg !== 'object') return;
-      const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
-      const text = typeof msg.message === 'string' ? msg.message : (msg.message === null || msg.message === undefined ? '' : String(msg.message));
-      const mediaType = typeof msg.media_type === 'string' ? msg.media_type.toLowerCase() : '';
-      const mediaUrl = typeof msg.media_url === 'string' ? msg.media_url : '';
-      const mediaPath = mediaUrl.split(/[?#]/)[0].toLowerCase();
-
-      const isAudio = mediaType.includes('audio') || text.includes('🎤') || text.toLowerCase().includes('voice message');
-      const isImage = mediaType.includes('image') || mediaPath.endsWith('.jpg') || mediaPath.endsWith('.jpeg') || mediaPath.endsWith('.png');
-
-      let mediaEl = null;
-      if (msg.chat_id && (isAudio || isImage)) {
-        mediaEl = buildMediaElement(msg, isAudio ? 'audio' : 'image');
-      }
-
-      const notSynced = !isIncoming && text === '[Outgoing Message]';
-      let textEl = null;
-      if (notSynced) textEl = createEl('div', 'msg-text msg-not-synced', 'Message text not synced from BSB yet');
-      else if (text) textEl = createEl('div', 'msg-text', text);
-
-      frag.appendChild(buildMessageRow(
-        isIncoming,
-        [mediaEl, textEl],
-        formatMessageTime(msg.timestamp),
-        isIncoming ? '' : 'fa-solid fa-check-double msg-status-icon msg-status-read'
-      ));
-    });
-    el.chatMessagesContainer.appendChild(frag);
-
-    el.chatMessagesContainer.scrollTop = el.chatMessagesContainer.scrollHeight;
   }
 
   async function sendDirectChatMessage() {
@@ -935,15 +1033,7 @@
         el.sendStatusLine.textContent = "✓ Message sent successfully!";
 
         // Only add the bubble if the same chat is still open
-        if (state.activeContact === contact) {
-          el.chatMessagesContainer.appendChild(buildMessageRow(
-            false,
-            [createEl('div', 'msg-text', text)],
-            'Just now',
-            'fa-solid fa-check msg-status-icon'
-          ));
-          el.chatMessagesContainer.scrollTop = el.chatMessagesContainer.scrollHeight;
-        }
+        if (state.activeContact === contact) chatView.appendOutgoing(text);
 
         // The chat leaves the list now and comes back after 2h only if it still needs action
         state.conversations = state.conversations.filter(c => normalizePhone(c.contact) !== dest);
@@ -968,8 +1058,17 @@
     if (el.logoutBtn) el.logoutBtn.addEventListener('click', handleLogout);
     if (el.syncBtn) el.syncBtn.addEventListener('click', async () => {
       el.syncBtn.classList.add('spinning');
-      await refreshInbox();
+      if (state.activeTab === 'followup') await refreshInbox();
+      else await callView(state.activeTab, 'refresh');
       el.syncBtn.classList.remove('spinning');
+    });
+    el.tabButtons.forEach(btn => {
+      const tab = btn.getAttribute('data-tab');
+      if (tab !== 'followup' && !views[tab]) {
+        btn.style.display = 'none'; // its script did not load
+        return;
+      }
+      btn.addEventListener('click', () => switchTab(tab, true));
     });
 
     const btnIngestBackup = document.getElementById('btn-ingest-backup');
@@ -1091,6 +1190,23 @@
           el.chatTextarea.focus();
         }
       });
+    });
+  }
+
+  // The only thing this file exposes: inert helpers and hooks for the other tabs (js/support.js).
+  // No session, token or panel state is reachable through it.
+  if (!window.__FRAMED__) {
+    window.PanelCore = Object.freeze({
+      createEl,
+      icon,
+      safeErrorText,
+      normalizePhone,
+      formatPhoneDisplay,
+      formatRelativeTime,
+      createChatRenderer,
+      registerView,
+      authEpoch: () => state.authEpoch,
+      activeTab: () => state.activeTab
     });
   }
 
