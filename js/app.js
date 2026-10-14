@@ -86,6 +86,13 @@
     el.chatTextarea = document.getElementById('chat-textarea');
     el.btnSend = document.getElementById('btn-send');
     el.sendStatusLine = document.getElementById('send-status-line');
+    el.btnVoice = document.getElementById('btn-voice');
+    el.voiceBar = document.getElementById('voice-recorder-bar');
+    el.voiceTimer = document.getElementById('voice-rec-timer');
+    el.voicePreview = document.getElementById('voice-rec-preview');
+    el.btnVoiceCancel = document.getElementById('btn-voice-cancel');
+    el.btnVoiceSend = document.getElementById('btn-voice-send');
+    el.btnVoiceSendLabel = document.getElementById('btn-voice-send-label');
     el.quickTemplates = document.querySelectorAll('#view-chats .template-pill');
     chatView = createChatRenderer(el.chatMessagesContainer);
 
@@ -427,7 +434,25 @@
       container.scrollTop = container.scrollHeight;
     }
 
-    return { render, notice, reset, appendOutgoing };
+    // Outgoing voice note sent from this panel: a local blob: URL of the recording, owned by this
+    // renderer and revoked with the other media URLs when the chat is reset/re-rendered
+    function appendOutgoingVoice(url) {
+      media.objectUrls.push(url);
+      const holder = createEl('div', 'voice-note-card');
+      const header = createEl('div', 'voice-note-header');
+      const title = document.createElement('span');
+      title.append(icon('fa-solid fa-microphone-lines'), ' Voice Note');
+      header.appendChild(title);
+      const audio = createEl('audio', 'voice-note-audio');
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = url;
+      holder.append(header, audio);
+      container.appendChild(buildMessageRow(false, [holder], 'Just now', 'fa-solid fa-check msg-status-icon'));
+      container.scrollTop = container.scrollHeight;
+    }
+
+    return { render, notice, reset, appendOutgoing, appendOutgoingVoice };
   }
 
   // A conversation is hidden only by a fresh HIDE verdict (fresh = no new message since it was checked)
@@ -564,6 +589,7 @@
     if (el.chatTextarea) el.chatTextarea.value = '';
     if (el.searchInput) el.searchInput.value = '';
     if (el.sendStatusLine) el.sendStatusLine.textContent = '';
+    discardVoiceNote(true);
     if (el.chatPhone) el.chatPhone.textContent = '';
     if (el.chatProfileName) el.chatProfileName.textContent = '';
     if (el.chatWaLink) el.chatWaLink.removeAttribute('href');
@@ -925,6 +951,8 @@
   }
 
   async function selectConversation(c) {
+    // A recording belongs to the chat it was made in: never carry it over to another contact
+    if (voice.phase !== 'idle' && voice.contact !== c.contact) discardVoiceNote(true);
     state.activeContact = c.contact;
     state.activeConversationData = c;
 
@@ -968,6 +996,7 @@
   }
 
   async function sendDirectChatMessage() {
+    if (voice.phase !== 'idle' || el.btnSend.dataset.busy === '1') return; // voice note in progress / already sending
     if (!state.activeContact || !el.chatTextarea.value.trim()) return;
     const text = el.chatTextarea.value.trim();
     const contact = state.activeContact;
@@ -983,6 +1012,8 @@
     }
 
     el.btnSend.disabled = true;
+    el.btnSend.dataset.busy = '1';
+    if (el.btnVoice) el.btnVoice.disabled = true;
     el.sendStatusLine.textContent = "Sending via BestSMSBulk...";
 
     try {
@@ -1046,7 +1077,334 @@
       if (epoch !== state.authEpoch) return;
       el.sendStatusLine.textContent = `Network error: ${safeErrorText(e, 'please try again')}`;
     } finally {
-      el.btnSend.disabled = false;
+      el.btnSend.dataset.busy = '';
+      renderVoiceUi();
+    }
+  }
+
+  // =========================================================================
+  // Voice notes: record OGG/Opus mono (what WhatsApp needs) with opus-recorder,
+  // then send it as base64 through the bsb_send_media edge function
+  // =========================================================================
+  const OPUS_RECORDER_BASE = 'https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/';
+  const VOICE_MAX_MS = 5 * 60 * 1000;
+  const VOICE_MIN_MS = 1000;
+  const VOICE_MAX_BYTES = 16 * 1024 * 1024;
+
+  // phase: idle -> recording -> (stopping) -> ready -> sending -> idle (or back to ready on failure)
+  const voice = {
+    phase: 'idle', contact: null, epoch: 0, recorder: null, stream: null, audioCtx: null,
+    blob: null, previewUrl: null, startedAt: 0, durationMs: 0, tickTimer: null, maxTimer: null,
+    workerUrl: null, sendFailed: false, maybeSent: false
+  };
+
+  function formatVoiceTime(ms) {
+    const sec = Math.floor(ms / 1000);
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  }
+
+  // AudioWorklet modules may load cross-origin (jsDelivr sends CORS headers); a classic Worker
+  // may not, so older browsers get a same-origin blob: wrapper that importScripts() the CDN file
+  function voiceEncoderPath() {
+    const encoderUrl = OPUS_RECORDER_BASE + 'encoderWorker.min.js';
+    // Same test opus-recorder uses to pick its AudioWorklet path
+    const hasWorklet = typeof BaseAudioContext !== 'undefined' && 'audioWorklet' in BaseAudioContext.prototype;
+    if (hasWorklet) return encoderUrl;
+    if (!voice.workerUrl) {
+      voice.workerUrl = URL.createObjectURL(new Blob([`importScripts(${JSON.stringify(encoderUrl)});`], { type: 'application/javascript' }));
+    }
+    return voice.workerUrl;
+  }
+
+  // Detaches the current mic stream/AudioContext/timers from voice state and returns them
+  function takeVoiceInput() {
+    const res = { tickTimer: voice.tickTimer, maxTimer: voice.maxTimer, stream: voice.stream, audioCtx: voice.audioCtx };
+    voice.tickTimer = null; voice.maxTimer = null; voice.stream = null; voice.audioCtx = null;
+    return res;
+  }
+
+  function releaseVoiceResources(res) {
+    if (res.tickTimer) clearInterval(res.tickTimer);
+    if (res.maxTimer) clearTimeout(res.maxTimer);
+    if (res.stream) res.stream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+    if (res.audioCtx) { try { res.audioCtx.close().catch(() => {}); } catch (e) {} }
+  }
+
+  function releaseVoiceInput() {
+    releaseVoiceResources(takeVoiceInput());
+  }
+
+  function renderVoiceUi() {
+    const p = voice.phase;
+    if (el.voiceBar) el.voiceBar.style.display = p === 'idle' ? 'none' : 'flex';
+    if (el.voiceBar) el.voiceBar.classList.toggle('recording', p === 'recording');
+    if (el.btnVoice) el.btnVoice.disabled = p !== 'idle';
+    if (el.btnSend) el.btnSend.disabled = p !== 'idle' || el.btnSend.dataset.busy === '1';
+    if (el.btnVoiceCancel) el.btnVoiceCancel.disabled = p === 'sending' || p === 'stopping';
+    if (el.btnVoiceSend) el.btnVoiceSend.disabled = p === 'sending' || p === 'stopping';
+    if (el.btnVoiceSendLabel) {
+      el.btnVoiceSendLabel.textContent = p === 'recording' ? 'Stop & Send'
+        : p === 'sending' ? 'Sending...'
+        : p === 'stopping' ? 'Finishing...'
+        : (voice.blob && voice.sendFailed ? 'Retry send' : 'Send');
+    }
+    if (el.voicePreview) {
+      const showPreview = (p === 'ready' || p === 'sending') && !!voice.previewUrl;
+      el.voicePreview.style.display = showPreview ? '' : 'none';
+      if (showPreview && el.voicePreview.getAttribute('src') !== voice.previewUrl) el.voicePreview.src = voice.previewUrl;
+      if (!showPreview && el.voicePreview.hasAttribute('src')) {
+        el.voicePreview.pause();
+        el.voicePreview.removeAttribute('src');
+        el.voicePreview.load();
+      }
+    }
+    if (el.voiceTimer) el.voiceTimer.textContent = formatVoiceTime(p === 'recording' ? Date.now() - voice.startedAt : voice.durationMs);
+  }
+
+  // force=true also drops a recording that is being sent (logout / chat switch); the request
+  // itself can't be aborted, but its result is ignored through the epoch/contact checks
+  function discardVoiceNote(force) {
+    if (voice.phase === 'sending' && !force) return;
+    const rec = voice.recorder;
+    voice.recorder = null;
+    if (rec) { try { rec.ondataavailable = null; Promise.resolve(rec.close()).catch(() => {}); } catch (e) {} }
+    releaseVoiceInput();
+    if (voice.previewUrl) { try { URL.revokeObjectURL(voice.previewUrl); } catch (e) {} }
+    voice.previewUrl = null;
+    voice.blob = null;
+    voice.sendFailed = false;
+    voice.maybeSent = false;
+    voice.contact = null;
+    voice.durationMs = 0;
+    voice.phase = 'idle';
+    voice.epoch++;
+    renderVoiceUi();
+  }
+
+  async function startVoiceRecording() {
+    if (voice.phase !== 'idle' || !state.activeContact) return;
+    if (!normalizePhone(state.activeContact)) {
+      el.sendStatusLine.textContent = 'Error: this contact has no valid phone number.';
+      return;
+    }
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      el.sendStatusLine.textContent = 'Error: microphone is unavailable here (the page must be opened over https).';
+      return;
+    }
+    if (typeof window.Recorder !== 'function' || !window.Recorder.isRecordingSupported()) {
+      el.sendStatusLine.textContent = 'Error: voice recorder could not be loaded in this browser. Reload the page and try again.';
+      return;
+    }
+
+    voice.phase = 'stopping'; // "busy" while the permission prompt is open
+    voice.contact = state.activeContact;
+    const myEpoch = ++voice.epoch;
+    const authEpoch = state.authEpoch;
+    renderVoiceUi();
+    el.sendStatusLine.textContent = 'Waiting for microphone permission...';
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      // Cancelled, logged out or switched chat while the prompt was open: release the mic right away
+      if (myEpoch !== voice.epoch || authEpoch !== state.authEpoch || state.activeContact !== voice.contact) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+      voice.stream = stream;
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      voice.audioCtx = new Ctx();
+      const sourceNode = voice.audioCtx.createMediaStreamSource(stream);
+
+      const recorder = new window.Recorder({
+        sourceNode,
+        encoderPath: voiceEncoderPath(),
+        numberOfChannels: 1,
+        encoderSampleRate: 48000,
+        encoderBitRate: 32000,
+        encoderApplication: 2048, // VOIP
+        streamPages: false,
+        monitorGain: 0
+      });
+      voice.recorder = recorder;
+
+      recorder.ondataavailable = (typedArray) => {
+        if (myEpoch !== voice.epoch) return;
+        voice.blob = new Blob([typedArray], { type: 'audio/ogg' });
+        if (voice.previewUrl) URL.revokeObjectURL(voice.previewUrl);
+        voice.previewUrl = URL.createObjectURL(voice.blob);
+      };
+
+      await recorder.start();
+      if (myEpoch !== voice.epoch) return;
+      voice.startedAt = Date.now();
+      voice.phase = 'recording';
+      el.sendStatusLine.textContent = 'Recording voice note...';
+      voice.tickTimer = setInterval(renderVoiceUi, 250);
+      voice.maxTimer = setTimeout(() => {
+        if (myEpoch !== voice.epoch || voice.phase !== 'recording') return;
+        stopVoiceRecording(false).then(() => {
+          if (myEpoch === voice.epoch && voice.phase === 'ready') {
+            el.sendStatusLine.textContent = 'Reached the 5 minute limit. Listen back, then press Send.';
+          }
+        });
+      }, VOICE_MAX_MS);
+      renderVoiceUi();
+    } catch (e) {
+      if (myEpoch !== voice.epoch) return;
+      const name = e && e.name;
+      const msg = name === 'NotAllowedError' || name === 'SecurityError'
+        ? 'Error: microphone permission was denied. Allow it in the browser address bar and try again.'
+        : name === 'NotFoundError' || name === 'OverconstrainedError'
+          ? 'Error: no microphone was found.'
+          : `Error: could not start recording (${safeErrorText(e, 'unknown error')})`;
+      discardVoiceNote(true);
+      if (authEpoch === state.authEpoch) el.sendStatusLine.textContent = msg;
+    }
+  }
+
+  // Stops the mic and waits for the encoder to hand over the finished OGG file
+  async function stopVoiceRecording(thenSend) {
+    if (voice.phase !== 'recording') return;
+    const myEpoch = voice.epoch;
+    const rec = voice.recorder;
+    voice.durationMs = Date.now() - voice.startedAt;
+    voice.phase = 'stopping';
+    // Take this recording's own resources now: if the chat is switched and a new recording starts
+    // while we wait, the release below must not touch the new stream/context/timers
+    const input = takeVoiceInput();
+    if (input.tickTimer) clearInterval(input.tickTimer);
+    if (input.maxTimer) clearTimeout(input.maxTimer);
+    renderVoiceUi();
+    try {
+      await rec.stop(); // resolves after ondataavailable has fired
+    } catch (e) {
+      console.warn('[VOICE STOP ERROR]', safeErrorText(e));
+    } finally {
+      releaseVoiceResources(input);
+      try { Promise.resolve(rec.close()).catch(() => {}); } catch (e) {}
+    }
+    if (myEpoch !== voice.epoch) return;
+    voice.recorder = null;
+
+    if (!voice.blob || voice.blob.size === 0) {
+      discardVoiceNote(true);
+      el.sendStatusLine.textContent = 'Error: the recording came out empty. Please try again.';
+      return;
+    }
+    if (voice.durationMs < VOICE_MIN_MS) {
+      discardVoiceNote(true);
+      el.sendStatusLine.textContent = 'Voice note too short (minimum 1 second). Hold on a bit longer.';
+      return;
+    }
+    voice.phase = 'ready';
+    renderVoiceUi();
+    if (thenSend) await sendVoiceNote();
+  }
+
+  function onVoiceSendClick() {
+    if (voice.phase === 'recording') stopVoiceRecording(true);
+    else if (voice.phase === 'ready') sendVoiceNote();
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.onerror = () => reject(new Error('Could not read the recording'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function sendVoiceNote() {
+    if (voice.phase !== 'ready' || !voice.blob) return;
+    const contact = voice.contact;
+    const dest = normalizePhone(contact);
+    const epoch = state.authEpoch;
+    const myEpoch = voice.epoch;
+    const blob = voice.blob;
+    const seconds = Math.round(voice.durationMs / 1000);
+    if (!dest) {
+      el.sendStatusLine.textContent = 'Error: this contact has no valid phone number.';
+      return;
+    }
+    if (blob.size > VOICE_MAX_BYTES) {
+      el.sendStatusLine.textContent = 'Error: voice note is larger than 16 MB. Please record a shorter one.';
+      return;
+    }
+    // The last attempt timed out upstream and may have gone through: make the admin confirm a resend
+    if (voice.maybeSent && !window.confirm('The previous attempt may already have delivered this voice note. Check the chat first. Send it again anyway?')) return;
+    if (myEpoch !== voice.epoch || voice.phase !== 'ready') return;
+
+    voice.phase = 'sending';
+    renderVoiceUi();
+    el.sendStatusLine.textContent = 'Sending voice note via BestSMSBulk...';
+
+    let resJson = null;
+    let isSuccess = false;
+    try {
+      const { data: { session } } = await window.supabaseClient.auth.getSession();
+      if (!session || !session.access_token) throw new Error('You are signed out. Please sign in again.');
+
+      // The recording goes to BSB as base64 (their recommended path for voice notes): no public file
+      const mediaBase64 = await blobToBase64(blob);
+      if (epoch !== state.authEpoch || myEpoch !== voice.epoch) return;
+
+      const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/bsb_send_media`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+          apikey: window.SUPABASE_ANON_KEY
+        },
+        body: JSON.stringify({ destination: dest, media_base64: mediaBase64 })
+      });
+      const data = (await resp.json().catch(() => null)) || {};
+      const edgeOk = resp.status === 200 && data && typeof data.upstream_status === 'number';
+      const maybeSent = !edgeOk && data.maybe_sent === true;
+      resJson = edgeOk
+        ? ((data.result && typeof data.result === 'object') ? data.result : { raw: 'Non-JSON' })
+        : { status: 'error', message: (data && (data.error || data.message)) || `HTTP ${resp.status}`, ...(maybeSent ? { maybe_sent: true } : {}) };
+      isSuccess = edgeOk && data.upstream_status === 200 && resJson.status !== 'error' && resJson.success !== false;
+
+      // Same send_queue record as text sends (1h dispatcher filter + history for the AI check)
+      try {
+        await window.supabaseClient.from('send_queue').insert({
+          contact: dest,
+          message: `[voice note] ${seconds}s`,
+          status: isSuccess ? 'SENT' : 'FAILED',
+          sent_at: isSuccess ? new Date().toISOString() : null,
+          api_response: JSON.stringify(resJson),
+          error_message: isSuccess ? null : JSON.stringify(resJson)
+        });
+      } catch (dbErr) {
+        console.warn('[SEND_QUEUE INSERT ERROR]', safeErrorText(dbErr));
+      }
+
+      if (epoch !== state.authEpoch) return; // logged out meanwhile
+      if (isSuccess) {
+        if (state.activeContact === contact) chatView.appendOutgoingVoice(URL.createObjectURL(blob));
+        if (myEpoch === voice.epoch) discardVoiceNote(true);
+        el.sendStatusLine.textContent = '✓ Voice note sent successfully!';
+        state.conversations = state.conversations.filter(c => normalizePhone(c.contact) !== dest);
+        filterAndRenderConversations();
+      } else if (maybeSent) {
+        if (myEpoch === voice.epoch) voice.maybeSent = true;
+        el.sendStatusLine.textContent = 'Voice note may have been sent — check the chat before retrying';
+      } else {
+        el.sendStatusLine.textContent = `Error: ${safeErrorText(resJson.message || resJson.error, 'voice note was not sent')} (recording kept, press Retry)`;
+      }
+    } catch (e) {
+      if (epoch !== state.authEpoch) return;
+      if (myEpoch === voice.epoch) el.sendStatusLine.textContent = `Error: ${safeErrorText(e, 'please try again')} (recording kept, press Retry)`;
+    } finally {
+      // Failure: keep the recording so the admin can retry
+      if (myEpoch === voice.epoch && voice.phase === 'sending') {
+        voice.phase = 'ready';
+        voice.sendFailed = true;
+        renderVoiceUi();
+      }
     }
   }
 
@@ -1161,6 +1519,13 @@
     document.addEventListener('keydown', handleShortcut);
 
     if (el.btnSend) el.btnSend.addEventListener('click', sendDirectChatMessage);
+    if (el.btnVoice) el.btnVoice.addEventListener('click', startVoiceRecording);
+    if (el.btnVoiceSend) el.btnVoiceSend.addEventListener('click', onVoiceSendClick);
+    if (el.btnVoiceCancel) el.btnVoiceCancel.addEventListener('click', () => {
+      discardVoiceNote(false);
+      if (voice.phase === 'idle') el.sendStatusLine.textContent = 'Voice note discarded.';
+    });
+    window.addEventListener('pagehide', () => discardVoiceNote(true));
     if (el.chatTextarea) {
       el.chatTextarea.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {

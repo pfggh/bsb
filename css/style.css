@@ -1065,6 +1065,69 @@ html, body {
   transform: none;
 }
 
+/* Voice note recorder (chat composer) */
+.btn-voice {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--accent-emerald);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-md);
+  width: 44px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.btn-voice:hover { background: rgba(52, 211, 153, 0.14); }
+.btn-voice:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.voice-recorder-bar {
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+}
+
+.voice-rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-rose);
+  opacity: 0.35;
+}
+
+.voice-recorder-bar.recording .voice-rec-dot { opacity: 1; animation: pulse 1.2s infinite; }
+
+.voice-rec-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  font-weight: 600;
+  min-width: 40px;
+}
+
+.voice-rec-preview { height: 32px; flex: 1 1 180px; min-width: 160px; }
+
+.btn-voice-action {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-md);
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.btn-voice-action + .btn-voice-action { margin-left: 0; }
+.btn-voice-action.primary { background: linear-gradient(135deg, var(--primary), var(--accent)); color: #fff; border: none; }
+.btn-voice-action:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .send-status-line {
   font-size: 0.72rem;
   min-height: 16px;
