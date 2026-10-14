@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <!-- Content-Security-Policy: no inline/eval script, only the hosts this page really uses.
        (frame-ancestors cannot be set from a <meta>; js/config.js has a frame guard instead.) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; img-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; media-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; connect-src 'self' https://kfgswynickhywzhneltu.supabase.co wss://kfgswynickhywzhneltu.supabase.co; base-uri 'self'; form-action 'self'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/ https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; img-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; media-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; connect-src 'self' https://kfgswynickhywzhneltu.supabase.co wss://kfgswynickhywzhneltu.supabase.co; base-uri 'self'; form-action 'self'; object-src 'none'; frame-src 'none'; worker-src blob:; manifest-src 'self'" />
   <meta name="referrer" content="no-referrer" />
   <title>Teshrij Follow-up - Live Chat Panel</title>
   <link rel="icon" type="image/png" href="img/logo.png" />
@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20261012_support" />
+  <link rel="stylesheet" href="css/style.css?v=20261014_voice" />
 
   <!-- Supabase JS Client v2 (CDN, pinned to an exact version + Subresource Integrity) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -199,8 +199,23 @@
 
                 <div class="input-row">
                   <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="Type a message via BestSMSBulk... (Enter to send, Shift+Enter for newline)"></textarea>
+                  <button id="btn-voice" class="btn-voice" type="button" title="Record a voice note">
+                    <i class="fa-solid fa-microphone"></i>
+                  </button>
                   <button id="btn-send" class="btn-send" title="Send WhatsApp Message">
                     <i class="fa-solid fa-paper-plane"></i>
+                  </button>
+                </div>
+
+                <div id="voice-recorder-bar" class="voice-recorder-bar" style="display:none">
+                  <span class="voice-rec-dot"></span>
+                  <span id="voice-rec-timer" class="voice-rec-timer">0:00</span>
+                  <audio id="voice-rec-preview" class="voice-rec-preview" controls preload="metadata" style="display:none"></audio>
+                  <button id="btn-voice-cancel" class="btn-voice-action" type="button" title="Discard voice note">
+                    <i class="fa-solid fa-trash"></i> Cancel
+                  </button>
+                  <button id="btn-voice-send" class="btn-voice-action primary" type="button" title="Stop and send voice note">
+                    <i class="fa-solid fa-paper-plane"></i> <span id="btn-voice-send-label">Stop &amp; Send</span>
                   </button>
                 </div>
 
@@ -312,8 +327,9 @@
   </div>
 
   <!-- Scripts (Cache-Busted) -->
-  <script src="js/config.js?v=20261012_support"></script>
-  <script src="js/app.js?v=20261012_support"></script>
-  <script src="js/support.js?v=20261012_support"></script>
+  <script src="https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/recorder.min.js" integrity="sha384-gh3hk6R0W1LEVQaMXfcGb6beNwAVN+/dwrc46kqaqxNv3cmsb352oE0mmZTCzj8W" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="js/config.js?v=20261014_voice"></script>
+  <script src="js/app.js?v=20261014_voice"></script>
+  <script src="js/support.js?v=20261014_voice"></script>
 </body>
 </html>
