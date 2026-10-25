@@ -3029,3 +3029,27 @@ html, body {
     display: none;
   }
 }
+
+/* Support tab v3: back-office action chips + manual Actions menu */
+.sup-acts { display: flex; flex-direction: column; gap: 6px; }
+.sup-act {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border-light); background: rgba(148, 163, 184, 0.06);
+}
+.sup-act-low { border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.06); }
+.sup-act-medium { border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.08); }
+.sup-act-high { border-color: rgba(244, 63, 94, 0.45); background: rgba(244, 63, 94, 0.1); }
+.sup-act-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.86rem; cursor: pointer; }
+.sup-act-head input, .sup-act-check input { width: 16px; height: 16px; flex: none; accent-color: var(--accent-amber); }
+.sup-act-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sup-risk { font-size: 0.68rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; }
+.sup-risk-low { color: var(--accent-emerald); }
+.sup-risk-medium { color: #fcd34d; }
+.sup-risk-high { color: #fda4af; }
+.sup-act-input {
+  width: 100%; font: inherit; font-size: 0.84rem; padding: 6px 8px; color: var(--text-main);
+  background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border-light); border-radius: var(--radius-sm);
+}
+.sup-act-check { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: #fcd34d; cursor: pointer; }
+.sup-actions-menu > summary { cursor: pointer; font-size: 0.8rem; font-weight: 700; color: var(--text-muted); }
+.sup-act-menu-body, .sup-act-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
