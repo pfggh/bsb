@@ -49,7 +49,11 @@
     fix_profiles: { op: 'fix_profiles', label: 'Fix Netflix profiles', done: 'Netflix profiles fixed.' }
   };
 
+  const RISK_LABELS = { low: 'low risk', medium: 'medium risk', high: 'HIGH risk' };
+  const ARG_NAME_RE = /^[a-z_][a-z0-9_]*$/i; // a missing_args entry that is not an arg name is a check to tick
+
   const state = {
+    catalog: null,        // support_act op 'catalog' (loaded when the Actions menu is first opened)
     signedIn: false,
     phase: 'idle',        // idle | loading | ready | error | not_deployed
     errorText: '',
@@ -126,6 +130,25 @@
       .filter(x => x.turn || x.reply)
       .slice(0, 5);
     const confidence = Number(raw.confidence);
+    const actions = (Array.isArray(raw.actions) ? raw.actions : [])
+      .filter(a => a && typeof a === 'object' && typeof a.name === 'string' && /^[a-z0-9_]{1,60}$/.test(a.name))
+      .slice(0, 6)
+      .map(a => {
+        const args = {};
+        if (a.args && typeof a.args === 'object') {
+          Object.keys(a.args).slice(0, 12).forEach(k => {
+            const v = a.args[k];
+            if (ARG_NAME_RE.test(k) && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) args[k] = typeof v === 'string' ? v.slice(0, 200) : v;
+          });
+        }
+        return {
+          name: a.name,
+          args,
+          missing_args: strList(a.missing_args, 8, 80),
+          risk: ['low', 'medium', 'high'].includes(a.risk) ? a.risk : 'high',
+          label: str(a.label, 80) || a.name
+        };
+      });
     return {
       id,
       rawId: raw.id, // sent back unchanged (bigint or uuid)
@@ -143,6 +166,7 @@
         ? { reason: str(raw.handoff.reason, 60), summary: str(raw.handoff.summary, 400), next_step: str(raw.handoff.next_step, 400) }
         : null,
       action,
+      actions,
       confidence: raw.confidence !== null && raw.confidence !== undefined && Number.isFinite(confidence) ? confidence : null,
       facts: strList(raw.facts, 20, 400),
       examples,
@@ -531,6 +555,7 @@
       actionBox: null,
       actionRow: null,
       actionDone: false,   // the attached action already ran in a failed attempt: never run it twice
+      chips: [],           // proposed v3 actions: { action, box, inputs: Map, checks: Map }
       replyBox: null,
       replyWrap: null,
       sendBtn: null,
@@ -804,7 +829,9 @@
     const examples = buildExamples(item);
     if (examples) frag.appendChild(examples);
 
-    if (item.action) {
+    if (item.actions.length) {
+      frag.appendChild(buildChips(r, true));
+    } else if (item.action) {
       const label = createEl('label', 'sup-action');
       r.actionBox = document.createElement('input');
       r.actionBox.type = 'checkbox';
@@ -846,7 +873,9 @@
     r.factsHost = createEl('div', 'sup-facts-host');
     frag.appendChild(r.factsHost);
 
-    if (item.action) {
+    if (item.actions.length) {
+      frag.appendChild(buildChips(r, false));
+    } else if (item.action) {
       const known = Object.prototype.hasOwnProperty.call(ACTION_BUTTONS, item.action.name) ? ACTION_BUTTONS[item.action.name] : null;
       const line = createEl('div', 'sup-suggested');
       line.appendChild(createEl('span', 'sup-section-label', 'Suggested fix'));
@@ -899,6 +928,7 @@
   function renderReview(r) {
     r.fields = [];
     r.buttons = [];
+    r.chips = [];
     const frag = document.createDocumentFragment();
     if (r.mode === 'draft') buildDraftReview(r, frag);
     else if (r.mode === 'no_reply') buildNoReplyReview(r, frag);
@@ -908,6 +938,7 @@
     r.status.setAttribute('role', 'status');
     const footer = createEl('div', 'sup-footer');
     const buttonRow = frag.lastChild;
+    frag.insertBefore(buildActionsMenu(r), buttonRow);
     if (r.actionRow) footer.appendChild(r.actionRow);
     footer.append(buttonRow, r.status);
     frag.appendChild(footer);
@@ -979,7 +1010,13 @@
       setStatus(r, `A message is too long (max ${MAX_MESSAGE_CHARS} characters).`, 'error');
       return;
     }
-    const runAction = !!(r.item.action && r.actionBox && r.actionBox.checked && !r.actionDone);
+    const picked = collectChips(r, r.chips.filter(c => c.box && c.box.checked));
+    if (picked.error) {
+      setStatus(r, picked.error, 'error', 'fa-solid fa-triangle-exclamation');
+      return;
+    }
+    if (!confirmRisky(r, picked.items)) return;
+    const runAction = picked.requests.length > 0 || !!(r.item.action && r.actionBox && r.actionBox.checked && !r.actionDone);
     const epoch = core.authEpoch();
 
     setBusy(r, true);
@@ -996,7 +1033,7 @@
         draft_id: r.item.rawId,
         contact: r.contact,
         messages: texts,
-        run_action: runAction
+        ...(r.chips.length ? { actions: picked.requests } : { run_action: runAction })
       });
     } catch (e) {
       failure = `Network error: ${safeErrorText(e, 'please try again')}. Check WhatsApp before sending again.`;
@@ -1133,6 +1170,286 @@
     setBusy(r, false);
     if (failure) setStatus(r, `${known.label} failed: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
     else setStatus(r, message || known.done, 'success', 'fa-solid fa-check');
+  }
+
+  // =========================================================================
+  // Back-office actions (v3): proposed chips on a draft + the manual Actions menu on every chat
+  // =========================================================================
+  function riskBadge(risk) {
+    return createEl('span', `sup-risk sup-risk-${risk}`, RISK_LABELS[risk] || risk);
+  }
+
+  function argInput(name, value, spec) {
+    let input;
+    if (spec && Array.isArray(spec.choices) && spec.choices.length) {
+      input = document.createElement('select');
+      input.className = 'sup-act-input';
+      if (!spec.required) input.appendChild(new Option('(none)', ''));
+      spec.choices.forEach(c => input.appendChild(new Option(String(c), String(c))));
+      if (value !== undefined && value !== null) input.value = String(value);
+    } else {
+      input = createEl('input', 'sup-act-input');
+      input.type = 'text';
+      input.maxLength = 200;
+      input.placeholder = spec && spec.type ? `${name} (${spec.type})` : name;
+      if (value !== undefined && value !== null) input.value = String(value);
+    }
+    input.setAttribute('aria-label', name);
+    return input;
+  }
+
+  function checkLine(text) {
+    const label = createEl('label', 'sup-act-check');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    label.append(box, createEl('span', '', text));
+    return { label, box };
+  }
+
+  // selectable = draft mode (the ticked chips run when Send is pressed); otherwise each chip has its own Run button
+  function buildChips(r, selectable) {
+    const wrap = createEl('div', 'sup-acts');
+    wrap.appendChild(createEl('div', 'sup-section-label', selectable ? 'Actions (run before sending)' : 'Suggested actions'));
+    r.item.actions.forEach(action => {
+      const chip = { action, box: null, inputs: new Map(), checks: new Map() };
+      const box = createEl('div', `sup-act sup-act-${action.risk}`);
+      const head = createEl(selectable ? 'label' : 'div', 'sup-act-head');
+      if (selectable) {
+        chip.box = document.createElement('input');
+        chip.box.type = 'checkbox';
+        chip.box.checked = action.risk === 'low'; // medium / high are opt-in
+        chip.box.addEventListener('change', () => updateControls(r));
+        head.appendChild(chip.box);
+      }
+      head.append(createEl('span', 'sup-act-label', action.label), riskBadge(action.risk));
+      box.appendChild(head);
+      const given = Object.keys(action.args).filter(k => k !== 'phone').map(k => `${k}: ${action.args[k]}`);
+      if (given.length) box.appendChild(createEl('div', 'sup-dim', given.join(' · ')));
+      action.missing_args.forEach(m => {
+        if (ARG_NAME_RE.test(m)) {
+          const input = argInput(m, '', null);
+          chip.inputs.set(m, input);
+          box.appendChild(input);
+        } else {
+          const c = checkLine(m);
+          chip.checks.set(m, c.box);
+          box.appendChild(c.label);
+        }
+      });
+      if (!selectable) {
+        box.appendChild(actionButton(r, 'Run', 'fa-solid fa-wrench', 'btn-nav sup-btn-fix', () => runChips(r, [chip])));
+      }
+      r.chips.push(chip);
+      wrap.appendChild(box);
+    });
+    return wrap;
+  }
+
+  // -> {requests, items} or {error}; request_id is stable per draft + action, so a retry never adds twice
+  function collectChips(r, chips) {
+    const requests = [];
+    const items = [];
+    for (const c of chips) {
+      const args = { ...c.action.args };
+      for (const [name, input] of c.inputs) {
+        const v = input.value.trim();
+        if (!v) return { error: `${c.action.label}: fill in ${name} first.` };
+        args[name] = v;
+      }
+      const checks = [];
+      for (const [text, box] of c.checks) {
+        if (!box.checked) return { error: `${c.action.label}: tick "${text}" first.` };
+        checks.push(text);
+      }
+      requests.push({ name: c.action.name, args, request_id: `d${r.item.id}-${c.action.name}`, confirm: c.action.risk !== 'low', checks });
+      items.push({ label: c.action.label, risk: c.action.risk });
+    }
+    return { requests, items };
+  }
+
+  function confirmRisky(r, items) {
+    const risky = items.filter(i => i.risk !== 'low');
+    if (!risky.length) return true;
+    const lines = risky.map(i => `- ${i.label} (${RISK_LABELS[i.risk]})`).join('\n');
+    return confirm(`Run on ${formatPhoneDisplay(r.contact)}'s account right now?\n\n${lines}\n\nThis changes the back office and may not be reversible.`);
+  }
+
+  // op 'run_action': runs without sending anything; results never contain a link or a password
+  async function runActionRequest(r, req, label) {
+    const epoch = core.authEpoch();
+    setBusy(r, true);
+    setStatus(r, `${label}...`, '', 'fa-solid fa-spinner fa-spin');
+    let failure = '';
+    let message = '';
+    try {
+      const res = await callFunction('support_act', { op: 'run_action', contact: r.contact, draft_id: r.item.rawId, action: req });
+      const result = res.data && res.data.action_result && typeof res.data.action_result === 'object' ? res.data.action_result : null;
+      if (res.ok && res.data.success === true) {
+        const out = result && result.output && typeof result.output === 'object' ? result.output : {};
+        const extra = ['sub_id', 'expiry', 'username'].filter(k => out[k] !== undefined && out[k] !== null).map(k => `${k} ${str(out[k], 60)}`).join(', ');
+        message = `${safeErrorText(result && result.message, `${label} done`)}${extra ? ` (${extra})` : ''}`;
+      } else failure = failureText(res, 'the server refused the request');
+    } catch (e) {
+      failure = `Network error: ${safeErrorText(e, 'please try again')}. Check the back office before running it again.`;
+    }
+    if (epoch !== core.authEpoch() || state.active !== r) return false;
+    setBusy(r, false);
+    if (failure) setStatus(r, `${label} failed: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
+    else setStatus(r, message, 'success', 'fa-solid fa-check');
+    return !failure;
+  }
+
+  async function runChips(r, chips) {
+    if (!canAct(r)) return;
+    const picked = collectChips(r, chips);
+    if (picked.error) {
+      setStatus(r, picked.error, 'error', 'fa-solid fa-triangle-exclamation');
+      return;
+    }
+    if (!confirmRisky(r, picked.items.map(i => (i.risk === 'low' ? { ...i, risk: 'medium' } : i)))) return; // every manual run is confirmed
+    for (let i = 0; i < picked.requests.length; i++) {
+      if (!(await runActionRequest(r, picked.requests[i], picked.items[i].label))) return;
+    }
+  }
+
+  async function loadCatalog() {
+    if (state.catalog) return state.catalog;
+    const res = await callFunction('support_act', { op: 'catalog' });
+    if (!(res.ok && res.data.success === true && Array.isArray(res.data.actions))) throw new Error(failureText(res, 'catalog not available'));
+    state.catalog = res.data.actions
+      .filter(a => a && typeof a.name === 'string' && /^[a-z0-9_]{1,60}$/.test(a.name))
+      .map(a => ({
+        name: a.name,
+        label: str(a.label, 80) || a.name,
+        risk: ['low', 'medium', 'high'].includes(a.risk) ? a.risk : 'high',
+        args: (Array.isArray(a.args) ? a.args : []).filter(x => x && ARG_NAME_RE.test(String(x.name)))
+          .map(x => ({ name: String(x.name), type: str(x.type, 80), required: x.required === true, choices: strList(x.choices, 8, 60) })),
+        checks: strList(a.checks, 4, 80),
+        message: str(a.message, 600)
+      }));
+    return state.catalog;
+  }
+
+  function newRequestId() {
+    return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `m${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // Any catalog action on any chat, phone pre-filled, even when the copilot proposed none
+  function buildActionsMenu(r) {
+    const details = createEl('details', 'sup-actions-menu');
+    details.appendChild(createEl('summary', '', 'Actions'));
+    const body = createEl('div', 'sup-act-menu-body');
+    details.appendChild(body);
+    let loaded = false;
+    details.addEventListener('toggle', async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      body.replaceChildren(createEl('div', 'sup-dim', 'Loading actions...'));
+      let list;
+      try {
+        list = await loadCatalog();
+      } catch (e) {
+        loaded = false;
+        body.replaceChildren(createEl('div', 'sup-dim', `Actions unavailable: ${safeErrorText(e, 'error')}`));
+        return;
+      }
+      if (state.active !== r) return;
+      const select = document.createElement('select');
+      select.className = 'sup-act-input';
+      select.appendChild(new Option('Choose an action...', ''));
+      ['low', 'medium', 'high'].forEach(risk => {
+        const group = document.createElement('optgroup');
+        group.label = RISK_LABELS[risk];
+        list.filter(a => a.risk === risk).forEach(a => group.appendChild(new Option(a.label, a.name)));
+        if (group.children.length) select.appendChild(group);
+      });
+      const form = createEl('div', 'sup-act-form');
+      body.replaceChildren(select, form);
+      select.addEventListener('change', () => {
+        const a = list.find(x => x.name === select.value);
+        form.replaceChildren();
+        if (a) buildManualForm(r, a, form);
+      });
+    });
+    return details;
+  }
+
+  function buildManualForm(r, a, form) {
+    const box = createEl('div', `sup-act sup-act-${a.risk}`);
+    const head = createEl('div', 'sup-act-head');
+    head.append(createEl('span', 'sup-act-label', a.label), riskBadge(a.risk));
+    box.appendChild(head);
+    const inputs = new Map();
+    a.args.forEach(spec => {
+      const pre = spec.name === 'phone' || spec.name === 'destination' ? r.contact : '';
+      const input = argInput(spec.name, pre, spec);
+      inputs.set(spec.name, { input, spec });
+      box.appendChild(input);
+    });
+    const checks = new Map();
+    a.checks.forEach(t => {
+      const c = checkLine(t);
+      checks.set(t, c.box);
+      box.appendChild(c.label);
+    });
+    let msg = null;
+    if (a.message) {
+      box.appendChild(createEl('div', 'sup-dim', 'Message after success ({{...}} is filled from the real result):'));
+      msg = buildTextarea(r, a.message, '');
+      box.appendChild(msg);
+    }
+    let requestId = newRequestId(); // kept after a failure, so a retry is not a second run
+    const collect = () => {
+      const args = {};
+      for (const [name, { input, spec }] of inputs) {
+        const v = input.value.trim();
+        if (!v && spec.required) return { error: `${a.label}: fill in ${name} first.` };
+        if (v) args[name] = v;
+      }
+      const ticked = [];
+      for (const [t, b] of checks) {
+        if (!b.checked) return { error: `${a.label}: tick "${t}" first.` };
+        ticked.push(t);
+      }
+      return { req: { name: a.name, args, request_id: requestId, confirm: a.risk !== 'low', checks: ticked } };
+    };
+    const row = createEl('div', 'sup-buttons');
+    row.appendChild(actionButton(r, 'Run', 'fa-solid fa-wrench', 'btn-nav sup-btn-fix', async () => {
+      if (!canAct(r)) return;
+      const c = collect();
+      if (c.error) return setStatus(r, c.error, 'error', 'fa-solid fa-triangle-exclamation');
+      if (!confirmRisky(r, [{ label: a.label, risk: a.risk === 'low' ? 'medium' : a.risk }])) return;
+      if (await runActionRequest(r, c.req, a.label)) requestId = newRequestId();
+    }));
+    if (msg) {
+      row.appendChild(actionButton(r, 'Run + send message', 'fa-solid fa-paper-plane', 'btn-nav', async () => {
+        if (!canAct(r)) return;
+        const c = collect();
+        if (c.error) return setStatus(r, c.error, 'error', 'fa-solid fa-triangle-exclamation');
+        const text = msg.value.trim();
+        if (!text) return setStatus(r, 'The message is empty.', 'error');
+        if (!confirmRisky(r, [{ label: `${a.label}, then send the message`, risk: a.risk === 'low' ? 'medium' : a.risk }])) return;
+        const epoch = core.authEpoch();
+        setBusy(r, true);
+        setStatus(r, `${a.label}, then sending...`, '', 'fa-solid fa-spinner fa-spin');
+        let failure = '';
+        try {
+          const res = await callFunction('support_act', { op: 'send', contact: r.contact, messages: [text], actions: [c.req] });
+          if (!(res.ok && res.data.success === true)) failure = failureText(res, 'the server refused the request');
+        } catch (e) {
+          failure = `Network error: ${safeErrorText(e, 'please try again')}. Check WhatsApp and the back office before retrying.`;
+        }
+        if (epoch !== core.authEpoch() || state.active !== r) return;
+        setBusy(r, false);
+        if (failure) return setStatus(r, `Not sent: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
+        requestId = newRequestId();
+        chatView.appendOutgoing(text.replace(/\{\{[^}]*\}\}/g, '[filled]'));
+        setStatus(r, `${a.label} done and the message was sent.`, 'success', 'fa-solid fa-check');
+      }));
+    }
+    box.appendChild(row);
+    form.appendChild(box);
+    updateControls(r);
   }
 
   // =========================================================================
