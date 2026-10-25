@@ -138,6 +138,10 @@
       service: str(raw.service, 30),
       messages: decision === 'draft' ? strList(raw.messages, 5, MAX_MESSAGE_CHARS) : [],
       canned_keys: strList(raw.canned_keys, 6, 60),
+      rule_ids: strList(raw.rule_ids, 12, 40),
+      handoff: raw.handoff && typeof raw.handoff === 'object'
+        ? { reason: str(raw.handoff.reason, 60), summary: str(raw.handoff.summary, 400), next_step: str(raw.handoff.next_step, 400) }
+        : null,
       action,
       confidence: raw.confidence !== null && raw.confidence !== undefined && Number.isFinite(confidence) ? confidence : null,
       facts: strList(raw.facts, 20, 400),
@@ -776,6 +780,9 @@
       why.appendChild(createEl('span', 'sup-dim', ` · confidence ${Math.round(item.confidence * 100)}%`));
     }
     frag.appendChild(why);
+    if (item.rule_ids.length) {
+      frag.appendChild(createEl('div', 'sup-dim sup-note', `Rules: ${item.rule_ids.join(', ')}`));
+    }
 
     const total = item.messages.length;
     item.messages.forEach((text, i) => {
@@ -822,6 +829,20 @@
   function buildHumanReview(r, frag) {
     const item = r.item;
     frag.appendChild(reasonBox(item, 'human', 'fa-solid fa-user-shield', 'Needs a human'));
+    const h = item.handoff;
+    if (h && (h.summary || h.next_step)) {
+      const card = createEl('div', 'sup-why');
+      [['Reason: ', h.reason], ['Summary: ', h.summary], ['Next step: ', h.next_step]].forEach(([label, value]) => {
+        if (!value) return;
+        const row = createEl('div', '');
+        const text = createEl('span', '', value);
+        text.dir = 'auto';
+        row.append(createEl('strong', '', label), text);
+        card.appendChild(row);
+      });
+      if (item.rule_ids.length) card.appendChild(createEl('div', 'sup-dim', `Rules: ${item.rule_ids.join(', ')}`));
+      frag.appendChild(card);
+    }
     r.factsHost = createEl('div', 'sup-facts-host');
     frag.appendChild(r.factsHost);
 
