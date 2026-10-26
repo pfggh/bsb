@@ -3053,3 +3053,5 @@ html, body {
 .sup-act-check { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: #fcd34d; cursor: pointer; }
 .sup-actions-menu > summary { cursor: pointer; font-size: 0.8rem; font-weight: 700; color: var(--text-muted); }
 .sup-act-menu-body, .sup-act-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.sup-suggestion { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px dashed rgba(245, 158, 11, 0.45); border-radius: var(--radius-sm); }
+.sup-suggestion-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.88rem; color: var(--text-main); }
