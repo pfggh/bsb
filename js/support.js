@@ -1604,12 +1604,46 @@
     refreshInbox();
   }
 
+  // Refresh = re-analyze every open chat of the last 24 h with the current engine, then reload the inbox.
+  // Page load does it at most once per REANALYZE_AUTO_MS per browser (each full pass costs model calls).
+  const REANALYZE_AUTO_MS = 10 * 60 * 1000;
+  const REANALYZE_KEY = 'support_reanalyze_at';
+  async function reanalyzeAll(auto) {
+    if (!state.signedIn || state.reanalyzeBusy) return;
+    if (auto) {
+      let last = 0;
+      try { last = Number(localStorage.getItem(REANALYZE_KEY)) || 0; } catch (e) {}
+      if (Date.now() - last < REANALYZE_AUTO_MS) return;
+    }
+    try { localStorage.setItem(REANALYZE_KEY, String(Date.now())); } catch (e) {}
+    state.reanalyzeBusy = true;
+    const btn = document.getElementById('sup-refresh-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
+    setUpdatedLabel('Re-analyzing all chats...');
+    try {
+      let res = null;
+      for (let round = 0; round < 3; round++) {   // the function stops after ~110 s; continue if chats remain
+        res = await callFunction('support_draft', { op: 'reanalyze', hours: 24 });
+        if (!res.ok || !res.data.remaining) break;
+      }
+      if (res && res.ok) flash(`Re-analyzed ${res.data.processed} of ${res.data.total} chats${res.data.errors ? ` (${res.data.errors} failed)` : ''}`);
+      else flash(res ? failureText(res, 'Re-analysis failed') : 'Re-analysis failed', true);
+    } catch (e) {
+      flash(safeErrorText(e && e.message, 'Re-analysis failed'), true);
+    } finally {
+      state.reanalyzeBusy = false;
+      if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
+      refreshInbox();
+    }
+  }
+
   function onSignIn() {
     state.signedIn = true;
     state.phase = 'idle';
     renderList();
     syncEmptyState();
     refreshInbox();
+    reanalyzeAll(true);
     if (!state.refreshTimer) state.refreshTimer = setInterval(tick, REFRESH_MS);
   }
 
@@ -1680,6 +1714,8 @@
       renderList();
     });
   });
+  const refreshBtn = document.getElementById('sup-refresh-btn');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => reanalyzeAll(false));
   if (el.searchInput) {
     el.searchInput.addEventListener('input', (e) => {
       state.search = e.target.value;
