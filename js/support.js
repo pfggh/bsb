@@ -114,23 +114,8 @@
     return value.map(v => str(v, maxChars)).filter(v => v.trim()).slice(0, maxItems);
   }
 
-  function normalizeItem(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-    const id = (typeof raw.id === 'number' || typeof raw.id === 'string') ? String(raw.id).slice(0, 80) : '';
-    const contact = str(raw.contact, 40).trim();
-    if (!id || !contact) return null;
-    const decision = DECISIONS.includes(raw.decision) ? raw.decision : 'escalate'; // unknown => a person looks at it
-    let action = null;
-    if (raw.action && typeof raw.action === 'object' && typeof raw.action.name === 'string' && raw.action.name) {
-      action = { name: raw.action.name.slice(0, 40) };
-    }
-    const examples = (Array.isArray(raw.examples) ? raw.examples : [])
-      .filter(x => x && typeof x === 'object')
-      .map(x => ({ turn: str(x.turn, 1500), reply: str(x.reply, 1500), sim: Number(x.sim) }))
-      .filter(x => x.turn || x.reply)
-      .slice(0, 5);
-    const confidence = Number(raw.confidence);
-    const actions = (Array.isArray(raw.actions) ? raw.actions : [])
+  function normalizeActions(list) {
+    return (Array.isArray(list) ? list : [])
       .filter(a => a && typeof a === 'object' && typeof a.name === 'string' && /^[a-z0-9_]{1,60}$/.test(a.name))
       .slice(0, 6)
       .map(a => {
@@ -149,6 +134,26 @@
           label: str(a.label, 80) || a.name
         };
       });
+  }
+
+  function normalizeItem(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const id = (typeof raw.id === 'number' || typeof raw.id === 'string') ? String(raw.id).slice(0, 80) : '';
+    const contact = str(raw.contact, 40).trim();
+    if (!id || !contact) return null;
+    const decision = DECISIONS.includes(raw.decision) ? raw.decision : 'escalate'; // unknown => a person looks at it
+    let action = null;
+    if (raw.action && typeof raw.action === 'object' && typeof raw.action.name === 'string' && raw.action.name) {
+      action = { name: raw.action.name.slice(0, 40) };
+    }
+    const examples = (Array.isArray(raw.examples) ? raw.examples : [])
+      .filter(x => x && typeof x === 'object')
+      .map(x => ({ turn: str(x.turn, 1500), reply: str(x.reply, 1500), sim: Number(x.sim) }))
+      .filter(x => x.turn || x.reply)
+      .slice(0, 5);
+    const confidence = Number(raw.confidence);
+    const actions = normalizeActions(raw.actions);
+    const h = raw.handoff && typeof raw.handoff === 'object' ? raw.handoff : null;
     return {
       id,
       rawId: raw.id, // sent back unchanged (bigint or uuid)
@@ -162,8 +167,13 @@
       messages: decision === 'draft' ? strList(raw.messages, 5, MAX_MESSAGE_CHARS) : [],
       canned_keys: strList(raw.canned_keys, 6, 60),
       rule_ids: strList(raw.rule_ids, 12, 40),
-      handoff: raw.handoff && typeof raw.handoff === 'object'
-        ? { reason: str(raw.handoff.reason, 60), summary: str(raw.handoff.summary, 400), next_step: str(raw.handoff.next_step, 400) }
+      handoff: h
+        ? {
+          reason: str(h.reason, 60), summary: str(h.summary, 400), next_step: str(h.next_step, 400),
+          suggestion: strList(h.suggestion, 5, MAX_MESSAGE_CHARS),
+          suggestion_actions: normalizeActions(h.suggestion_actions),
+          suggestion_stage: str(h.suggestion_stage, 40)
+        }
         : null,
       action,
       actions,
@@ -887,6 +897,7 @@
     const examples = buildExamples(item);
     if (examples) frag.appendChild(examples);
     frag.appendChild(buildReplyBox(r, true));
+    if (h && h.reason === 'low_confidence' && h.suggestion.length) frag.insertBefore(buildSuggestion(r, h), r.replyWrap);
 
     const row = createEl('div', 'sup-buttons');
     row.append(
@@ -1082,6 +1093,9 @@
       setStatus(r, `The message is too long (max ${MAX_MESSAGE_CHARS} characters).`, 'error');
       return;
     }
+    const picked = collectChips(r, r.chips.filter(c => c.box && c.box.checked));
+    if (picked.error) return setStatus(r, picked.error, 'error', 'fa-solid fa-triangle-exclamation');
+    if (!confirmRisky(r, picked.items)) return;
     const epoch = core.authEpoch();
     setBusy(r, true);
     setStatus(r, 'Sending...', '', 'fa-solid fa-spinner fa-spin');
@@ -1089,7 +1103,7 @@
     let res = null;
     let failure = '';
     try {
-      res = await callFunction('support_act', { op: 'send', contact: r.contact, messages: [text], run_action: false });
+      res = await callFunction('support_act', { op: 'send', contact: r.contact, messages: [text], ...(picked.requests.length ? { actions: picked.requests } : { run_action: false }) });
     } catch (e) {
       failure = `Network error: ${safeErrorText(e, 'please try again')}. Check WhatsApp before sending again.`;
     }
@@ -1207,17 +1221,17 @@
   }
 
   // selectable = draft mode (the ticked chips run when Send is pressed); otherwise each chip has its own Run button
-  function buildChips(r, selectable) {
+  function buildChips(r, selectable, list, untick) {
     const wrap = createEl('div', 'sup-acts');
     wrap.appendChild(createEl('div', 'sup-section-label', selectable ? 'Actions (run before sending)' : 'Suggested actions'));
-    r.item.actions.forEach(action => {
+    (list || r.item.actions).forEach(action => {
       const chip = { action, box: null, inputs: new Map(), checks: new Map() };
       const box = createEl('div', `sup-act sup-act-${action.risk}`);
       const head = createEl(selectable ? 'label' : 'div', 'sup-act-head');
       if (selectable) {
         chip.box = document.createElement('input');
         chip.box.type = 'checkbox';
-        chip.box.checked = action.risk === 'low'; // medium / high are opt-in
+        chip.box.checked = !untick && action.risk === 'low'; // medium / high (and unverified suggestions) are opt-in
         chip.box.addEventListener('change', () => updateControls(r));
         head.appendChild(chip.box);
       }
@@ -1332,6 +1346,27 @@
 
   function newRequestId() {
     return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `m${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // low_confidence handoff: the engine's unverified draft, loaded into the reply box only on request
+  function buildSuggestion(r, h) {
+    const box = createEl('div', 'sup-suggestion');
+    const head = createEl('div', 'sup-act-head');
+    head.append(createEl('span', 'sup-section-label', 'Suggested, unverified'));
+    if (h.suggestion_stage) head.appendChild(createEl('span', 'sup-dim', h.suggestion_stage));
+    box.appendChild(head);
+    h.suggestion.forEach(t => {
+      const p = createEl('div', 'sup-suggestion-text', t);
+      p.dir = 'auto';
+      box.appendChild(p);
+    });
+    box.appendChild(actionButton(r, 'Load into editor', 'fa-solid fa-pen', 'btn-nav', () => {
+      if (!r.replyBox) return;
+      r.replyBox.value = h.suggestion.join('\n\n');
+      openReplyBox(r, true);
+    }));
+    if (h.suggestion_actions.length) box.appendChild(buildChips(r, true, h.suggestion_actions, true));
+    return box;
   }
 
   // Any catalog action on any chat, phone pre-filled, even when the copilot proposed none
