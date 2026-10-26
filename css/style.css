@@ -3055,3 +3055,8 @@ html, body {
 .sup-act-menu-body, .sup-act-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .sup-suggestion { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px dashed rgba(245, 158, 11, 0.45); border-radius: var(--radius-sm); }
 .sup-suggestion-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.88rem; color: var(--text-main); }
+
+.sup-refresh-btn { background: none; border: 1px solid var(--border); color: inherit; border-radius: 6px; padding: 2px 7px; cursor: pointer; margin-left: 6px; }
+.sup-refresh-btn:disabled { opacity: .6; cursor: wait; }
+.sup-refresh-btn.spinning i { animation: sup-spin 1s linear infinite; }
+@keyframes sup-spin { to { transform: rotate(360deg); } }
