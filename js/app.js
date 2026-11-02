@@ -391,47 +391,64 @@
 
       const frag = document.createDocumentFragment();
       messages.forEach(msg => {
-        if (!msg || typeof msg !== 'object') return;
-        const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
-        const text = typeof msg.message === 'string' ? msg.message : (msg.message === null || msg.message === undefined ? '' : String(msg.message));
-        const mediaType = typeof msg.media_type === 'string' ? msg.media_type.toLowerCase() : '';
-        const mediaUrl = typeof msg.media_url === 'string' ? msg.media_url : '';
-        const mediaPath = mediaUrl.split(/[?#]/)[0].toLowerCase();
-
-        const isAudio = mediaType.includes('audio') || text.includes('🎤') || text.toLowerCase().includes('voice message');
-        const isImage = mediaType.includes('image') || mediaPath.endsWith('.jpg') || mediaPath.endsWith('.jpeg') || mediaPath.endsWith('.png');
-
-        let mediaEl = null;
-        if (msg.chat_id && (isAudio || isImage)) {
-          mediaEl = buildMediaElement(msg, isAudio ? 'audio' : 'image');
-        }
-
-        const notSynced = !isIncoming && text === '[Outgoing Message]';
-        let textEl = null;
-        if (notSynced) textEl = createEl('div', 'msg-text msg-not-synced', 'Message text not synced from BSB yet');
-        else if (text) textEl = createEl('div', 'msg-text', text);
-
-        frag.appendChild(buildMessageRow(
-          isIncoming,
-          [mediaEl, textEl],
-          formatMessageTime(msg.timestamp),
-          isIncoming ? '' : 'fa-solid fa-check-double msg-status-icon msg-status-read'
-        ));
+        const row = buildRow(msg);
+        if (row) frag.appendChild(row);
       });
       container.appendChild(frag);
 
       container.scrollTop = container.scrollHeight;
     }
 
+    // Add messages under the ones already shown (keeps loaded media; no full re-render)
+    function append(messages) {
+      const frag = document.createDocumentFragment();
+      messages.forEach(msg => {
+        const row = buildRow(msg);
+        if (row) frag.appendChild(row);
+      });
+      container.appendChild(frag);
+    }
+
+    function buildRow(msg) {
+      if (!msg || typeof msg !== 'object') return null;
+      const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
+      const text = typeof msg.message === 'string' ? msg.message : (msg.message === null || msg.message === undefined ? '' : String(msg.message));
+      const mediaType = typeof msg.media_type === 'string' ? msg.media_type.toLowerCase() : '';
+      const mediaUrl = typeof msg.media_url === 'string' ? msg.media_url : '';
+      const mediaPath = mediaUrl.split(/[?#]/)[0].toLowerCase();
+
+      const isAudio = mediaType.includes('audio') || text.includes('🎤') || text.toLowerCase().includes('voice message');
+      const isImage = mediaType.includes('image') || mediaPath.endsWith('.jpg') || mediaPath.endsWith('.jpeg') || mediaPath.endsWith('.png');
+
+      let mediaEl = null;
+      if (msg.chat_id && (isAudio || isImage)) {
+        mediaEl = buildMediaElement(msg, isAudio ? 'audio' : 'image');
+      }
+
+      const notSynced = !isIncoming && text === '[Outgoing Message]';
+      let textEl = null;
+      if (notSynced) textEl = createEl('div', 'msg-text msg-not-synced', 'Message text not synced from BSB yet');
+      else if (text) textEl = createEl('div', 'msg-text', text);
+
+      return buildMessageRow(
+        isIncoming,
+        [mediaEl, textEl],
+        formatMessageTime(msg.timestamp),
+        isIncoming ? '' : 'fa-solid fa-check-double msg-status-icon msg-status-read'
+      );
+    }
+
     // A just-sent message, shown before the next sync brings the stored row
     function appendOutgoing(text) {
-      container.appendChild(buildMessageRow(
+      const row = buildMessageRow(
         false,
         [createEl('div', 'msg-text', text)],
         'Just now',
         'fa-solid fa-check msg-status-icon'
-      ));
+      );
+      container.appendChild(row);
       container.scrollTop = container.scrollHeight;
+      return row;
     }
 
     // Outgoing voice note sent from this panel: a local blob: URL of the recording, owned by this
@@ -452,7 +469,7 @@
       container.scrollTop = container.scrollHeight;
     }
 
-    return { render, notice, reset, appendOutgoing, appendOutgoingVoice };
+    return { render, append, notice, reset, appendOutgoing, appendOutgoingVoice };
   }
 
   // A conversation is hidden only by a fresh HIDE verdict (fresh = no new message since it was checked)

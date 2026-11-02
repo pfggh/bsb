@@ -1,10 +1,9 @@
 /**
- * Teshrij Follow-up - Support tab (assisted replies)
+ * Teshrij Follow-up - Support tab: a plain live WhatsApp chat.
  *
- * Lists the open records of the support copilot: replies the AI drafted for a live customer
- * chat, chats it escalated to a human (with the reason) and messages it thinks need no answer.
- * Nothing is ever sent from here without an employee pressing Send. The tab talks only to the
- * `support_act` edge function (and nudges `support_draft`); it reads no table directly.
+ * Chat list: rpc get_support_chats (last message of every chat, 3 days), then a cheap poll of
+ * bsb_messages rows newer than the last id seen. Sending goes through the bsb_send edge function
+ * (same as the Follow-up tab) and is logged in send_queue. No AI anywhere in this tab.
  *
  * Loaded after js/app.js and built on its window.PanelCore helpers. Exposes nothing itself.
  */
@@ -16,1730 +15,585 @@
   if (window.__FRAMED__ || !core) return;
   const { createEl, icon, safeErrorText, normalizePhone, formatPhoneDisplay, formatRelativeTime } = core;
 
-  const REFRESH_MS = 15 * 1000;               // inbox poll
-  const NOT_DEPLOYED_REFRESH_MS = 60 * 1000;  // slower poll while the functions are missing or failing
-  const KICK_MIN_MS = 30 * 1000;              // at most one support_draft nudge per browser in this time
-  const KICK_STORAGE_KEY = 'support_draft_kick_at';
-  const SEND_GUARD_MS = 400;                  // buttons stay locked this long after a chat opens
-  const FLASH_MS = 8000;
+  const LOOKBACK_HOURS = 72;
+  const MAX_CHATS = 400;
+  const POLL_MS = 3000;            // new messages, while this tab is open
+  const POLL_HIDDEN_MS = 15000;    // new messages, while another tab is open (keeps the badge right)
+  const FULL_REFRESH_MS = 60000;   // full chat list
+  const CHAT_LIMIT = 150;          // messages loaded when a chat opens
   const MAX_MESSAGE_CHARS = 4096;
-  const MAX_ITEMS = 500;
-  const TEXTAREA_MAX_PX = 200;
-  const LINK_PLACEHOLDER = '{{link}}';
-
-  const DECISIONS = ['draft', 'escalate', 'no_reply'];
-  const DECISION_LABELS = { draft: 'Draft', escalate: 'Needs human', no_reply: 'No reply needed' };
-  const DECISION_PILLS = { draft: 'pill-draft', escalate: 'pill-unanswered', no_reply: 'pill-checking' };
-  const SERVICE_LABELS = {
-    chatgpt: 'ChatGPT', netflix: 'Netflix', anghami: 'Anghami', spotify: 'Spotify', canva: 'Canva',
-    adobe: 'Adobe', gemini: 'Gemini', capcut: 'CapCut', shahid: 'Shahid', other: 'Other'
-  };
-  const EMPTY_LIST_TEXT = {
-    draft: 'No drafts waiting for review.',
-    escalate: 'No chat needs a human right now.',
-    no_reply: 'Nothing here.'
-  };
-  // Plain wording for the fixes the AI may attach (see support/DESIGN.md)
-  const ACTION_LABELS = {
-    reactivate_link: "Reactivate the customer's ChatGPT link before sending",
-    fix_profiles: "Fix the customer's Netflix profiles before sending"
-  };
-  // Suggested fixes an employee can run from an escalated chat: action name -> support_act op
-  const ACTION_BUTTONS = {
-    fix_profiles: { op: 'fix_profiles', label: 'Fix Netflix profiles', done: 'Netflix profiles fixed.' }
-  };
-
-  const RISK_LABELS = { low: 'low risk', medium: 'medium risk', high: 'HIGH risk' };
-  const ARG_NAME_RE = /^[a-z_][a-z0-9_]*$/i; // a missing_args entry that is not an arg name is a check to tick
+  const SEND_GAP_MS = 1500;        // anti-ban gap between two sends
+  const PLACEHOLDER = '[Outgoing Message]';
+  const MATCH_WINDOW_MS = 3 * 60 * 1000; // a BSB placeholder row this close to a known send gets its text
+  const WA_WINDOW_MS = 24 * 3600 * 1000;
+  const MSG_COLUMNS = 'id,chat_id,contact,profile_name,message,direction,media_type,media_url,timestamp';
 
   const state = {
-    catalog: null,        // support_act op 'catalog' (loaded when the Actions menu is first opened)
     signedIn: false,
-    phase: 'idle',        // idle | loading | ready | error | not_deployed
-    errorText: '',
-    items: [],
-    counts: { draft: 0, escalate: 0, no_reply: 0 },
-    filter: 'draft',
+    loaded: false,
+    chats: new Map(),     // contact -> chat summary
+    maxId: 0,             // highest bsb_messages.id seen
+    filter: 'waiting',
     search: '',
-    active: null,         // the open review (see openItem)
-    edits: new Map(),     // draft id -> unsent edits, so switching chats never loses typed text
-    closedIds: new Set(), // drafts settled from this browser; a late inbox answer must not bring them back
-    inboxBusy: false,
-    lastAttemptAt: 0,
-    refreshTimer: null,
-    flashTimer: null,
-    kickBusy: false,
-    lastKickAt: 0
+    active: null,         // { contact, ids:Set, sent:[{text,at,used}], lastTs }
+    pollTimer: null,
+    pollBusy: false,
+    lastFull: 0,
+    fullBusy: false,
+    renderQueued: false,
+    sendChain: Promise.resolve(),
+    lastSendAt: 0
   };
 
+  const $ = id => document.getElementById(id);
   const el = {
-    view: document.getElementById('view-support'),
-    tabCount: document.getElementById('tab-count-support'),
-    countBadge: document.getElementById('sup-count-badge'),
-    updated: document.getElementById('sup-updated'),
-    searchInput: document.getElementById('sup-search-input'),
-    filterPills: document.querySelectorAll('#view-support .pill-btn[data-sup-filter]'),
-    flash: document.getElementById('sup-flash'),
-    list: document.getElementById('sup-list'),
-    panel: document.getElementById('sup-panel'),
-    emptyState: document.getElementById('sup-empty-state'),
-    emptyIcon: document.getElementById('sup-empty-icon'),
-    emptyTitle: document.getElementById('sup-empty-title'),
-    emptyText: document.getElementById('sup-empty-text'),
-    activeView: document.getElementById('sup-active-view'),
-    backBtn: document.getElementById('sup-back-btn'),
-    phone: document.getElementById('sup-phone'),
-    profileName: document.getElementById('sup-profile-name'),
-    headerPills: document.getElementById('sup-header-pills'),
-    waLink: document.getElementById('sup-wa-link'),
-    banner: document.getElementById('sup-banner'),
-    messages: document.getElementById('sup-messages'),
-    review: document.getElementById('sup-review')
+    view: $('view-support'),
+    tabCount: $('tab-count-support'),
+    countBadge: $('sup-count-badge'),
+    countWaiting: $('sup-count-waiting'),
+    countAll: $('sup-count-all'),
+    updated: $('sup-updated'),
+    search: $('sup-search-input'),
+    pills: document.querySelectorAll('#view-support .pill-btn[data-sup-filter]'),
+    list: $('sup-list'),
+    panel: $('sup-panel'),
+    empty: $('sup-empty-state'),
+    activeView: $('sup-active-view'),
+    back: $('sup-back-btn'),
+    name: $('sup-name'),
+    phone: $('sup-phone'),
+    waLink: $('sup-wa-link'),
+    messages: $('sup-messages'),
+    windowNote: $('sup-window-note'),
+    textarea: $('sup-textarea'),
+    sendBtn: $('sup-send-btn'),
+    status: $('sup-status')
   };
-  if (!el.view || !el.list || !el.messages || !el.review) return;
+  if (!el.view || !el.list || !el.messages || !el.textarea) return;
 
   const chatView = core.createChatRenderer(el.messages);
+  const db = () => window.supabaseClient;
 
   // =========================================================================
-  // Server answers are untrusted: keep only the fields and types this tab uses
+  // Helpers
   // =========================================================================
-  function str(value, max) {
-    if (typeof value === 'string') return value.slice(0, max);
-    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-    return '';
-  }
-
-  function strList(value, maxItems, maxChars) {
-    if (!Array.isArray(value)) return [];
-    return value.map(v => str(v, maxChars)).filter(v => v.trim()).slice(0, maxItems);
-  }
-
-  function normalizeActions(list) {
-    return (Array.isArray(list) ? list : [])
-      .filter(a => a && typeof a === 'object' && typeof a.name === 'string' && /^[a-z0-9_]{1,60}$/.test(a.name))
-      .slice(0, 6)
-      .map(a => {
-        const args = {};
-        if (a.args && typeof a.args === 'object') {
-          Object.keys(a.args).slice(0, 12).forEach(k => {
-            const v = a.args[k];
-            if (ARG_NAME_RE.test(k) && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) args[k] = typeof v === 'string' ? v.slice(0, 200) : v;
-          });
-        }
-        return {
-          name: a.name,
-          args,
-          missing_args: strList(a.missing_args, 8, 80),
-          risk: ['low', 'medium', 'high'].includes(a.risk) ? a.risk : 'high',
-          label: str(a.label, 80) || a.name
-        };
-      });
-  }
-
-  function normalizeItem(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-    const id = (typeof raw.id === 'number' || typeof raw.id === 'string') ? String(raw.id).slice(0, 80) : '';
-    const contact = str(raw.contact, 40).trim();
-    if (!id || !contact) return null;
-    const decision = DECISIONS.includes(raw.decision) ? raw.decision : 'escalate'; // unknown => a person looks at it
-    let action = null;
-    if (raw.action && typeof raw.action === 'object' && typeof raw.action.name === 'string' && raw.action.name) {
-      action = { name: raw.action.name.slice(0, 40) };
-    }
-    const examples = (Array.isArray(raw.examples) ? raw.examples : [])
-      .filter(x => x && typeof x === 'object')
-      .map(x => ({ turn: str(x.turn, 1500), reply: str(x.reply, 1500), sim: Number(x.sim) }))
-      .filter(x => x.turn || x.reply)
-      .slice(0, 5);
-    const confidence = Number(raw.confidence);
-    const actions = normalizeActions(raw.actions);
-    const h = raw.handoff && typeof raw.handoff === 'object' ? raw.handoff : null;
-    return {
-      id,
-      rawId: raw.id, // sent back unchanged (bigint or uuid)
-      contact,
-      profile_name: str(raw.profile_name, 120),
-      decision,
-      stage: str(raw.stage, 40),
-      reason: str(raw.reason, 80),
-      reason_text: str(raw.reason_text, 600),
-      service: str(raw.service, 30),
-      messages: decision === 'draft' ? strList(raw.messages, 5, MAX_MESSAGE_CHARS) : [],
-      canned_keys: strList(raw.canned_keys, 6, 60),
-      rule_ids: strList(raw.rule_ids, 12, 40),
-      handoff: h
-        ? {
-          reason: str(h.reason, 60), summary: str(h.summary, 400), next_step: str(h.next_step, 400),
-          suggestion: strList(h.suggestion, 5, MAX_MESSAGE_CHARS),
-          suggestion_actions: normalizeActions(h.suggestion_actions),
-          suggestion_stage: str(h.suggestion_stage, 40)
-        }
-        : null,
-      action,
-      actions,
-      confidence: raw.confidence !== null && raw.confidence !== undefined && Number.isFinite(confidence) ? confidence : null,
-      facts: strList(raw.facts, 20, 400),
-      examples,
-      last_incoming_at: str(raw.last_incoming_at, 40),
-      last_message: str(raw.last_message, 600),
-      created_at: str(raw.created_at, 40)
-    };
-  }
-
-  function timeValue(iso) {
-    const t = iso ? Date.parse(iso) : NaN;
+  const ms = iso => {
+    const t = Date.parse(iso);
     return Number.isFinite(t) ? t : 0;
+  };
+  const isIncoming = dir => String(dir || '').toLowerCase() === 'incoming';
+  const text = v => (typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)));
+
+  function previewOf(message, mediaType, incoming) {
+    const t = text(message).trim();
+    const m = text(mediaType).toLowerCase();
+    let p = t;
+    if (!incoming && t === PLACEHOLDER) p = 'Sent';
+    else if (!t || /^\[(image|audio|video|document|media)/i.test(t)) {
+      p = m.includes('image') ? 'Photo' : m.includes('audio') ? 'Voice note' : m.includes('video') ? 'Video' : (m && m !== 'text' ? 'File' : '...');
+    }
+    return (incoming ? '' : 'You: ') + p.replace(/\s+/g, ' ').slice(0, 120);
   }
 
-  // When the customer started waiting (their last message), falling back to the draft's creation
-  function waitingSince(item) {
-    return timeValue(item.last_incoming_at) || timeValue(item.created_at);
+  function isWaiting(c) {
+    return c.lastIncoming && Date.now() - c.lastAt < WA_WINDOW_MS;
   }
 
-  // True unless `a` is provably older than `b` (a late answer must not put an old draft back)
-  function isNewerDraft(a, b) {
-    const ta = waitingSince(a);
-    const tb = waitingSince(b);
-    if (ta && tb && ta !== tb) return ta > tb;
-    const ca = timeValue(a.created_at);
-    const cb = timeValue(b.created_at);
-    if (ca && cb && ca !== cb) return ca > cb;
+  function setUpdated(t, warn) {
+    if (!el.updated) return;
+    el.updated.textContent = t;
+    el.updated.classList.toggle('warn', !!warn);
+  }
+
+  function setStatus(t, isError) {
+    el.status.textContent = t || '';
+    el.status.classList.toggle('error', !!isError);
+  }
+
+  // Fold one message row into the chat list
+  function absorb(row) {
+    const contact = text(row.contact);
+    if (!/^[0-9]{6,20}$/.test(contact)) return false; // phone chats only (no ig_ handles)
+    const at = ms(row.timestamp);
+    const incoming = isIncoming(row.direction);
+    let c = state.chats.get(contact);
+    if (!c) {
+      c = { contact, name: '', lastAt: 0, lastId: 0, preview: '', lastIncoming: false, lastIncomingAt: 0 };
+      state.chats.set(contact, c);
+    }
+    if (incoming && row.profile_name) c.name = text(row.profile_name).slice(0, 80);
+    if (incoming && at > c.lastIncomingAt) c.lastIncomingAt = at;
+    if (at > c.lastAt || (at === c.lastAt && Number(row.id) > c.lastId)) {
+      c.lastAt = at;
+      c.lastId = Number(row.id) || c.lastId;
+      c.lastIncoming = incoming;
+      c.preview = previewOf(row.message, row.media_type, incoming);
+    }
     return true;
   }
 
-  // Same call shape as the triage / bsb_send calls in js/app.js
-  async function callFunction(name, body) {
-    const { data: { session } } = await window.supabaseClient.auth.getSession();
-    if (!session || !session.access_token) throw new Error('You are signed out. Please sign in again.');
-    const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/${name}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-        apikey: window.SUPABASE_ANON_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-    const data = await resp.json().catch(() => null);
-    return { status: resp.status, ok: resp.ok, data: (data && typeof data === 'object' && !Array.isArray(data)) ? data : {} };
-  }
-
-  function failureText(res, fallback) {
-    if (res.status === 404) return 'Support assistant is not deployed yet';
-    if (res.status === 401) return 'Your session expired. Please sign in again.';
-    return safeErrorText(res.data.error || res.data.message, res.ok ? fallback : `${fallback} (HTTP ${res.status})`);
-  }
-
   // =========================================================================
-  // Inbox: load, count, list
+  // Data
   // =========================================================================
-  async function refreshInbox() {
-    if (!state.signedIn || state.inboxBusy) return;
-    state.inboxBusy = true;
-    state.lastAttemptAt = Date.now();
+  async function fullRefresh() {
+    if (!state.signedIn || state.fullBusy) return;
+    state.fullBusy = true;
     const epoch = core.authEpoch();
-    if (state.phase === 'idle') {
-      state.phase = 'loading';
-      renderList();
-    }
-
-    let res = null;
-    let networkError = null;
     try {
-      res = await callFunction('support_act', { op: 'inbox' });
+      const { data, error } = await db().rpc('get_support_chats', { hours_lookback: LOOKBACK_HOURS, max_rows: MAX_CHATS });
+      if (epoch !== core.authEpoch()) return;
+      if (error) throw error;
+      const next = new Map();
+      let top = 0;
+      (Array.isArray(data) ? data : []).forEach(r => {
+        if (!r || !/^[0-9]{6,20}$/.test(text(r.contact))) return;
+        const incoming = isIncoming(r.last_direction);
+        next.set(r.contact, {
+          contact: r.contact,
+          name: text(r.profile_name).slice(0, 80),
+          lastAt: ms(r.last_timestamp),
+          lastId: Number(r.last_id) || 0,
+          preview: previewOf(r.last_message, r.last_media_type, incoming),
+          lastIncoming: incoming,
+          lastIncomingAt: ms(r.last_incoming_at)
+        });
+        top = Math.max(top, Number(r.last_id) || 0);
+      });
+      // Only the first load sets where the poll starts; later it must not skip rows the open chat needs
+      if (!state.loaded) state.maxId = top;
+      // Keep a chat that is open even if it fell out of the window
+      if (state.active && !next.has(state.active.contact) && state.chats.has(state.active.contact)) {
+        next.set(state.active.contact, state.chats.get(state.active.contact));
+      }
+      state.chats = next;
+      state.loaded = true;
+      state.lastFull = Date.now();
+      setUpdated('');
+      queueRender();
     } catch (e) {
-      networkError = e;
+      if (epoch !== core.authEpoch()) return;
+      console.warn('[support chats]', safeErrorText(e));
+      setUpdated('Could not load chats, retrying...', true);
+      if (!state.loaded) renderList();
+    } finally {
+      if (epoch === core.authEpoch()) state.fullBusy = false;
     }
-    if (epoch !== core.authEpoch()) return; // logged out meanwhile (its reset already cleared inboxBusy)
-    state.inboxBusy = false;
+  }
 
-    if (res && res.ok && Array.isArray(res.data.drafts)) {
-      const seen = new Set();
-      state.items = res.data.drafts.map(normalizeItem).filter(item => {
-        if (!item || state.closedIds.has(item.id) || seen.has(item.contact)) return false;
-        seen.add(item.contact); // one open record per chat
-        return true;
-      }).slice(0, MAX_ITEMS);
-      const serverCounts = (res.data.counts && typeof res.data.counts === 'object') ? res.data.counts : {};
-      DECISIONS.forEach(d => {
-        const listed = state.items.filter(i => i.decision === d).length;
-        const n = Number(serverCounts[d]);
-        // The server count wins only when it knows about more rows than it returned
-        state.counts[d] = Number.isFinite(n) && n > listed && !state.closedIds.size ? Math.floor(n) : listed;
-      });
-      state.phase = 'ready';
-      state.errorText = '';
-      setUpdatedLabel(`Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`);
-      // Unsent edits of drafts that are no longer open are of no use any more
-      const openIds = new Set(state.items.map(i => i.id));
-      Array.from(state.edits.keys()).forEach(id => {
-        if (!openIds.has(id) && !(state.active && state.active.item.id === id)) state.edits.delete(id);
-      });
-      renderCounts();
-      renderList();
-      syncEmptyState();
-      reconcileActive();
-      kickDrafting();
+  async function poll() {
+    if (!state.signedIn || state.pollBusy || document.hidden) return;
+    if (!state.loaded || Date.now() - state.lastFull > FULL_REFRESH_MS) {
+      await fullRefresh();
       return;
     }
-
-    if (res && res.status === 404) {
-      state.phase = 'not_deployed';
-      state.errorText = '';
-      state.items = [];
-      DECISIONS.forEach(d => { state.counts[d] = 0; });
-      setUpdatedLabel('');
-    } else {
-      const text = networkError
-        ? 'Could not reach the support assistant. It may not be deployed yet, or you are offline.'
-        : failureText(res, 'The support inbox could not be loaded');
-      console.warn('[support inbox]', networkError ? safeErrorText(networkError) : `HTTP ${res.status}`);
-      if (state.phase === 'ready') {
-        // Keep showing what we have; the next poll retries
-        setUpdatedLabel('Refresh failed, retrying', true);
-        return;
-      }
-      state.phase = 'error';
-      state.errorText = text;
-    }
-    renderCounts();
-    renderList();
-    syncEmptyState();
-  }
-
-  // Drafts are normally produced by a server-side cron. Until it is enabled, nudge the drafting
-  // function after an inbox refresh: fire and forget, throttled per browser (all tabs).
-  function kickDrafting() {
-    if (state.kickBusy) return;
-    const now = Date.now();
-    let last = state.lastKickAt;
+    state.pollBusy = true;
+    const epoch = core.authEpoch();
     try {
-      last = Math.max(last, Number(localStorage.getItem(KICK_STORAGE_KEY)) || 0);
-    } catch (e) {}
-    if (last > now) last = 0; // clock moved back
-    if (now - last < KICK_MIN_MS) return;
-    state.lastKickAt = now;
-    try { localStorage.setItem(KICK_STORAGE_KEY, String(now)); } catch (e) {}
-    state.kickBusy = true;
-    callFunction('support_draft', {}).catch(() => null).then(() => { state.kickBusy = false; });
+      const { data, error } = await db().from('bsb_messages')
+        .select(MSG_COLUMNS)
+        .gt('id', state.maxId)
+        .order('id', { ascending: true })
+        .limit(300);
+      if (epoch !== core.authEpoch()) return;
+      if (error) throw error;
+      const rows = Array.isArray(data) ? data : [];
+      if (!rows.length) return;
+      const forActive = [];
+      rows.forEach(r => {
+        state.maxId = Math.max(state.maxId, Number(r.id) || 0);
+        absorb(r);
+        if (state.active && r.contact === state.active.contact) forActive.push(r);
+      });
+      if (forActive.length) appendToActive(forActive);
+      queueRender();
+      setUpdated('');
+    } catch (e) {
+      if (epoch === core.authEpoch()) setUpdated('Connection problem, retrying...', true);
+    } finally {
+      if (epoch === core.authEpoch()) state.pollBusy = false;
+    }
   }
 
-  function setUpdatedLabel(text, isWarning) {
-    if (!el.updated) return;
-    el.updated.textContent = text;
-    el.updated.classList.toggle('warn', !!isWarning);
+  function schedulePoll() {
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    if (!state.signedIn) return;
+    const visible = core.activeTab() === 'support';
+    state.pollTimer = setTimeout(async () => {
+      await poll();
+      schedulePoll();
+    }, visible ? POLL_MS : POLL_HIDDEN_MS);
+  }
+
+  // =========================================================================
+  // Chat list
+  // =========================================================================
+  function queueRender() {
+    if (state.renderQueued) return;
+    state.renderQueued = true;
+    requestAnimationFrame(() => {
+      state.renderQueued = false;
+      renderList();
+    });
+  }
+
+  function visibleChats() {
+    const q = state.search.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, '');
+    return Array.from(state.chats.values())
+      .filter(c => state.filter === 'all' || isWaiting(c) || (state.active && state.active.contact === c.contact))
+      .filter(c => !q
+        || c.name.toLowerCase().includes(q)
+        || c.preview.toLowerCase().includes(q)
+        || (qDigits.length >= 3 && c.contact.includes(qDigits)))
+      .sort((a, b) => (b.lastAt - a.lastAt) || (b.lastId - a.lastId));
   }
 
   function renderCounts() {
-    DECISIONS.forEach(d => {
-      const node = document.getElementById(`sup-count-${d}`);
-      if (node) node.textContent = state.counts[d];
-    });
-    // "Open" = what an employee still has to act on
-    const open = state.counts.draft + state.counts.escalate;
-    if (el.countBadge) el.countBadge.textContent = open;
-    if (el.tabCount) {
-      el.tabCount.textContent = open;
-      el.tabCount.classList.toggle('pill-warning', open > 0);
-    }
+    let waiting = 0;
+    state.chats.forEach(c => { if (isWaiting(c)) waiting++; });
+    const all = state.chats.size;
+    if (el.countWaiting) el.countWaiting.textContent = String(waiting);
+    if (el.countAll) el.countAll.textContent = String(all);
+    if (el.countBadge) el.countBadge.textContent = String(state.filter === 'all' ? all : waiting);
+    if (el.tabCount) el.tabCount.textContent = String(waiting);
   }
 
-  function visibleItems() {
-    let list = state.items.filter(i => i.decision === state.filter);
-    if (state.search) {
-      const q = String(state.search).slice(0, 200).toLowerCase().trim();
-      const qDigits = /^[\d\s+()-]+$/.test(q) ? q.replace(/\D/g, '') : '';
-      list = list.filter(i => (qDigits && i.contact.includes(qDigits))
-        || i.contact.toLowerCase().includes(q)
-        || i.profile_name.toLowerCase().includes(q)
-        || i.last_message.toLowerCase().includes(q)
-        || i.reason_text.toLowerCase().includes(q)
-        || i.service.toLowerCase().includes(q));
-    }
-    // Longest-waiting customer first where an employee has to act; newest first for the rest
-    const dir = state.filter === 'no_reply' ? -1 : 1;
-    return list.slice().sort((a, b) => dir * (waitingSince(a) - waitingSince(b)));
-  }
-
-  function decisionPill(decision) {
-    return createEl('span', `triage-pill ${DECISION_PILLS[decision] || 'pill-checking'}`, DECISION_LABELS[decision] || decision);
-  }
-
-  function serviceTag(service) {
-    if (!service) return null;
-    const known = Object.prototype.hasOwnProperty.call(SERVICE_LABELS, service);
-    return createEl('span', 'sup-service-tag', known ? SERVICE_LABELS[service] : service);
-  }
-
-  function listNotice(text, iconClasses, withRetry) {
-    const box = createEl('div', 'sup-list-notice');
-    const line = createEl('div');
-    if (iconClasses) line.append(icon(iconClasses), ' ');
-    line.append(text);
-    box.appendChild(line);
-    if (withRetry) {
-      const retry = createEl('button', 'btn-nav', 'Try again');
-      retry.type = 'button';
-      retry.addEventListener('click', () => refreshInbox());
-      box.appendChild(retry);
-    }
-    el.list.replaceChildren(box);
-  }
-
-  // Built with DOM nodes + textContent only: nothing from the server is ever parsed as HTML
   function renderList() {
+    renderCounts();
+    if (!state.loaded) {
+      const note = createEl('div', 'sup-list-notice');
+      note.append(icon('fa-solid fa-spinner fa-spin'), ' Loading chats...');
+      el.list.replaceChildren(note);
+      return;
+    }
+    const chats = visibleChats();
     const prevScroll = el.list.scrollTop;
-    if (state.phase === 'idle' || state.phase === 'loading') {
-      listNotice('Loading support inbox...', 'fa-solid fa-spinner fa-spin');
+    if (!chats.length) {
+      el.list.replaceChildren(createEl('div', 'sup-list-notice', state.search ? 'No chat matches your search.' : (state.filter === 'waiting' ? 'Nobody is waiting for a reply.' : 'No chats in the last 3 days.')));
       return;
     }
-    if (state.phase === 'not_deployed') {
-      listNotice('Support assistant is not deployed yet', 'fa-solid fa-plug-circle-xmark');
-      return;
-    }
-    if (state.phase === 'error') {
-      listNotice(state.errorText, 'fa-solid fa-triangle-exclamation', true);
-      return;
-    }
-
-    const list = visibleItems();
-    if (list.length === 0) {
-      listNotice(state.search ? 'No chat matches this search.' : EMPTY_LIST_TEXT[state.filter]);
-      return;
-    }
-
-    const activeContact = state.active ? state.active.contact : null;
     const frag = document.createDocumentFragment();
-    list.forEach(item => {
-      const row = createEl('div', `conv-item sup-item${activeContact === item.contact ? ' active' : ''}`);
-      row.dataset.contact = item.contact;
-      row.addEventListener('click', () => openItem(item));
-
-      const initialSource = String(item.profile_name || item.contact || '?').trim() || '?';
-      const avatar = createEl('div', 'conv-avatar', (Array.from(initialSource)[0] || '?').toUpperCase());
-
+    chats.forEach(c => {
+      const item = createEl('div', `conv-item${state.active && state.active.contact === c.contact ? ' active' : ''}`);
+      item.dataset.contact = c.contact;
+      const label = c.name || formatPhoneDisplay(c.contact);
+      const initial = (Array.from(label.replace(/^\+/, '').trim())[0] || '?').toUpperCase();
+      const avatar = createEl('div', `conv-avatar${isWaiting(c) ? ' incoming-indicator' : ''}`, initial);
       const info = createEl('div', 'conv-info');
-      const headerLine = createEl('div', 'conv-header-line');
-      const waited = formatRelativeTime(item.last_incoming_at || item.created_at);
-      const timeEl = createEl('span', 'conv-time', waited);
-      timeEl.title = 'Since the customer\'s last message';
-      headerLine.append(createEl('span', 'conv-name', formatPhoneDisplay(item.contact)), timeEl);
-
-      const previewEl = createEl('div', 'conv-preview sup-preview');
-      const previewText = createEl('span', 'sup-preview-text', item.last_message || '[Media]');
-      previewText.dir = 'auto';
-      previewEl.append(icon('fa-solid fa-arrow-down-left dir-icon dir-incoming'), previewText);
-
-      const reasonLine = createEl('div', 'sup-item-meta');
-      const tag = serviceTag(item.service);
-      if (tag) reasonLine.appendChild(tag);
-      reasonLine.appendChild(decisionPill(item.decision));
-      if (item.reason_text || item.reason) {
-        const reason = createEl('span', 'sup-item-reason', item.reason_text || item.reason);
-        reason.title = item.reason_text || item.reason;
-        reasonLine.appendChild(reason);
-      }
-
-      info.append(headerLine, previewEl, reasonLine);
-      row.append(avatar, info);
-      frag.appendChild(row);
+      const head = createEl('div', 'conv-header-line');
+      head.append(createEl('span', 'conv-name', label), createEl('span', 'conv-time', formatRelativeTime(new Date(c.lastAt).toISOString())));
+      const sub = createEl('div', 'conv-subline');
+      sub.append(createEl('span', `conv-preview${isWaiting(c) ? ' sup-unread' : ''}`, c.preview || '...'));
+      info.append(head, sub);
+      if (c.name) info.appendChild(createEl('div', 'sup-item-phone', formatPhoneDisplay(c.contact)));
+      item.append(avatar, info);
+      frag.appendChild(item);
     });
     el.list.replaceChildren(frag);
-    if (prevScroll > 0) el.list.scrollTop = prevScroll;
-  }
-
-  function highlightActive() {
-    const contact = state.active ? state.active.contact : null;
-    el.list.querySelectorAll('.conv-item').forEach(row => {
-      row.classList.toggle('active', contact !== null && row.dataset.contact === contact);
-    });
-  }
-
-  function flash(text, isError) {
-    if (!el.flash) return;
-    if (state.flashTimer) clearTimeout(state.flashTimer);
-    el.flash.textContent = text;
-    el.flash.classList.toggle('error', !!isError);
-    el.flash.style.display = text ? 'block' : 'none';
-    state.flashTimer = text ? setTimeout(() => {
-      state.flashTimer = null;
-      el.flash.textContent = '';
-      el.flash.style.display = 'none';
-    }, FLASH_MS) : null;
+    el.list.scrollTop = prevScroll;
   }
 
   // =========================================================================
-  // Right panel: empty / error states, header, banner
+  // Open chat
   // =========================================================================
-  function syncEmptyState() {
-    if (!el.emptyState) return;
-    let iconClass = 'fa-solid fa-headset';
-    let title = 'Select a chat';
-    let text = 'Drafts are replies the AI wrote for a live customer chat: check them, edit if needed and send. "Needs human" lists the chats the AI will not answer, with the reason.';
-    if (state.phase === 'idle' || state.phase === 'loading') {
-      iconClass = 'fa-solid fa-spinner fa-spin';
-      title = 'Loading support inbox...';
-      text = '';
-    } else if (state.phase === 'not_deployed') {
-      iconClass = 'fa-solid fa-plug-circle-xmark';
-      title = 'Support assistant is not deployed yet';
-      text = 'The server side of this tab is not live yet. Nothing is wrong with your account: the inbox appears here by itself once it is deployed.';
-    } else if (state.phase === 'error') {
-      iconClass = 'fa-solid fa-triangle-exclamation';
-      title = 'The support inbox could not be loaded';
-      text = state.errorText;
-    } else if (state.items.length === 0) {
-      iconClass = 'fa-solid fa-circle-check';
-      title = 'All caught up';
-      text = 'No open drafts and no chat waiting for a human. New customer messages show up here within a minute.';
+  // BSB stores most outgoing messages as "[Outgoing Message]" with no text. Fill the text in
+  // from sends we know about (send_queue + this browser), nearest in time, each used once.
+  function fillPlaceholder(row, sent) {
+    if (isIncoming(row.direction) || text(row.message) !== PLACEHOLDER) return row;
+    const t = ms(row.timestamp);
+    const open = sent.filter(s => !s.used && Math.abs(s.at - t) <= MATCH_WINDOW_MS);
+    // Sends from this browser arrive in the order they went out: oldest first.
+    // Older sends (send_queue) are matched by the nearest time.
+    let best = open.filter(s => s.local).sort((x, y) => x.at - y.at)[0] || null;
+    if (!best) {
+      open.forEach(s => {
+        if (!best || Math.abs(s.at - t) < Math.abs(best.at - t)) best = s;
+      });
     }
-    if (el.emptyIcon) el.emptyIcon.className = iconClass;
-    if (el.emptyTitle) el.emptyTitle.textContent = title;
-    if (el.emptyText) el.emptyText.textContent = text;
+    if (!best) return row;
+    best.used = true;
+    return { ...row, message: best.text, __fromLocal: !!best.local };
   }
 
-  function showBanner(text, buttonLabel, onClick) {
-    if (!el.banner) return;
-    el.banner.replaceChildren();
-    if (!text) {
-      el.banner.style.display = 'none';
+  async function openChat(contact) {
+    const c = state.chats.get(contact);
+    if (!c) return;
+    const epoch = core.authEpoch();
+    const a = { contact, ids: new Set(), sent: [], lastTs: 0 };
+    state.active = a;
+
+    el.empty.style.display = 'none';
+    el.activeView.style.display = 'flex';
+    el.panel.classList.add('active-mobile');
+    el.name.textContent = c.name || formatPhoneDisplay(contact);
+    el.phone.textContent = c.name ? formatPhoneDisplay(contact) : '';
+    el.waLink.href = `https://web.whatsapp.com/send?phone=${encodeURIComponent(normalizePhone(contact))}`;
+    setStatus('');
+    updateWindowNote();
+    queueRender();
+    chatView.reset();
+    chatView.notice('Loading...', 'fa-solid fa-spinner fa-spin');
+    if (window.matchMedia('(min-width: 769px)').matches) el.textarea.focus();
+
+    const local = contact.replace(/^961/, '');
+    try {
+      const [msgs, sq] = await Promise.all([
+        db().from('bsb_messages').select(MSG_COLUMNS).eq('contact', contact)
+          .order('timestamp', { ascending: false }).limit(CHAT_LIMIT),
+        db().from('send_queue').select('message,sent_at').in('contact', [contact, local])
+          .eq('status', 'SENT').order('sent_at', { ascending: false }).limit(CHAT_LIMIT)
+      ]);
+      if (epoch !== core.authEpoch() || state.active !== a) return;
+      if (msgs.error) throw msgs.error;
+      (Array.isArray(sq.data) ? sq.data : []).forEach(s => {
+        const at = ms(s.sent_at);
+        if (at && s.message) a.sent.push({ text: text(s.message), at, used: false });
+      });
+      const rows = (Array.isArray(msgs.data) ? msgs.data : []).slice().reverse()
+        .map(r => {
+          a.ids.add(r.id);
+          a.lastTs = Math.max(a.lastTs, ms(r.timestamp));
+          return fillPlaceholder(r, a.sent);
+        });
+      if (rows.length) chatView.render(rows);
+      else chatView.notice('No messages in this chat yet.');
+    } catch (e) {
+      if (epoch === core.authEpoch() && state.active === a) chatView.notice('Could not load the messages. Click the chat to retry.');
+    }
+  }
+
+  function nearBottom() {
+    const m = el.messages;
+    return m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+  }
+
+  function appendToActive(rows) {
+    const a = state.active;
+    if (!a) return;
+    if (!a.ids.size) {
+      // Chat was empty (or still loading): load it fully, keeping what was sent from here
+      const sent = a.sent;
+      openChat(a.contact).then(() => {
+        if (state.active && state.active.contact === a.contact) state.active.sent.push(...sent.filter(x => x.local && !x.used));
+      });
       return;
     }
-    el.banner.append(icon('fa-solid fa-bolt'), createEl('span', 'sup-banner-text', text));
-    if (buttonLabel) {
-      const btn = createEl('button', 'btn-nav', buttonLabel);
-      btn.type = 'button';
-      btn.addEventListener('click', onClick);
-      el.banner.appendChild(btn);
-    }
-    el.banner.style.display = 'flex';
+    const stick = nearBottom();
+    const fresh = [];
+    rows.slice().sort((x, y) => ms(x.timestamp) - ms(y.timestamp)).forEach(r => {
+      if (a.ids.has(r.id)) return;
+      a.ids.add(r.id);
+      const filled = fillPlaceholder(r, a.sent);
+      if (filled.__fromLocal) return; // already on screen: we sent it from here
+      if (!isIncoming(r.direction)) {
+        // A message we sent from here that BSB stored with its real text
+        const mine = a.sent.find(s => s.local && !s.used && s.text === text(r.message) && Math.abs(s.at - ms(r.timestamp)) <= MATCH_WINDOW_MS);
+        if (mine) { mine.used = true; return; }
+      }
+      fresh.push(filled);
+    });
+    if (!fresh.length) return;
+    chatView.append(fresh);
+    if (stick || fresh.some(r => !isIncoming(r.direction))) el.messages.scrollTop = el.messages.scrollHeight;
+    updateWindowNote();
   }
 
-  function closePanel() {
-    const r = state.active;
-    if (r) {
-      stashEdits(r);
-      if (r.guardTimer) clearTimeout(r.guardTimer);
-    }
+  function updateWindowNote() {
+    const c = state.active && state.chats.get(state.active.contact);
+    if (!c || !el.windowNote) return;
+    const old = !c.lastIncomingAt || Date.now() - c.lastIncomingAt > WA_WINDOW_MS;
+    el.windowNote.style.display = old ? '' : 'none';
+    el.windowNote.textContent = old ? 'The customer has not written in the last 24 h, so WhatsApp may not deliver a normal message.' : '';
+  }
+
+  function closeChat() {
     state.active = null;
     chatView.reset();
     el.messages.replaceChildren();
-    el.review.replaceChildren();
-    showBanner('');
     el.activeView.style.display = 'none';
-    el.emptyState.style.display = '';
+    el.empty.style.display = '';
     el.panel.classList.remove('active-mobile');
-    syncEmptyState();
-    highlightActive();
+    queueRender();
   }
 
   // =========================================================================
-  // Review desk
+  // Send
   // =========================================================================
-  function reviewMode(item) {
-    if (item.decision === 'draft' && item.messages.length > 0) return 'draft';
-    return item.decision === 'no_reply' ? 'no_reply' : 'human';
+  function autoGrow() {
+    el.textarea.style.height = 'auto';
+    el.textarea.style.height = `${Math.min(el.textarea.scrollHeight, 180)}px`;
   }
 
-  function openItem(item, opts) {
-    const options = opts || {};
-    const prev = state.active;
-    if (prev && prev.busy) return; // a request for the open chat is in flight
-    if (prev && prev.item.id === item.id && !options.reload) {
-      el.panel.classList.add('active-mobile'); // narrow screens: back from the list to the open chat
-      return;
-    }
-    if (prev) {
-      if (options.discardEdits) state.edits.delete(prev.item.id);
-      else stashEdits(prev);
-      if (prev.guardTimer) clearTimeout(prev.guardTimer);
-    }
+  function submit() {
+    const a = state.active;
+    const msg = el.textarea.value.trim();
+    if (!a || !msg) return;
+    if (msg.length > MAX_MESSAGE_CHARS) return setStatus(`Too long (max ${MAX_MESSAGE_CHARS} characters).`, true);
+    const dest = normalizePhone(a.contact);
+    if (!dest) return setStatus('This chat has no valid phone number.', true);
 
-    const r = {
-      item,
-      contact: item.contact,
-      mode: reviewMode(item),
-      openedAt: Date.now(),
-      busy: false,
-      fields: [],          // draft mode: { textarea, original, sent, chip }
-      actionBox: null,
-      actionRow: null,
-      actionDone: false,   // the attached action already ran in a failed attempt: never run it twice
-      chips: [],           // proposed v3 actions: { action, box, inputs: Map, checks: Map }
-      replyBox: null,
-      replyWrap: null,
-      sendBtn: null,
-      buttons: [],
-      editedTag: null,
-      status: null,
-      factsHost: null,
-      contextFacts: [],
-      newer: null,
-      gone: false,
-      guardTimer: null
-    };
-    state.active = r;
+    el.textarea.value = '';
+    autoGrow();
+    setStatus('');
+    const row = chatView.appendOutgoing(msg);
+    if (row) row.classList.add('sup-sending');
+    const entry = { text: msg, at: Date.now(), used: false, local: true };
+    a.sent.push(entry);
 
-    el.emptyState.style.display = 'none';
-    el.activeView.style.display = 'flex';
-    el.panel.classList.add('active-mobile');
-    el.phone.textContent = formatPhoneDisplay(item.contact);
-    el.profileName.textContent = item.profile_name || 'BSB Contact';
-    const tag = serviceTag(item.service);
-    el.headerPills.replaceChildren(decisionPill(item.decision));
-    if (tag) el.headerPills.prepend(tag);
-    // normalizePhone() returns digits only, so nothing else can end up in the link
-    el.waLink.href = `https://web.whatsapp.com/send?phone=${encodeURIComponent(normalizePhone(item.contact))}`;
-    showBanner(options.banner || '');
-    highlightActive();
-
-    renderReview(r);
-    // Misclick guard: a click or key press that was meant for the previous chat must not act on this one
-    r.guardTimer = setTimeout(() => {
-      r.guardTimer = null;
-      if (state.active === r) updateControls(r);
-    }, SEND_GUARD_MS + 20);
-    if (options.focusField !== undefined && r.fields[options.focusField]) r.fields[options.focusField].textarea.focus();
-    loadChat(r);
+    // One send at a time, in order, at least SEND_GAP_MS apart
+    state.sendChain = state.sendChain.then(() => sendOne(a, dest, msg, row, entry)).catch(() => {});
   }
 
-  async function loadChat(r) {
+  async function sendOne(a, dest, msg, row, entry) {
+    const wait = state.lastSendAt + SEND_GAP_MS - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
     const epoch = core.authEpoch();
-    stickToBottom = true;
-    chatView.reset();
-    chatView.notice('Loading conversation...', 'fa-solid fa-spinner fa-spin');
-    let res;
+    let ok = false;
+    let reason = '';
+    let resJson = {};
     try {
-      res = await callFunction('support_act', { op: 'chat', contact: r.contact });
-    } catch (e) {
-      if (epoch === core.authEpoch() && state.active === r) chatView.notice('Failed to load messages.');
-      return;
-    }
-    if (epoch !== core.authEpoch() || state.active !== r) return; // logged out or another chat opened meanwhile
-    if (!res.ok || !Array.isArray(res.data.messages)) {
-      chatView.notice(res.status === 404 ? 'Support assistant is not deployed yet.' : 'Failed to load messages.');
-      return;
-    }
-
-    // Oldest first, whatever order the server used
-    const messages = res.data.messages.filter(m => m && typeof m === 'object')
-      .map((m, i) => ({ m, i, t: timeValue(m.timestamp) }))
-      .sort((a, b) => (a.t - b.t) || (a.i - b.i))
-      .map(x => x.m);
-    // Facts first: they change the height of the review desk, and the chat must end up at its last message
-    r.contextFacts = strList(res.data.context_facts, 20, 400);
-    renderFacts(r);
-    if (messages.length) chatView.render(messages);
-    else chatView.notice('No stored messages for this chat yet.');
-
-    // The chat answer carries the current draft: it may be newer than the inbox row that was clicked
-    const fresh = normalizeItem(res.data.draft);
-    if (fresh && fresh.contact === r.contact && fresh.id !== r.item.id && !state.closedIds.has(fresh.id) && isNewerDraft(fresh, r.item)) {
-      handleSuperseded(r, fresh, false);
-    }
-  }
-
-  function isEdited(r) {
-    return r.fields.some(f => !f.sent && f.textarea.value !== f.original);
-  }
-
-  // Anything the employee would lose if the review desk were rebuilt
-  function isTouched(r) {
-    return isEdited(r)
-      || r.fields.some(f => f.sent)
-      || !!(r.actionBox && !r.actionBox.checked && !r.actionDone)
-      || !!(r.replyBox && r.replyBox.value.trim());
-  }
-
-  function stashEdits(r) {
-    if (!isTouched(r) || r.fields.some(f => f.sent)) {
-      state.edits.delete(r.item.id);
-      return;
-    }
-    state.edits.set(r.item.id, {
-      texts: r.fields.map(f => f.textarea.value),
-      runAction: r.actionBox ? r.actionBox.checked : true,
-      reply: r.replyBox ? r.replyBox.value : ''
-    });
-  }
-
-  function canAct(r) {
-    return !r.busy && Date.now() - r.openedAt >= SEND_GUARD_MS;
-  }
-
-  function autoGrow(textarea) {
-    if (!textarea.isConnected) return;
-    textarea.style.height = 'auto';
-    const wanted = textarea.scrollHeight;
-    if (wanted > 0) textarea.style.height = `${Math.min(wanted + 2, TEXTAREA_MAX_PX)}px`; // 0 = tab not visible
-    else textarea.style.height = '';
-  }
-
-  function setStatus(r, text, kind, iconClasses) {
-    if (!r.status) return;
-    r.status.className = `send-status-line sup-status${kind ? ` ${kind}` : ''}`;
-    r.status.replaceChildren();
-    if (iconClasses) r.status.append(icon(iconClasses));
-    if (text) r.status.append(text);
-  }
-
-  function setChip(field, text, kind) {
-    field.chip.textContent = text;
-    field.chip.className = `sup-chip${kind ? ` ${kind}` : ''}`;
-  }
-
-  function updateControls(r) {
-    const ready = canAct(r);
-    r.buttons.forEach(btn => { btn.disabled = !ready; });
-    if (r.sendBtn) {
-      const hasText = r.mode === 'draft'
-        ? r.fields.some(f => !f.sent && f.textarea.value.trim())
-        : !!(r.replyBox && r.replyBox.value.trim());
-      r.sendBtn.disabled = !ready || !hasText;
-    }
-    if (r.editedTag) r.editedTag.style.display = isEdited(r) ? '' : 'none';
-    r.fields.forEach(f => { f.textarea.readOnly = r.busy || f.sent; });
-    if (r.replyBox) r.replyBox.readOnly = r.busy;
-    if (r.actionBox) r.actionBox.disabled = r.busy || r.actionDone;
-  }
-
-  function setBusy(r, busy) {
-    r.busy = busy;
-    updateControls(r);
-  }
-
-  function actionButton(r, label, iconClasses, className, onClick) {
-    const btn = createEl('button', className);
-    btn.type = 'button';
-    btn.append(icon(iconClasses), ' ' + label);
-    btn.addEventListener('click', onClick);
-    r.buttons.push(btn);
-    return btn;
-  }
-
-  function sendButton(r, label) {
-    const btn = createEl('button', 'sup-btn-send');
-    btn.type = 'button';
-    btn.title = 'Ctrl+Enter';
-    btn.append(icon('fa-solid fa-paper-plane'), ' ' + label);
-    btn.addEventListener('click', () => sendActive());
-    r.sendBtn = btn;
-    return btn;
-  }
-
-  function onReviewTextareaKey(e) {
-    // Enter always inserts a newline here: sending is Ctrl+Enter / Cmd+Enter (handled on the document)
-    if (e.key === 'Escape') e.target.blur();
-  }
-
-  function buildTextarea(r, value, placeholder) {
-    const textarea = createEl('textarea', 'chat-textarea sup-textarea');
-    textarea.rows = 1;
-    textarea.dir = 'auto';
-    textarea.maxLength = MAX_MESSAGE_CHARS;
-    textarea.spellcheck = false;
-    textarea.value = value;
-    if (placeholder) textarea.placeholder = placeholder;
-    textarea.addEventListener('input', () => {
-      autoGrow(textarea);
-      updateControls(r);
-    });
-    textarea.addEventListener('keydown', onReviewTextareaKey);
-    return textarea;
-  }
-
-  function renderFacts(r) {
-    if (!r.factsHost) return;
-    r.factsHost.replaceChildren();
-    const facts = r.item.facts.slice();
-    r.contextFacts.forEach(f => { if (!facts.includes(f)) facts.push(f); });
-    if (!facts.length) return;
-    r.factsHost.appendChild(createEl('div', 'sup-section-label', 'Facts from the database'));
-    const ul = createEl('ul', 'sup-facts');
-    facts.forEach(f => {
-      const li = createEl('li', '', f);
-      li.dir = 'auto';
-      ul.appendChild(li);
-    });
-    r.factsHost.appendChild(ul);
-  }
-
-  function buildExamples(item) {
-    if (!item.examples.length) return null;
-    const details = createEl('details', 'sup-examples');
-    details.appendChild(createEl('summary', '', `Similar past replies (${item.examples.length})`));
-    item.examples.forEach(x => {
-      const box = createEl('div', 'sup-example');
-      const turn = createEl('div', 'sup-example-turn');
-      turn.append(createEl('span', 'sup-example-who', 'Customer'), createEl('span', 'sup-example-text', x.turn || '[no text]'));
-      const reply = createEl('div', 'sup-example-reply');
-      reply.append(createEl('span', 'sup-example-who', 'Employee'), createEl('span', 'sup-example-text', x.reply || '[no text]'));
-      turn.lastChild.dir = 'auto';
-      reply.lastChild.dir = 'auto';
-      box.append(turn, reply);
-      if (Number.isFinite(x.sim) && x.sim > 0 && x.sim <= 1) {
-        box.appendChild(createEl('div', 'sup-example-sim', `${Math.round(x.sim * 100)}% similar`));
-      }
-      details.appendChild(box);
-    });
-    return details;
-  }
-
-  function reasonBox(item, kind, iconClasses, title) {
-    const box = createEl('div', `sup-reason-box ${kind}`);
-    const text = createEl('div', 'sup-reason-text', item.reason_text || item.reason || 'No reason given.');
-    text.dir = 'auto';
-    const body = createEl('div', 'sup-reason-body');
-    body.append(createEl('div', 'sup-reason-title', title), text);
-    box.append(icon(iconClasses), body);
-    return box;
-  }
-
-  function buildReplyBox(r, visible) {
-    const wrap = createEl('div', 'sup-reply-wrap');
-    wrap.appendChild(createEl('div', 'sup-section-label', 'Your reply'));
-    r.replyBox = buildTextarea(r, '', 'Write the reply yourself... (Ctrl+Enter sends, Enter adds a line)');
-    wrap.appendChild(r.replyBox);
-    wrap.style.display = visible ? '' : 'none';
-    r.replyWrap = wrap;
-    return wrap;
-  }
-
-  function buildDraftReview(r, frag) {
-    const item = r.item;
-    const why = createEl('div', 'sup-why');
-    const whyText = createEl('span', '', item.reason_text || item.reason || 'no reason given');
-    whyText.dir = 'auto';
-    why.append(createEl('strong', '', 'Why: '), whyText);
-    if (item.confidence !== null && item.confidence >= 0 && item.confidence <= 1) {
-      why.appendChild(createEl('span', 'sup-dim', ` · confidence ${Math.round(item.confidence * 100)}%`));
-    }
-    frag.appendChild(why);
-    if (item.rule_ids.length) {
-      frag.appendChild(createEl('div', 'sup-dim sup-note', `Rules: ${item.rule_ids.join(', ')}`));
-    }
-
-    const total = item.messages.length;
-    item.messages.forEach((text, i) => {
-      const wrap = createEl('div', 'sup-field');
-      const head = createEl('div', 'sup-field-head');
-      const chip = createEl('span', 'sup-chip');
-      head.append(createEl('span', 'sup-section-label', total > 1 ? `Message ${i + 1} of ${total}` : 'Reply'), chip);
-      const textarea = buildTextarea(r, text);
-      wrap.append(head, textarea);
-      frag.appendChild(wrap);
-      r.fields.push({ textarea, original: text, sent: false, chip });
-    });
-    if (item.messages.some(t => t.includes(LINK_PLACEHOLDER))) {
-      frag.appendChild(createEl('div', 'sup-dim sup-note', `${LINK_PLACEHOLDER} is replaced by the customer's own portal link when the message is sent. Leave it as it is.`));
-    }
-
-    r.factsHost = createEl('div', 'sup-facts-host');
-    frag.appendChild(r.factsHost);
-    const examples = buildExamples(item);
-    if (examples) frag.appendChild(examples);
-
-    if (item.actions.length) {
-      frag.appendChild(buildChips(r, true));
-    } else if (item.action) {
-      const label = createEl('label', 'sup-action');
-      r.actionBox = document.createElement('input');
-      r.actionBox.type = 'checkbox';
-      r.actionBox.checked = true;
-      r.actionBox.addEventListener('change', () => updateControls(r));
-      const known = Object.prototype.hasOwnProperty.call(ACTION_LABELS, item.action.name);
-      label.append(r.actionBox, createEl('span', '', known ? ACTION_LABELS[item.action.name] : `Run the attached action (${item.action.name}) before sending`));
-      r.actionRow = label; // placed right above Send (see renderReview) so it is never scrolled out of sight
-    }
-
-    const row = createEl('div', 'sup-buttons');
-    r.editedTag = createEl('span', 'sup-edited', 'edited');
-    row.append(
-      sendButton(r, total > 1 ? `Send ${total} messages` : 'Send'),
-      r.editedTag,
-      actionButton(r, 'Reject', 'fa-solid fa-xmark', 'btn-nav btn-danger', () => settleActive('reject')),
-      actionButton(r, 'Handled elsewhere', 'fa-solid fa-check', 'btn-nav', () => settleActive('handled'))
-    );
-    frag.appendChild(row);
-  }
-
-  function buildHumanReview(r, frag) {
-    const item = r.item;
-    frag.appendChild(reasonBox(item, 'human', 'fa-solid fa-user-shield', 'Needs a human'));
-    const h = item.handoff;
-    if (h && (h.summary || h.next_step)) {
-      const card = createEl('div', 'sup-why');
-      [['Reason: ', h.reason], ['Summary: ', h.summary], ['Next step: ', h.next_step]].forEach(([label, value]) => {
-        if (!value) return;
-        const row = createEl('div', '');
-        const text = createEl('span', '', value);
-        text.dir = 'auto';
-        row.append(createEl('strong', '', label), text);
-        card.appendChild(row);
+      const { data: { session } } = await db().auth.getSession();
+      if (!session || !session.access_token) throw new Error('You are signed out. Please sign in again.');
+      const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/bsb_send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+          apikey: window.SUPABASE_ANON_KEY
+        },
+        body: JSON.stringify({ destination: dest, message: msg })
       });
-      if (item.rule_ids.length) card.appendChild(createEl('div', 'sup-dim', `Rules: ${item.rule_ids.join(', ')}`));
-      frag.appendChild(card);
-    }
-    r.factsHost = createEl('div', 'sup-facts-host');
-    frag.appendChild(r.factsHost);
-
-    if (item.actions.length) {
-      frag.appendChild(buildChips(r, false));
-    } else if (item.action) {
-      const known = Object.prototype.hasOwnProperty.call(ACTION_BUTTONS, item.action.name) ? ACTION_BUTTONS[item.action.name] : null;
-      const line = createEl('div', 'sup-suggested');
-      line.appendChild(createEl('span', 'sup-section-label', 'Suggested fix'));
-      if (known) line.appendChild(actionButton(r, known.label, 'fa-solid fa-wrench', 'btn-nav sup-btn-fix', () => runSuggestedAction(known)));
-      else line.appendChild(createEl('span', 'sup-dim', item.action.name));
-      frag.appendChild(line);
-    }
-
-    const examples = buildExamples(item);
-    if (examples) frag.appendChild(examples);
-    frag.appendChild(buildReplyBox(r, true));
-    if (h && h.reason === 'low_confidence' && h.suggestion.length) frag.insertBefore(buildSuggestion(r, h), r.replyWrap);
-
-    const row = createEl('div', 'sup-buttons');
-    row.append(
-      sendButton(r, 'Send reply'),
-      actionButton(r, 'Handled', 'fa-solid fa-check', 'btn-nav', () => settleActive('handled'))
-    );
-    frag.appendChild(row);
-  }
-
-  function buildNoReplyReview(r, frag) {
-    frag.appendChild(reasonBox(r.item, 'quiet', 'fa-solid fa-comment-slash', 'No reply needed'));
-    r.factsHost = createEl('div', 'sup-facts-host');
-    frag.appendChild(r.factsHost);
-    frag.appendChild(buildReplyBox(r, false));
-
-    const row = createEl('div', 'sup-buttons');
-    const send = sendButton(r, 'Send reply');
-    send.style.display = 'none';
-    const replyAnyway = actionButton(r, 'Reply anyway', 'fa-solid fa-reply', 'btn-nav', () => openReplyBox(r, true));
-    r.replyAnywayBtn = replyAnyway;
-    row.append(
-      send,
-      actionButton(r, 'Agree (dismiss)', 'fa-solid fa-check', 'btn-nav sup-btn-agree', () => settleActive('handled')),
-      replyAnyway
-    );
-    frag.appendChild(row);
-  }
-
-  function openReplyBox(r, focus) {
-    if (!r.replyWrap) return;
-    r.replyWrap.style.display = '';
-    if (r.sendBtn) r.sendBtn.style.display = '';
-    if (r.replyAnywayBtn) r.replyAnywayBtn.style.display = 'none';
-    autoGrow(r.replyBox);
-    updateControls(r);
-    if (focus) r.replyBox.focus();
-  }
-
-  function renderReview(r) {
-    r.fields = [];
-    r.buttons = [];
-    r.chips = [];
-    const frag = document.createDocumentFragment();
-    if (r.mode === 'draft') buildDraftReview(r, frag);
-    else if (r.mode === 'no_reply') buildNoReplyReview(r, frag);
-    else buildHumanReview(r, frag);
-    // Buttons and their status line stay in view when the desk itself has to scroll
-    r.status = createEl('div', 'send-status-line sup-status');
-    r.status.setAttribute('role', 'status');
-    const footer = createEl('div', 'sup-footer');
-    const buttonRow = frag.lastChild;
-    frag.insertBefore(buildActionsMenu(r), buttonRow);
-    if (r.actionRow) footer.appendChild(r.actionRow);
-    footer.append(buttonRow, r.status);
-    frag.appendChild(footer);
-    el.review.replaceChildren(frag);
-    el.review.scrollTop = 0;
-    renderFacts(r);
-
-    // Bring back what was typed for this draft before another chat was opened
-    const saved = state.edits.get(r.item.id);
-    if (saved) {
-      r.fields.forEach((f, i) => { if (typeof saved.texts[i] === 'string') f.textarea.value = saved.texts[i]; });
-      if (r.actionBox) r.actionBox.checked = saved.runAction !== false;
-      if (r.replyBox && saved.reply) {
-        r.replyBox.value = saved.reply;
-        openReplyBox(r, false);
-      }
-    }
-    r.fields.forEach(f => autoGrow(f.textarea));
-    if (r.replyBox) autoGrow(r.replyBox);
-    updateControls(r);
-  }
-
-  // =========================================================================
-  // Actions: send, reject, handled, suggested fix
-  // =========================================================================
-  // The record is settled: drop it from the list and move on to the next chat
-  function finishActive(r, flashText) {
-    const list = visibleItems();
-    const idx = list.findIndex(i => i.contact === r.contact);
-    const next = idx === -1 ? null : (list[idx + 1] || list[idx - 1] || null);
-
-    state.closedIds.add(r.item.id);
-    state.edits.delete(r.item.id);
-    const before = state.items.length;
-    state.items = state.items.filter(i => i.id !== r.item.id);
-    if (state.items.length < before) state.counts[r.item.decision] = Math.max(0, state.counts[r.item.decision] - 1);
-    r.busy = false;
-    r.fields = []; // nothing left to stash
-    if (r.replyBox) r.replyBox.value = '';
-    if (r.actionBox) r.actionBox.checked = true;
-    renderCounts();
-    if (next) {
-      openItem(next);
-      renderList();
-      const row = el.list.querySelector(`.conv-item[data-contact="${CSS.escape(next.contact)}"]`);
-      if (row) row.scrollIntoView({ block: 'nearest' });
-    } else {
-      closePanel();
-      renderList();
-    }
-    flash(flashText);
-  }
-
-  function sendActive() {
-    const r = state.active;
-    if (!r || !canAct(r)) return;
-    if (r.mode === 'draft') sendDraft(r);
-    else if (r.replyBox && r.replyWrap.style.display !== 'none') sendReply(r);
-  }
-
-  async function sendDraft(r) {
-    const pending = r.fields.filter(f => !f.sent && f.textarea.value.trim());
-    if (!pending.length) {
-      setStatus(r, 'Nothing to send: every message is empty.', 'error');
-      return;
-    }
-    const texts = pending.map(f => f.textarea.value.trim());
-    if (texts.some(t => t.length > MAX_MESSAGE_CHARS)) {
-      setStatus(r, `A message is too long (max ${MAX_MESSAGE_CHARS} characters).`, 'error');
-      return;
-    }
-    const picked = collectChips(r, r.chips.filter(c => c.box && c.box.checked));
-    if (picked.error) {
-      setStatus(r, picked.error, 'error', 'fa-solid fa-triangle-exclamation');
-      return;
-    }
-    if (!confirmRisky(r, picked.items)) return;
-    const runAction = picked.requests.length > 0 || !!(r.item.action && r.actionBox && r.actionBox.checked && !r.actionDone);
-    const epoch = core.authEpoch();
-
-    setBusy(r, true);
-    pending.forEach(f => setChip(f, runAction ? 'waiting for the action' : 'sending...', 'busy'));
-    setStatus(r, runAction
-      ? 'Running the action, then sending...'
-      : `Sending ${texts.length} message${texts.length > 1 ? 's' : ''}...`, '', 'fa-solid fa-spinner fa-spin');
-
-    let res = null;
-    let failure = '';
-    try {
-      res = await callFunction('support_act', {
-        op: 'send',
-        draft_id: r.item.rawId,
-        contact: r.contact,
-        messages: texts,
-        ...(r.chips.length ? { actions: picked.requests } : { run_action: runAction })
-      });
+      const data = (await resp.json().catch(() => null)) || {};
+      const edgeOk = resp.status === 200 && typeof data.upstream_status === 'number';
+      resJson = edgeOk
+        ? ((data.result && typeof data.result === 'object') ? data.result : { raw: 'Non-JSON' })
+        : { status: 'error', message: data.error || data.message || `HTTP ${resp.status}` };
+      ok = edgeOk && data.upstream_status === 200 && resJson.status !== 'error' && resJson.success !== false;
+      if (!ok) reason = safeErrorText(resJson.message || resJson.error, 'not sent');
     } catch (e) {
-      failure = `Network error: ${safeErrorText(e, 'please try again')}. Check WhatsApp before sending again.`;
+      reason = safeErrorText(e, 'network error');
     }
-    if (epoch !== core.authEpoch() || state.active !== r) return; // logged out meanwhile
+    state.lastSendAt = Date.now();
+    entry.at = Date.now();
 
-    const data = res ? res.data : {};
-    if (res && res.ok && data.success === true) {
-      const result = (data.action_result && typeof data.action_result === 'object') ? data.action_result : null;
-      const extra = runAction ? ` · action done${result && result.message ? `: ${safeErrorText(result.message)}` : ''}` : '';
-      finishActive(r, `Sent ${texts.length} message${texts.length > 1 ? 's' : ''} to ${formatPhoneDisplay(r.contact)}${extra}`);
-      return;
+    // Log every send (keeps the follow-up filters right and gives this tab the text back)
+    db().from('send_queue').insert({
+      contact: dest,
+      message: msg,
+      status: ok ? 'SENT' : 'FAILED',
+      sent_at: ok ? new Date().toISOString() : null,
+      api_response: JSON.stringify(resJson),
+      error_message: ok ? null : JSON.stringify(resJson)
+    }).then(({ error }) => { if (error) console.warn('[send_queue]', safeErrorText(error)); });
+
+    if (epoch !== core.authEpoch()) return;
+    if (row) {
+      row.classList.remove('sup-sending');
+      if (!ok) row.classList.add('sup-failed');
+      const statusIcon = row.querySelector('.msg-status-icon');
+      if (statusIcon) statusIcon.className = ok ? 'fa-solid fa-check msg-status-icon' : 'fa-solid fa-circle-exclamation msg-status-icon';
     }
-
-    // Failure: nothing leaves the list. Show exactly which messages went out, if any.
-    const result = (data.action_result && typeof data.action_result === 'object') ? data.action_result : null;
-    const sentCount = Math.max(0, Math.min(pending.length, Math.floor(Number(data.sent)) || 0));
-    if (result && result.ok === true) r.actionDone = true;
-    pending.forEach((f, i) => {
-      if (i < sentCount) {
-        f.sent = true;
-        setChip(f, 'sent', 'ok');
-      } else {
-        setChip(f, 'not sent', 'bad');
-      }
-    });
-    if (!failure) {
-      const reason = failureText(res, 'the server refused the request');
-      if (result && result.ok === false) {
-        failure = `The action failed, so nothing was sent: ${safeErrorText(result.message || data.error, 'no details')}`;
-      } else if (sentCount > 0) {
-        failure = `Only ${sentCount} of ${pending.length} messages were sent: ${reason}. Send again to deliver the rest.`;
-      } else {
-        failure = `Not sent: ${reason}`;
-      }
-    }
-    setBusy(r, false);
-    setStatus(r, failure, 'error', 'fa-solid fa-triangle-exclamation');
-  }
-
-  // A reply typed by the employee (escalated or "no reply needed" chats): no draft is approved
-  async function sendReply(r) {
-    const text = r.replyBox.value.trim();
-    if (!text) return;
-    if (text.length > MAX_MESSAGE_CHARS) {
-      setStatus(r, `The message is too long (max ${MAX_MESSAGE_CHARS} characters).`, 'error');
-      return;
-    }
-    const picked = collectChips(r, r.chips.filter(c => c.box && c.box.checked));
-    if (picked.error) return setStatus(r, picked.error, 'error', 'fa-solid fa-triangle-exclamation');
-    if (!confirmRisky(r, picked.items)) return;
-    const epoch = core.authEpoch();
-    setBusy(r, true);
-    setStatus(r, 'Sending...', '', 'fa-solid fa-spinner fa-spin');
-
-    let res = null;
-    let failure = '';
-    try {
-      res = await callFunction('support_act', { op: 'send', contact: r.contact, messages: [text], ...(picked.requests.length ? { actions: picked.requests } : { run_action: false }) });
-    } catch (e) {
-      failure = `Network error: ${safeErrorText(e, 'please try again')}. Check WhatsApp before sending again.`;
-    }
-    if (epoch !== core.authEpoch() || state.active !== r) return;
-    if (!failure && !(res.ok && res.data.success === true)) failure = `Not sent: ${failureText(res, 'the server refused the request')}`;
-    if (failure) {
-      setBusy(r, false);
-      setStatus(r, failure, 'error', 'fa-solid fa-triangle-exclamation');
-      return;
-    }
-
-    // The customer has their answer; now close the record so it leaves everyone's inbox
-    r.replyBox.value = '';
-    autoGrow(r.replyBox);
-    chatView.appendOutgoing(text);
-    setStatus(r, 'Sent. Closing the item...', 'success', 'fa-solid fa-spinner fa-spin');
-    let closeError = '';
-    try {
-      const closed = await callFunction('support_act', { op: 'handled', draft_id: r.item.rawId });
-      if (!(closed.ok && closed.data.success === true)) closeError = failureText(closed, 'the server refused the request');
-    } catch (e) {
-      closeError = safeErrorText(e, 'network error');
-    }
-    if (epoch !== core.authEpoch() || state.active !== r) return;
-    if (closeError) {
-      setBusy(r, false);
-      setStatus(r, `Your reply was sent, but the item could not be closed: ${closeError}. Press Handled to retry.`, 'error', 'fa-solid fa-triangle-exclamation');
-      return;
-    }
-    finishActive(r, `Reply sent to ${formatPhoneDisplay(r.contact)}`);
-  }
-
-  // op = 'reject' (the draft is wrong) or 'handled' (answered elsewhere / nothing to do)
-  async function settleActive(op) {
-    const r = state.active;
-    if (!r || !canAct(r)) return;
-    if (op === 'reject' && r.mode !== 'draft') return;
-    const epoch = core.authEpoch();
-    setBusy(r, true);
-    setStatus(r, op === 'reject' ? 'Rejecting...' : 'Closing...', '', 'fa-solid fa-spinner fa-spin');
-
-    let failure = '';
-    try {
-      const res = await callFunction('support_act', { op, draft_id: r.item.rawId });
-      if (!(res.ok && res.data.success === true)) failure = failureText(res, 'the server refused the request');
-    } catch (e) {
-      failure = `Network error: ${safeErrorText(e, 'please try again')}`;
-    }
-    if (epoch !== core.authEpoch() || state.active !== r) return;
-    if (failure) {
-      setBusy(r, false);
-      setStatus(r, `Could not ${op === 'reject' ? 'reject the draft' : 'close the item'}: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
-      return;
-    }
-    const phone = formatPhoneDisplay(r.contact);
-    finishActive(r, op === 'reject' ? `Draft for ${phone} rejected` : `${phone} marked as handled`);
-  }
-
-  // A fix the AI only suggested: it runs when the employee asks for it, after a confirmation
-  async function runSuggestedAction(known) {
-    const r = state.active;
-    if (!r || !canAct(r)) return;
-    if (!confirm(`${known.label} for ${formatPhoneDisplay(r.contact)}?\n\nThis runs on the customer's account right away.`)) return;
-    const epoch = core.authEpoch();
-    setBusy(r, true);
-    setStatus(r, `${known.label}...`, '', 'fa-solid fa-spinner fa-spin');
-
-    let failure = '';
-    let message = '';
-    try {
-      const res = await callFunction('support_act', { op: known.op, contact: r.contact });
-      if (res.ok && res.data.success === true) message = typeof res.data.message === 'string' ? safeErrorText(res.data.message) : '';
-      else failure = failureText(res, 'the server refused the request');
-    } catch (e) {
-      failure = `Network error: ${safeErrorText(e, 'please try again')}`;
-    }
-    if (epoch !== core.authEpoch() || state.active !== r) return;
-    setBusy(r, false);
-    if (failure) setStatus(r, `${known.label} failed: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
-    else setStatus(r, message || known.done, 'success', 'fa-solid fa-check');
-  }
-
-  // =========================================================================
-  // Back-office actions (v3): proposed chips on a draft + the manual Actions menu on every chat
-  // =========================================================================
-  function riskBadge(risk) {
-    return createEl('span', `sup-risk sup-risk-${risk}`, RISK_LABELS[risk] || risk);
-  }
-
-  function argInput(name, value, spec) {
-    let input;
-    if (spec && Array.isArray(spec.choices) && spec.choices.length) {
-      input = document.createElement('select');
-      input.className = 'sup-act-input';
-      if (!spec.required) input.appendChild(new Option('(none)', ''));
-      spec.choices.forEach(c => input.appendChild(new Option(String(c), String(c))));
-      if (value !== undefined && value !== null) input.value = String(value);
-    } else {
-      input = createEl('input', 'sup-act-input');
-      input.type = 'text';
-      input.maxLength = 200;
-      input.placeholder = spec && spec.type ? `${name} (${spec.type})` : name;
-      if (value !== undefined && value !== null) input.value = String(value);
-    }
-    input.setAttribute('aria-label', name);
-    return input;
-  }
-
-  function checkLine(text) {
-    const label = createEl('label', 'sup-act-check');
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    label.append(box, createEl('span', '', text));
-    return { label, box };
-  }
-
-  // selectable = draft mode (the ticked chips run when Send is pressed); otherwise each chip has its own Run button
-  function buildChips(r, selectable, list, untick) {
-    const wrap = createEl('div', 'sup-acts');
-    wrap.appendChild(createEl('div', 'sup-section-label', selectable ? 'Actions (run before sending)' : 'Suggested actions'));
-    (list || r.item.actions).forEach(action => {
-      const chip = { action, box: null, inputs: new Map(), checks: new Map() };
-      const box = createEl('div', `sup-act sup-act-${action.risk}`);
-      const head = createEl(selectable ? 'label' : 'div', 'sup-act-head');
-      if (selectable) {
-        chip.box = document.createElement('input');
-        chip.box.type = 'checkbox';
-        chip.box.checked = !untick && action.risk === 'low'; // medium / high (and unverified suggestions) are opt-in
-        chip.box.addEventListener('change', () => updateControls(r));
-        head.appendChild(chip.box);
-      }
-      head.append(createEl('span', 'sup-act-label', action.label), riskBadge(action.risk));
-      box.appendChild(head);
-      const given = Object.keys(action.args).filter(k => k !== 'phone').map(k => `${k}: ${action.args[k]}`);
-      if (given.length) box.appendChild(createEl('div', 'sup-dim', given.join(' · ')));
-      action.missing_args.forEach(m => {
-        if (ARG_NAME_RE.test(m)) {
-          const input = argInput(m, '', null);
-          chip.inputs.set(m, input);
-          box.appendChild(input);
-        } else {
-          const c = checkLine(m);
-          chip.checks.set(m, c.box);
-          box.appendChild(c.label);
+    if (!ok) {
+      entry.used = true; // never match a failed send to a BSB row
+      if (state.active === a) {
+        setStatus(`Not sent: ${reason}`, true);
+        if (!el.textarea.value.trim()) {
+          el.textarea.value = msg;
+          autoGrow();
         }
-      });
-      if (!selectable) {
-        box.appendChild(actionButton(r, 'Run', 'fa-solid fa-wrench', 'btn-nav sup-btn-fix', () => runChips(r, [chip])));
       }
-      r.chips.push(chip);
-      wrap.appendChild(box);
-    });
-    return wrap;
-  }
-
-  // -> {requests, items} or {error}; request_id is stable per draft + action, so a retry never adds twice
-  function collectChips(r, chips) {
-    const requests = [];
-    const items = [];
-    for (const c of chips) {
-      const args = { ...c.action.args };
-      for (const [name, input] of c.inputs) {
-        const v = input.value.trim();
-        if (!v) return { error: `${c.action.label}: fill in ${name} first.` };
-        args[name] = v;
-      }
-      const checks = [];
-      for (const [text, box] of c.checks) {
-        if (!box.checked) return { error: `${c.action.label}: tick "${text}" first.` };
-        checks.push(text);
-      }
-      requests.push({ name: c.action.name, args, request_id: `d${r.item.id}-${c.action.name}`, confirm: c.action.risk !== 'low', checks });
-      items.push({ label: c.action.label, risk: c.action.risk });
-    }
-    return { requests, items };
-  }
-
-  function confirmRisky(r, items) {
-    const risky = items.filter(i => i.risk !== 'low');
-    if (!risky.length) return true;
-    const lines = risky.map(i => `- ${i.label} (${RISK_LABELS[i.risk]})`).join('\n');
-    return confirm(`Run on ${formatPhoneDisplay(r.contact)}'s account right now?\n\n${lines}\n\nThis changes the back office and may not be reversible.`);
-  }
-
-  // op 'run_action': runs without sending anything; results never contain a link or a password
-  async function runActionRequest(r, req, label) {
-    const epoch = core.authEpoch();
-    setBusy(r, true);
-    setStatus(r, `${label}...`, '', 'fa-solid fa-spinner fa-spin');
-    let failure = '';
-    let message = '';
-    try {
-      const res = await callFunction('support_act', { op: 'run_action', contact: r.contact, draft_id: r.item.rawId, action: req });
-      const result = res.data && res.data.action_result && typeof res.data.action_result === 'object' ? res.data.action_result : null;
-      if (res.ok && res.data.success === true) {
-        const out = result && result.output && typeof result.output === 'object' ? result.output : {};
-        const extra = ['sub_id', 'expiry', 'username'].filter(k => out[k] !== undefined && out[k] !== null).map(k => `${k} ${str(out[k], 60)}`).join(', ');
-        message = `${safeErrorText(result && result.message, `${label} done`)}${extra ? ` (${extra})` : ''}`;
-      } else failure = failureText(res, 'the server refused the request');
-    } catch (e) {
-      failure = `Network error: ${safeErrorText(e, 'please try again')}. Check the back office before running it again.`;
-    }
-    if (epoch !== core.authEpoch() || state.active !== r) return false;
-    setBusy(r, false);
-    if (failure) setStatus(r, `${label} failed: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
-    else setStatus(r, message, 'success', 'fa-solid fa-check');
-    return !failure;
-  }
-
-  async function runChips(r, chips) {
-    if (!canAct(r)) return;
-    const picked = collectChips(r, chips);
-    if (picked.error) {
-      setStatus(r, picked.error, 'error', 'fa-solid fa-triangle-exclamation');
       return;
     }
-    if (!confirmRisky(r, picked.items.map(i => (i.risk === 'low' ? { ...i, risk: 'medium' } : i)))) return; // every manual run is confirmed
-    for (let i = 0; i < picked.requests.length; i++) {
-      if (!(await runActionRequest(r, picked.requests[i], picked.items[i].label))) return;
+    // Move the chat up right away; the poll brings the stored row
+    const c = state.chats.get(a.contact);
+    if (c) {
+      c.lastAt = Date.now();
+      c.lastIncoming = false;
+      c.preview = previewOf(msg, 'text', false);
+      queueRender();
     }
-  }
-
-  async function loadCatalog() {
-    if (state.catalog) return state.catalog;
-    const res = await callFunction('support_act', { op: 'catalog' });
-    if (!(res.ok && res.data.success === true && Array.isArray(res.data.actions))) throw new Error(failureText(res, 'catalog not available'));
-    state.catalog = res.data.actions
-      .filter(a => a && typeof a.name === 'string' && /^[a-z0-9_]{1,60}$/.test(a.name))
-      .map(a => ({
-        name: a.name,
-        label: str(a.label, 80) || a.name,
-        risk: ['low', 'medium', 'high'].includes(a.risk) ? a.risk : 'high',
-        args: (Array.isArray(a.args) ? a.args : []).filter(x => x && ARG_NAME_RE.test(String(x.name)))
-          .map(x => ({ name: String(x.name), type: str(x.type, 80), required: x.required === true, choices: strList(x.choices, 8, 60) })),
-        checks: strList(a.checks, 4, 80),
-        message: str(a.message, 600)
-      }));
-    return state.catalog;
-  }
-
-  function newRequestId() {
-    return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `m${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  }
-
-  // low_confidence handoff: the engine's unverified draft, loaded into the reply box only on request
-  function buildSuggestion(r, h) {
-    const box = createEl('div', 'sup-suggestion');
-    const head = createEl('div', 'sup-act-head');
-    head.append(createEl('span', 'sup-section-label', 'Suggested, unverified'));
-    if (h.suggestion_stage) head.appendChild(createEl('span', 'sup-dim', h.suggestion_stage));
-    box.appendChild(head);
-    h.suggestion.forEach(t => {
-      const p = createEl('div', 'sup-suggestion-text', t);
-      p.dir = 'auto';
-      box.appendChild(p);
-    });
-    box.appendChild(actionButton(r, 'Load into editor', 'fa-solid fa-pen', 'btn-nav', () => {
-      if (!r.replyBox) return;
-      r.replyBox.value = h.suggestion.join('\n\n');
-      openReplyBox(r, true);
-    }));
-    if (h.suggestion_actions.length) box.appendChild(buildChips(r, true, h.suggestion_actions, true));
-    return box;
-  }
-
-  // Any catalog action on any chat, phone pre-filled, even when the copilot proposed none
-  function buildActionsMenu(r) {
-    const details = createEl('details', 'sup-actions-menu');
-    details.appendChild(createEl('summary', '', 'Actions'));
-    const body = createEl('div', 'sup-act-menu-body');
-    details.appendChild(body);
-    let loaded = false;
-    details.addEventListener('toggle', async () => {
-      if (!details.open || loaded) return;
-      loaded = true;
-      body.replaceChildren(createEl('div', 'sup-dim', 'Loading actions...'));
-      let list;
-      try {
-        list = await loadCatalog();
-      } catch (e) {
-        loaded = false;
-        body.replaceChildren(createEl('div', 'sup-dim', `Actions unavailable: ${safeErrorText(e, 'error')}`));
-        return;
-      }
-      if (state.active !== r) return;
-      const select = document.createElement('select');
-      select.className = 'sup-act-input';
-      select.appendChild(new Option('Choose an action...', ''));
-      ['low', 'medium', 'high'].forEach(risk => {
-        const group = document.createElement('optgroup');
-        group.label = RISK_LABELS[risk];
-        list.filter(a => a.risk === risk).forEach(a => group.appendChild(new Option(a.label, a.name)));
-        if (group.children.length) select.appendChild(group);
-      });
-      const form = createEl('div', 'sup-act-form');
-      body.replaceChildren(select, form);
-      select.addEventListener('change', () => {
-        const a = list.find(x => x.name === select.value);
-        form.replaceChildren();
-        if (a) buildManualForm(r, a, form);
-      });
-    });
-    return details;
-  }
-
-  function buildManualForm(r, a, form) {
-    const box = createEl('div', `sup-act sup-act-${a.risk}`);
-    const head = createEl('div', 'sup-act-head');
-    head.append(createEl('span', 'sup-act-label', a.label), riskBadge(a.risk));
-    box.appendChild(head);
-    const inputs = new Map();
-    a.args.forEach(spec => {
-      const pre = spec.name === 'phone' || spec.name === 'destination' ? r.contact : '';
-      const input = argInput(spec.name, pre, spec);
-      inputs.set(spec.name, { input, spec });
-      box.appendChild(input);
-    });
-    const checks = new Map();
-    a.checks.forEach(t => {
-      const c = checkLine(t);
-      checks.set(t, c.box);
-      box.appendChild(c.label);
-    });
-    let msg = null;
-    if (a.message) {
-      box.appendChild(createEl('div', 'sup-dim', 'Message after success ({{...}} is filled from the real result):'));
-      msg = buildTextarea(r, a.message, '');
-      box.appendChild(msg);
-    }
-    let requestId = newRequestId(); // kept after a failure, so a retry is not a second run
-    const collect = () => {
-      const args = {};
-      for (const [name, { input, spec }] of inputs) {
-        const v = input.value.trim();
-        if (!v && spec.required) return { error: `${a.label}: fill in ${name} first.` };
-        if (v) args[name] = v;
-      }
-      const ticked = [];
-      for (const [t, b] of checks) {
-        if (!b.checked) return { error: `${a.label}: tick "${t}" first.` };
-        ticked.push(t);
-      }
-      return { req: { name: a.name, args, request_id: requestId, confirm: a.risk !== 'low', checks: ticked } };
-    };
-    const row = createEl('div', 'sup-buttons');
-    row.appendChild(actionButton(r, 'Run', 'fa-solid fa-wrench', 'btn-nav sup-btn-fix', async () => {
-      if (!canAct(r)) return;
-      const c = collect();
-      if (c.error) return setStatus(r, c.error, 'error', 'fa-solid fa-triangle-exclamation');
-      if (!confirmRisky(r, [{ label: a.label, risk: a.risk === 'low' ? 'medium' : a.risk }])) return;
-      if (await runActionRequest(r, c.req, a.label)) requestId = newRequestId();
-    }));
-    if (msg) {
-      row.appendChild(actionButton(r, 'Run + send message', 'fa-solid fa-paper-plane', 'btn-nav', async () => {
-        if (!canAct(r)) return;
-        const c = collect();
-        if (c.error) return setStatus(r, c.error, 'error', 'fa-solid fa-triangle-exclamation');
-        const text = msg.value.trim();
-        if (!text) return setStatus(r, 'The message is empty.', 'error');
-        if (!confirmRisky(r, [{ label: `${a.label}, then send the message`, risk: a.risk === 'low' ? 'medium' : a.risk }])) return;
-        const epoch = core.authEpoch();
-        setBusy(r, true);
-        setStatus(r, `${a.label}, then sending...`, '', 'fa-solid fa-spinner fa-spin');
-        let failure = '';
-        try {
-          const res = await callFunction('support_act', { op: 'send', contact: r.contact, messages: [text], actions: [c.req] });
-          if (!(res.ok && res.data.success === true)) failure = failureText(res, 'the server refused the request');
-        } catch (e) {
-          failure = `Network error: ${safeErrorText(e, 'please try again')}. Check WhatsApp and the back office before retrying.`;
-        }
-        if (epoch !== core.authEpoch() || state.active !== r) return;
-        setBusy(r, false);
-        if (failure) return setStatus(r, `Not sent: ${failure}`, 'error', 'fa-solid fa-triangle-exclamation');
-        requestId = newRequestId();
-        chatView.appendOutgoing(text.replace(/\{\{[^}]*\}\}/g, '[filled]'));
-        setStatus(r, `${a.label} done and the message was sent.`, 'success', 'fa-solid fa-check');
-      }));
-    }
-    box.appendChild(row);
-    form.appendChild(box);
-    updateControls(r);
   }
 
   // =========================================================================
-  // Auto-refresh vs. the open chat
+  // Events
   // =========================================================================
-  function loadNewer(r, newer, focusField) {
-    openItem(newer, { reload: true, discardEdits: true, banner: 'Customer wrote again — draft updated', focusField });
-  }
-
-  // The customer wrote again, so the server replaced the open draft with a new record
-  function handleSuperseded(r, newer, reloadMessages) {
-    if (r.newer && r.newer.id === newer.id) return; // already announced
-    if (!isTouched(r)) {
-      const focusField = r.fields.findIndex(f => f.textarea === document.activeElement);
-      loadNewer(r, newer, focusField === -1 ? undefined : focusField);
-      return;
+  el.list.addEventListener('click', e => {
+    const item = e.target.closest('.conv-item');
+    if (item && item.dataset.contact) openChat(item.dataset.contact);
+  });
+  el.pills.forEach(p => p.addEventListener('click', () => {
+    el.pills.forEach(x => x.classList.toggle('active', x === p));
+    state.filter = p.getAttribute('data-sup-filter') === 'all' ? 'all' : 'waiting';
+    el.list.scrollTop = 0;
+    renderList();
+  }));
+  el.search.addEventListener('input', () => {
+    state.search = el.search.value;
+    el.list.scrollTop = 0;
+    renderList();
+  });
+  el.textarea.addEventListener('input', autoGrow);
+  el.textarea.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      submit();
     }
-    // Typed text is never overwritten: the employee decides when to take the new draft
-    r.newer = newer;
-    showBanner('Customer wrote again — draft updated', 'Load new draft', () => {
-      if (state.active === r && !r.busy) loadNewer(r, newer);
-    });
-    if (reloadMessages) loadChat(r);
-  }
+  });
+  el.sendBtn.addEventListener('click', submit);
+  if (el.back) el.back.addEventListener('click', closeChat);
 
-  function reconcileActive() {
-    const r = state.active;
-    if (!r || r.busy) return;
-    const current = state.items.find(i => i.contact === r.contact);
-    if (!current) {
-      if (!r.gone && !r.newer) {
-        r.gone = true;
-        showBanner('This item is no longer open — it may have been handled from another screen.');
-      }
-      return;
-    }
-    if (current.id === r.item.id) {
-      r.item = current;
-      if (r.gone) {
-        r.gone = false;
-        showBanner('');
-      }
-      return;
-    }
-    if (isNewerDraft(current, r.item)) handleSuperseded(r, current, true);
-  }
-
-  // =========================================================================
-  // Keyboard (only while this tab is visible)
-  // =========================================================================
-  function isTextField(t) {
-    if (!t || !t.tagName) return false;
-    if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable) return true;
-    return t.tagName === 'INPUT' && !['checkbox', 'radio', 'button'].includes(String(t.type).toLowerCase());
-  }
-
-  function moveSelection(delta) {
-    if (state.active && state.active.busy) return;
-    const list = visibleItems();
-    if (!list.length) return;
-    const idx = state.active ? list.findIndex(i => i.contact === state.active.contact) : -1;
-    const target = idx === -1 ? (delta > 0 ? list[0] : list[list.length - 1]) : list[idx + delta];
-    if (!target) return;
-    openItem(target);
-    const row = el.list.querySelector(`.conv-item[data-contact="${CSS.escape(target.contact)}"]`);
-    if (row) row.scrollIntoView({ block: 'nearest' });
-  }
-
-  function focusFirstTextarea() {
-    const r = state.active;
-    if (!r || r.busy) return;
-    const field = r.fields.find(f => !f.sent);
-    if (field) {
-      field.textarea.focus();
-      return;
-    }
-    if (r.replyBox) openReplyBox(r, true);
-  }
-
-  function handleShortcut(e) {
-    if (!state.signedIn || core.activeTab() !== 'support' || e.altKey || e.repeat) return;
+  document.addEventListener('keydown', e => {
+    if (core.activeTab() !== 'support') return;
     const t = e.target;
-    const typing = isTextField(t);
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      if (typing && !el.review.contains(t)) return; // e.g. the search box
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (e.key === '/' && !typing) {
       e.preventDefault();
-      sendActive();
-      return;
+      el.search.focus();
+      el.search.select();
+    } else if (e.key === 'Escape' && t === el.search) {
+      el.search.blur();
+      if (state.active) el.textarea.focus();
     }
-    if (typing || e.ctrlKey || e.metaKey) return;
-    const key = String(e.key || '').toLowerCase();
-    if (key === 'j' || key === 'arrowdown') {
-      e.preventDefault();
-      moveSelection(1);
-    } else if (key === 'k' || key === 'arrowup') {
-      e.preventDefault();
-      moveSelection(-1);
-    } else if (key === 'e') {
-      e.preventDefault();
-      focusFirstTextarea();
-    } else if (key === 'x') {
-      e.preventDefault();
-      settleActive('reject');
-    } else if (key === 'h') {
-      e.preventDefault();
-      settleActive('handled');
-    }
-  }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.signedIn) poll();
+  });
 
   // =========================================================================
   // Lifecycle hooks called by js/app.js
   // =========================================================================
-  function tick() {
-    if (!state.signedIn || document.hidden) return;
-    const unavailable = state.phase === 'not_deployed' || state.phase === 'error';
-    if (unavailable && Date.now() - state.lastAttemptAt < NOT_DEPLOYED_REFRESH_MS) return;
-    refreshInbox();
-  }
-
-  // Refresh = re-analyze every open chat of the last 24 h with the current engine, then reload the inbox.
-  // Page load does it at most once per REANALYZE_AUTO_MS per browser (each full pass costs model calls).
-  const REANALYZE_AUTO_MS = 10 * 60 * 1000;
-  const REANALYZE_KEY = 'support_reanalyze_at';
-  async function reanalyzeAll(auto) {
-    if (!state.signedIn || state.reanalyzeBusy) return;
-    if (auto) {
-      let last = 0;
-      try { last = Number(localStorage.getItem(REANALYZE_KEY)) || 0; } catch (e) {}
-      if (Date.now() - last < REANALYZE_AUTO_MS) return;
-    }
-    try { localStorage.setItem(REANALYZE_KEY, String(Date.now())); } catch (e) {}
-    state.reanalyzeBusy = true;
-    const btn = document.getElementById('sup-refresh-btn');
-    if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
-    setUpdatedLabel('Re-analyzing all chats...');
-    try {
-      let res = null;
-      for (let round = 0; round < 3; round++) {   // the function stops after ~110 s; continue if chats remain
-        res = await callFunction('support_draft', { op: 'reanalyze', hours: 24 });
-        if (!res.ok || !res.data.remaining) break;
-      }
-      if (res && res.ok) flash(`Re-analyzed ${res.data.processed} of ${res.data.total} chats${res.data.errors ? ` (${res.data.errors} failed)` : ''}`);
-      else flash(res ? failureText(res, 'Re-analysis failed') : 'Re-analysis failed', true);
-    } catch (e) {
-      flash(safeErrorText(e && e.message, 'Re-analysis failed'), true);
-    } finally {
-      state.reanalyzeBusy = false;
-      if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
-      refreshInbox();
-    }
-  }
-
   function onSignIn() {
     state.signedIn = true;
-    state.phase = 'idle';
     renderList();
-    syncEmptyState();
-    refreshInbox();
-    reanalyzeAll(true);
-    if (!state.refreshTimer) state.refreshTimer = setInterval(tick, REFRESH_MS);
+    fullRefresh();
+    schedulePoll();
   }
 
-  // Wipes everything that belongs to the signed-in user: timers, data in memory and on screen
   function onSignOut() {
     state.signedIn = false;
-    if (state.refreshTimer) {
-      clearInterval(state.refreshTimer);
-      state.refreshTimer = null;
-    }
-    if (state.flashTimer) {
-      clearTimeout(state.flashTimer);
-      state.flashTimer = null;
-    }
-    if (state.active && state.active.guardTimer) clearTimeout(state.active.guardTimer);
-    state.active = null;
-    state.phase = 'idle';
-    state.errorText = '';
-    state.items = [];
-    state.counts = { draft: 0, escalate: 0, no_reply: 0 };
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+    state.loaded = false;
+    state.chats = new Map();
+    state.maxId = 0;
     state.search = '';
-    state.edits.clear();
-    state.closedIds.clear();
-    state.inboxBusy = false;
-    state.kickBusy = false;
-    state.lastAttemptAt = 0;
-    chatView.reset();
-    el.messages.replaceChildren();
-    el.review.replaceChildren();
+    state.pollBusy = false;
+    state.fullBusy = false;
+    el.search.value = '';
+    el.textarea.value = '';
+    setStatus('');
+    setUpdated('');
+    closeChat();
     el.list.replaceChildren();
-    showBanner('');
-    if (el.flash) {
-      el.flash.textContent = '';
-      el.flash.style.display = 'none';
-    }
-    if (el.searchInput) el.searchInput.value = '';
-    if (el.phone) el.phone.textContent = '';
-    if (el.profileName) el.profileName.textContent = '';
-    if (el.headerPills) el.headerPills.replaceChildren();
-    if (el.waLink) el.waLink.removeAttribute('href');
-    setUpdatedLabel('');
     renderCounts();
-    el.activeView.style.display = 'none';
-    el.emptyState.style.display = '';
-    el.panel.classList.remove('active-mobile');
-    syncEmptyState();
   }
 
   function onShow() {
-    // Sizes could not be measured while the tab was hidden
-    if (state.active) {
-      state.active.fields.forEach(f => autoGrow(f.textarea));
-      if (state.active.replyBox) autoGrow(state.active.replyBox);
-    }
-    refreshInbox();
+    poll();
+    schedulePoll();
+    if (state.active && window.matchMedia('(min-width: 769px)').matches) el.textarea.focus();
   }
 
-  // =========================================================================
-  // Event wiring
-  // =========================================================================
-  el.filterPills.forEach(pill => {
-    pill.addEventListener('click', () => {
-      el.filterPills.forEach(p => p.classList.remove('active'));
-      pill.classList.add('active');
-      const filter = pill.getAttribute('data-sup-filter');
-      state.filter = DECISIONS.includes(filter) ? filter : 'draft';
-      el.list.scrollTop = 0;
-      renderList();
-    });
-  });
-  const refreshBtn = document.getElementById('sup-refresh-btn');
-  if (refreshBtn) refreshBtn.addEventListener('click', () => reanalyzeAll(false));
-  if (el.searchInput) {
-    el.searchInput.addEventListener('input', (e) => {
-      state.search = e.target.value;
-      renderList();
-    });
-  }
-  // Keep the customer's last message in view while pictures load or the review desk changes height,
-  // unless the employee scrolled up to read older messages
-  let stickToBottom = true;
-  const pinMessages = () => {
-    if (stickToBottom) el.messages.scrollTop = el.messages.scrollHeight;
-  };
-  el.messages.addEventListener('scroll', () => {
-    stickToBottom = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 60;
-  }, { passive: true });
-  el.messages.addEventListener('load', pinMessages, true); // load does not bubble: capture it
-  if ('ResizeObserver' in window) new ResizeObserver(pinMessages).observe(el.messages);
-
-  if (el.backBtn) el.backBtn.addEventListener('click', () => el.panel.classList.remove('active-mobile'));
-  document.addEventListener('keydown', handleShortcut);
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.signedIn && Date.now() - state.lastAttemptAt > 5000) tick();
-  });
-
-  core.registerView('support', { onSignIn, onSignOut, onShow, refresh: refreshInbox });
+  core.registerView('support', { onSignIn, onSignOut, onShow, onHide: schedulePoll, refresh: fullRefresh });
 
 })();
