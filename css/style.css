@@ -3041,3 +3041,13 @@ html, body {
 #view-support .chat-msg.sup-failed .msg-bubble { outline: 1px solid rgba(244, 63, 94, 0.7); }
 #view-support .chat-msg.sup-failed .msg-meta { color: #fda4af; }
 #view-support .send-status-line.error { color: #fda4af; }
+#view-support .conv-item.sup-is-unread .conv-name { font-weight: 800; color: var(--text-main); }
+#view-support .conv-time.sup-time-unread { color: #25d366; font-weight: 700; }
+#view-support .conv-subline { align-items: center; }
+.sup-unread-badge {
+  flex: none; margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: #25d366; color: #0b141a; font-size: 0.7rem; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.sup-unread-badge:empty { min-width: 12px; width: 12px; height: 12px; padding: 0; }
+@media (max-width: 768px) { #sup-mark-unread span { display: none; } }

@@ -26,6 +26,9 @@
   const PLACEHOLDER = '[Outgoing Message]';
   const MATCH_WINDOW_MS = 3 * 60 * 1000; // a BSB placeholder row this close to a known send gets its text
   const WA_WINDOW_MS = 24 * 3600 * 1000;
+  const FILTER_KEY = 'support_filter';
+  const FILTERS = ['all', 'unread', 'waiting'];
+  const BASE_TITLE = document.title;
   const MSG_COLUMNS = 'id,chat_id,contact,profile_name,message,direction,media_type,media_url,timestamp';
 
   const state = {
@@ -33,7 +36,9 @@
     loaded: false,
     chats: new Map(),     // contact -> chat summary
     maxId: 0,             // highest bsb_messages.id seen
-    filter: 'waiting',
+    filter: 'all',
+    readAt: new Map(),    // contact -> when this browser marked it read (beats a stale list refresh)
+    markTimer: null,
     search: '',
     active: null,         // { contact, ids:Set, sent:[{text,at,used}], lastTs }
     pollTimer: null,
@@ -51,6 +56,8 @@
     tabCount: $('tab-count-support'),
     countBadge: $('sup-count-badge'),
     countWaiting: $('sup-count-waiting'),
+    countUnread: $('sup-count-unread'),
+    markUnread: $('sup-mark-unread'),
     countAll: $('sup-count-all'),
     updated: $('sup-updated'),
     search: $('sup-search-input'),
@@ -99,6 +106,61 @@
     return c.lastIncoming && Date.now() - c.lastAt < WA_WINDOW_MS;
   }
 
+  function unreadOf(c) {
+    return c.unread > 0 || c.marked;
+  }
+
+  // The employee is looking at this chat right now
+  function isLooking(contact) {
+    return !!(state.active && state.active.contact === contact && !document.hidden && core.activeTab() === 'support');
+  }
+
+  async function rpcMark(contact, unread) {
+    try {
+      const { error } = await db().rpc('support_mark_read', { p_contact: contact, p_unread: unread });
+      if (error) throw error;
+    } catch (e) {
+      console.warn('[support_mark_read]', safeErrorText(e));
+    }
+  }
+
+  function markRead(contact) {
+    const c = state.chats.get(contact);
+    state.readAt.set(contact, Date.now());
+    if (c && !unreadOf(c) && c.readSynced) return;
+    if (c) {
+      c.unread = 0;
+      c.marked = false;
+      c.readSynced = true;
+    }
+    queueRender();
+    rpcMark(contact, false);
+  }
+
+  // New message in the chat being read: mark it read, at most once per 2 s
+  function scheduleMarkRead(contact) {
+    if (state.markTimer) return;
+    state.markTimer = setTimeout(() => {
+      state.markTimer = null;
+      if (isLooking(contact)) {
+        const c = state.chats.get(contact);
+        if (c) c.readSynced = false;
+        markRead(contact);
+      }
+    }, 2000);
+  }
+
+  function markUnread(contact) {
+    const c = state.chats.get(contact);
+    state.readAt.delete(contact);
+    if (c) {
+      c.marked = true;
+      c.readSynced = false;
+    }
+    rpcMark(contact, true);
+    closeChat();
+  }
+
   function setUpdated(t, warn) {
     if (!el.updated) return;
     el.updated.textContent = t;
@@ -118,8 +180,15 @@
     const incoming = isIncoming(row.direction);
     let c = state.chats.get(contact);
     if (!c) {
-      c = { contact, name: '', lastAt: 0, lastId: 0, preview: '', lastIncoming: false, lastIncomingAt: 0 };
+      c = { contact, name: '', lastAt: 0, lastId: 0, preview: '', lastIncoming: false, lastIncomingAt: 0, unread: 0, marked: false, countedId: 0 };
       state.chats.set(contact, c);
+    }
+    const id = Number(row.id) || 0;
+    if (id > c.countedId) {
+      c.countedId = id;
+      if (!incoming) c.unread = 0;                    // a reply (from anywhere) clears it, like WhatsApp
+      else if (!isLooking(contact)) c.unread += 1;
+      else scheduleMarkRead(contact);
     }
     if (incoming && row.profile_name) c.name = text(row.profile_name).slice(0, 80);
     if (incoming && at > c.lastIncomingAt) c.lastIncomingAt = at;
@@ -155,8 +224,17 @@
           lastId: Number(r.last_id) || 0,
           preview: previewOf(r.last_message, r.last_media_type, incoming),
           lastIncoming: incoming,
-          lastIncomingAt: ms(r.last_incoming_at)
+          lastIncomingAt: ms(r.last_incoming_at),
+          unread: Math.max(0, Number(r.unread_count) || 0),
+          marked: r.marked_unread === true,
+          countedId: Number(r.last_id) || 0
         });
+        const c = next.get(r.contact);
+        const localRead = state.readAt.get(r.contact);
+        if (isLooking(r.contact) || (localRead && localRead >= c.lastIncomingAt)) {
+          c.unread = 0;
+          c.marked = false;
+        }
         top = Math.max(top, Number(r.last_id) || 0);
       });
       // Only the first load sets where the poll starts; later it must not skip rows the open chat needs
@@ -181,7 +259,7 @@
   }
 
   async function poll() {
-    if (!state.signedIn || state.pollBusy || document.hidden) return;
+    if (!state.signedIn || state.pollBusy) return;
     if (!state.loaded || Date.now() - state.lastFull > FULL_REFRESH_MS) {
       await fullRefresh();
       return;
@@ -217,7 +295,7 @@
   function schedulePoll() {
     if (state.pollTimer) clearTimeout(state.pollTimer);
     if (!state.signedIn) return;
-    const visible = core.activeTab() === 'support';
+    const visible = core.activeTab() === 'support' && !document.hidden;
     state.pollTimer = setTimeout(async () => {
       await poll();
       schedulePoll();
@@ -230,17 +308,22 @@
   function queueRender() {
     if (state.renderQueued) return;
     state.renderQueued = true;
-    requestAnimationFrame(() => {
+    const run = () => {
       state.renderQueued = false;
       renderList();
-    });
+    };
+    // Background tabs get no animation frames; the unread count in the title must still update
+    if (document.hidden) setTimeout(run, 0);
+    else requestAnimationFrame(run);
   }
 
   function visibleChats() {
     const q = state.search.trim().toLowerCase();
     const qDigits = q.replace(/\D/g, '');
     return Array.from(state.chats.values())
-      .filter(c => state.filter === 'all' || isWaiting(c) || (state.active && state.active.contact === c.contact))
+      .filter(c => state.filter === 'all'
+        || (state.active && state.active.contact === c.contact)
+        || (state.filter === 'unread' ? unreadOf(c) : isWaiting(c)))
       .filter(c => !q
         || c.name.toLowerCase().includes(q)
         || c.preview.toLowerCase().includes(q)
@@ -250,12 +333,21 @@
 
   function renderCounts() {
     let waiting = 0;
-    state.chats.forEach(c => { if (isWaiting(c)) waiting++; });
+    let unread = 0;
+    state.chats.forEach(c => {
+      if (isWaiting(c)) waiting++;
+      if (unreadOf(c)) unread++;
+    });
     const all = state.chats.size;
     if (el.countWaiting) el.countWaiting.textContent = String(waiting);
+    if (el.countUnread) el.countUnread.textContent = String(unread);
     if (el.countAll) el.countAll.textContent = String(all);
-    if (el.countBadge) el.countBadge.textContent = String(state.filter === 'all' ? all : waiting);
-    if (el.tabCount) el.tabCount.textContent = String(waiting);
+    if (el.countBadge) el.countBadge.textContent = String(state.filter === 'all' ? all : state.filter === 'unread' ? unread : waiting);
+    if (el.tabCount) {
+      el.tabCount.textContent = String(unread);
+      el.tabCount.style.display = unread ? '' : 'none';
+    }
+    document.title = unread ? `(${unread}) ${BASE_TITLE}` : BASE_TITLE;
   }
 
   function renderList() {
@@ -269,7 +361,7 @@
     const chats = visibleChats();
     const prevScroll = el.list.scrollTop;
     if (!chats.length) {
-      el.list.replaceChildren(createEl('div', 'sup-list-notice', state.search ? 'No chat matches your search.' : (state.filter === 'waiting' ? 'Nobody is waiting for a reply.' : 'No chats in the last 3 days.')));
+      el.list.replaceChildren(createEl('div', 'sup-list-notice', state.search ? 'No chat matches your search.' : (state.filter === 'unread' ? 'No unread chats.' : state.filter === 'waiting' ? 'Nobody is waiting for a reply.' : 'No chats in the last 3 days.')));
       return;
     }
     const frag = document.createDocumentFragment();
@@ -278,12 +370,15 @@
       item.dataset.contact = c.contact;
       const label = c.name || formatPhoneDisplay(c.contact);
       const initial = (Array.from(label.replace(/^\+/, '').trim())[0] || '?').toUpperCase();
-      const avatar = createEl('div', `conv-avatar${isWaiting(c) ? ' incoming-indicator' : ''}`, initial);
+      const unread = unreadOf(c);
+      if (unread) item.classList.add('sup-is-unread');
+      const avatar = createEl('div', 'conv-avatar', initial);
       const info = createEl('div', 'conv-info');
       const head = createEl('div', 'conv-header-line');
-      head.append(createEl('span', 'conv-name', label), createEl('span', 'conv-time', formatRelativeTime(new Date(c.lastAt).toISOString())));
+      head.append(createEl('span', 'conv-name', label), createEl('span', `conv-time${unread ? ' sup-time-unread' : ''}`, formatRelativeTime(new Date(c.lastAt).toISOString())));
       const sub = createEl('div', 'conv-subline');
-      sub.append(createEl('span', `conv-preview${isWaiting(c) ? ' sup-unread' : ''}`, c.preview || '...'));
+      sub.append(createEl('span', `conv-preview${unread ? ' sup-unread' : ''}`, c.preview || '...'));
+      if (unread) sub.appendChild(createEl('span', 'sup-unread-badge', c.unread > 0 ? (c.unread > 99 ? '99+' : String(c.unread)) : ''));
       info.append(head, sub);
       if (c.name) info.appendChild(createEl('div', 'sup-item-phone', formatPhoneDisplay(c.contact)));
       item.append(avatar, info);
@@ -321,6 +416,8 @@
     const epoch = core.authEpoch();
     const a = { contact, ids: new Set(), sent: [], lastTs: 0 };
     state.active = a;
+    if (c.readSynced === undefined || unreadOf(c)) c.readSynced = false;
+    if (isLooking(contact)) markRead(contact);
 
     el.empty.style.display = 'none';
     el.activeView.style.display = 'flex';
@@ -523,7 +620,9 @@
   });
   el.pills.forEach(p => p.addEventListener('click', () => {
     el.pills.forEach(x => x.classList.toggle('active', x === p));
-    state.filter = p.getAttribute('data-sup-filter') === 'all' ? 'all' : 'waiting';
+    const f = p.getAttribute('data-sup-filter');
+    state.filter = FILTERS.includes(f) ? f : 'all';
+    try { localStorage.setItem(FILTER_KEY, state.filter); } catch (e) {}
     el.list.scrollTop = 0;
     renderList();
   }));
@@ -541,6 +640,12 @@
   });
   el.sendBtn.addEventListener('click', submit);
   if (el.back) el.back.addEventListener('click', closeChat);
+  if (el.markUnread) el.markUnread.addEventListener('click', () => { if (state.active) markUnread(state.active.contact); });
+  try {
+    const f = localStorage.getItem(FILTER_KEY);
+    if (FILTERS.includes(f)) state.filter = f;
+  } catch (e) {}
+  el.pills.forEach(x => x.classList.toggle('active', x.getAttribute('data-sup-filter') === state.filter));
 
   document.addEventListener('keydown', e => {
     if (core.activeTab() !== 'support') return;
@@ -556,7 +661,10 @@
     }
   });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.signedIn) poll();
+    if (!document.hidden && state.signedIn) {
+      if (state.active && isLooking(state.active.contact)) markRead(state.active.contact);
+      poll();
+    }
   });
 
   // =========================================================================
@@ -575,7 +683,11 @@
     state.pollTimer = null;
     state.loaded = false;
     state.chats = new Map();
+    state.readAt = new Map();
+    if (state.markTimer) clearTimeout(state.markTimer);
+    state.markTimer = null;
     state.maxId = 0;
+    document.title = BASE_TITLE;
     state.search = '';
     state.pollBusy = false;
     state.fullBusy = false;
@@ -589,6 +701,7 @@
   }
 
   function onShow() {
+    if (state.active && isLooking(state.active.contact)) markRead(state.active.contact);
     poll();
     schedulePoll();
     if (state.active && window.matchMedia('(min-width: 769px)').matches) el.textarea.focus();

@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
 
   <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20261102_chat" />
+  <link rel="stylesheet" href="css/style.css?v=20261102_unread" />
 
   <!-- Supabase JS Client v2 (CDN, pinned to an exact version + Subresource Integrity) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -74,7 +74,7 @@
         <button type="button" class="suite-tab-btn" data-tab="support" role="tab" aria-selected="false" title="Live WhatsApp chats">
           <i class="fa-solid fa-headset"></i>
           <span>Support</span>
-          <span id="tab-count-support" class="nav-pill" title="Chats where the customer wrote last">0</span>
+          <span id="tab-count-support" class="nav-pill" title="Unread chats" style="display: none;">0</span>
         </button>
       </nav>
 
@@ -252,8 +252,9 @@
               </div>
 
               <div class="filter-pills">
-                <button type="button" class="pill-btn active" data-sup-filter="waiting" title="The customer wrote last">Waiting <span id="sup-count-waiting" class="pill-count">0</span></button>
-                <button type="button" class="pill-btn" data-sup-filter="all" title="Every chat of the last 3 days">All <span id="sup-count-all" class="pill-count">0</span></button>
+                <button type="button" class="pill-btn active" data-sup-filter="all" title="Every chat of the last 3 days">All <span id="sup-count-all" class="pill-count">0</span></button>
+                <button type="button" class="pill-btn" data-sup-filter="unread" title="Chats with messages nobody has opened">Unread <span id="sup-count-unread" class="pill-count">0</span></button>
+                <button type="button" class="pill-btn" data-sup-filter="waiting" title="The customer wrote last">Waiting <span id="sup-count-waiting" class="pill-count">0</span></button>
               </div>
             </div>
 
@@ -281,6 +282,9 @@
                   </div>
                 </div>
                 <div class="chat-header-actions">
+                  <button type="button" id="sup-mark-unread" class="btn-nav" title="Mark as unread">
+                    <i class="fa-solid fa-envelope"></i> <span>Mark unread</span>
+                  </button>
                   <a id="sup-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
                     <i class="fa-brands fa-whatsapp"></i> <span>WhatsApp Web</span>
                   </a>
@@ -313,6 +317,6 @@
   <script src="https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/recorder.min.js" integrity="sha384-gh3hk6R0W1LEVQaMXfcGb6beNwAVN+/dwrc46kqaqxNv3cmsb352oE0mmZTCzj8W" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="js/config.js?v=20261014_voice"></script>
   <script src="js/app.js?v=20261102_chat"></script>
-  <script src="js/support.js?v=20261102_chat"></script>
+  <script src="js/support.js?v=20261102_unread"></script>
 </body>
 </html>
