@@ -1179,43 +1179,45 @@ html, body {
    FOLLOWUP SUITE - MULTI-STEP NAVIGATION & VIEWS
    ========================================================================== */
 
-/* Suite Nav Tabs in Header */
-.suite-nav-tabs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(15, 23, 42, 0.6);
-  padding: 4px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+/* Panel switch in the header: Follow-up is the default view; Support is a small icon button,
+   and while Support is open a "Follow-up" back button replaces it (the active one is hidden) */
+.suite-tab-btn.active {
+  display: none;
 }
 
-.suite-tab-btn {
+.nav-support-discreet {
+  position: relative;
   background: transparent;
   border: none;
   color: var(--text-muted);
-  padding: 6px 14px;
+  opacity: 0.55;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border-radius: var(--radius-sm);
-  font-size: 0.82rem;
-  font-weight: 700;
+  font-size: 0.85rem;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  transition: all 0.2s ease;
-  user-select: none;
+  justify-content: center;
+  transition: opacity 0.2s, background 0.2s, color 0.2s;
 }
 
-.suite-tab-btn:hover {
+.nav-support-discreet:hover,
+.nav-support-discreet:focus-visible {
+  opacity: 1;
   color: var(--text-main);
   background: rgba(255, 255, 255, 0.06);
 }
 
-.suite-tab-btn.active {
-  color: #fff;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.4), rgba(168, 85, 247, 0.4));
-  border: 1px solid rgba(168, 85, 247, 0.4);
-  box-shadow: 0 0 12px rgba(99, 102, 241, 0.25);
+/* Unread count stays visible as a small badge on the icon */
+.nav-support-discreet .nav-pill {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  font-size: 0.6rem;
+  line-height: 1.3;
+  padding: 0 4px;
 }
 
 .nav-pill {
@@ -2451,7 +2453,6 @@ html, body {
 }
 
 .suite-tab-btn {
-  border: 1px solid transparent;
   white-space: nowrap;
   font-family: inherit;
 }
@@ -2974,12 +2975,6 @@ html, body {
   .top-navbar .brand-title {
     display: none;
   }
-  .suite-tab-btn {
-    padding: 6px 9px;
-  }
-  .suite-tab-btn > i {
-    display: none;
-  }
   #view-support .sup-back-btn {
     display: flex;
   }
@@ -3017,10 +3012,6 @@ html, body {
   }
   .nav-actions .btn-nav {
     padding: 7px 9px;
-  }
-  .suite-nav-tabs {
-    padding: 3px;
-    gap: 3px;
   }
   .sup-banner {
     padding: 8px 12px;

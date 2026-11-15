@@ -45,7 +45,6 @@
     activeTab: 'followup'  // 'followup' or the id of a view registered by another script
   };
 
-  const TAB_STORAGE_KEY = 'followup_active_tab';
   const views = {};        // extra top-bar tabs (js/support.js), see registerView()
   let chatView = null;     // message renderer of the follow-up chat pane
 
@@ -482,7 +481,7 @@
   }
 
   // =========================================================================
-  // Top-bar tabs: "Follow-up" (this file) and views registered by other scripts
+  // Panels: "Follow-up" (this file, the default) and views registered by other scripts
   // =========================================================================
   // def: { onSignIn(), onSignOut(), onShow(), onHide(), refresh() }, all optional. The view's
   // markup is the <section id="view-{id}"> in index.html, its tab the button with data-tab="{id}".
@@ -504,16 +503,7 @@
     }
   }
 
-  function storedTab() {
-    try {
-      const tab = localStorage.getItem(TAB_STORAGE_KEY);
-      return tab && views[tab] ? tab : 'followup';
-    } catch (e) {
-      return 'followup';
-    }
-  }
-
-  function switchTab(tab, remember) {
+  function switchTab(tab) {
     const next = views[tab] ? tab : 'followup';
     const prev = state.activeTab;
     state.activeTab = next;
@@ -528,9 +518,6 @@
       if (section) section.classList.toggle('active', id === next);
     });
     if (el.triageStatus) el.triageStatus.style.display = next === 'followup' ? '' : 'none';
-    if (remember) {
-      try { localStorage.setItem(TAB_STORAGE_KEY, next); } catch (e) {}
-    }
     if (prev !== next) {
       callView(prev, 'onHide');
       callView(next, 'onShow');
@@ -574,7 +561,7 @@
     if (!state.refreshTimer) state.refreshTimer = setInterval(refreshInbox, REFRESH_MS);
     if (wasSignedOut) {
       Object.keys(views).forEach(id => callView(id, 'onSignIn'));
-      switchTab(storedTab(), false);
+      switchTab('followup'); // always open on Follow-up
     }
   }
 
@@ -617,9 +604,9 @@
     el.loginView.style.display = 'flex';
     el.appView.style.display = 'none';
     if (el.loginError) el.loginError.textContent = '';
-    // Other tabs wipe their own state and DOM; the next sign-in reopens the remembered tab
+    // Other tabs wipe their own state and DOM; the next sign-in opens Follow-up
     Object.keys(views).forEach(id => callView(id, 'onSignOut'));
-    switchTab('followup', false);
+    switchTab('followup');
   }
 
   async function handleLogin(e) {
@@ -1443,7 +1430,7 @@
         btn.style.display = 'none'; // its script did not load
         return;
       }
-      btn.addEventListener('click', () => switchTab(tab, true));
+      btn.addEventListener('click', () => switchTab(tab));
     });
 
     const btnIngestBackup = document.getElementById('btn-ingest-backup');
