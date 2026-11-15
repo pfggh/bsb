@@ -13,6 +13,10 @@
   const HOURS_LOOKBACK_CONVS = 24; // 24h window
   const MIN_HOURS_OLD = 2.0;       // At least 2h old
   const REFRESH_MS = 3 * 60 * 1000;
+  // A chat you just messaged stays in the list (greyed, "Sent") for this long. The inbox query drops
+  // it meanwhile: its newest message is under 2h old and send_queue has a send from the last hour.
+  const SENT_KEEP_MS = 2 * 60 * 60 * 1000;
+  const SENT_STORAGE_KEY = 'followup_recent_sends'; // sessionStorage, cleared on sign-out
   const MAX_BACKUP_BYTES = 50 * 1024 * 1024; // upper bound for an "Ingest Backup" CSV
   const MAX_MEDIA_BYTES = 30 * 1024 * 1024;  // upper bound for one image / voice note
 
@@ -25,7 +29,8 @@
     FOLLOWED_UP: 'Final follow-up sent',
     NOT_RELEVANT: 'Not a customer',
     MANUAL_DONE: 'Marked done',
-    MANUAL_SHOW: 'Kept visible'
+    MANUAL_SHOW: 'Kept visible',
+    SENT: 'Follow-up sent'
   };
 
   const state = {
@@ -471,6 +476,79 @@
     return { render, append, notice, reset, appendOutgoing, appendOutgoingVoice };
   }
 
+  // =========================================================================
+  // Recent sends: contact -> { at, name, has_tracking, ad_id, text }. Only the phone, name and time
+  // are kept in sessionStorage (so a reload keeps them); the sent text stays in memory only.
+  // =========================================================================
+  const recentSends = new Map();
+
+  function loadRecentSends() {
+    recentSends.clear();
+    try {
+      const raw = JSON.parse(sessionStorage.getItem(SENT_STORAGE_KEY) || '[]');
+      if (!Array.isArray(raw)) return;
+      raw.forEach(r => {
+        if (r && typeof r.contact === 'string' && Number.isFinite(r.at)) {
+          recentSends.set(r.contact, { at: r.at, name: typeof r.name === 'string' ? r.name : '', has_tracking: !!r.has_tracking, ad_id: typeof r.ad_id === 'string' ? r.ad_id : null, text: '' });
+        }
+      });
+    } catch (e) {}
+  }
+
+  function saveRecentSends() {
+    try {
+      const rows = [];
+      recentSends.forEach((v, contact) => rows.push({ contact, at: v.at, name: v.name, has_tracking: v.has_tracking, ad_id: v.ad_id }));
+      if (rows.length) sessionStorage.setItem(SENT_STORAGE_KEY, JSON.stringify(rows));
+      else sessionStorage.removeItem(SENT_STORAGE_KEY);
+    } catch (e) {}
+  }
+
+  function clearRecentSends() {
+    recentSends.clear();
+    try { sessionStorage.removeItem(SENT_STORAGE_KEY); } catch (e) {}
+  }
+
+  function rememberSend(contact, text) {
+    const conv = state.conversations.find(c => c.contact === contact) || state.activeConversationData || {};
+    recentSends.set(contact, {
+      at: Date.now(),
+      name: String(conv.profile_name || ''),
+      has_tracking: !!conv.has_tracking,
+      ad_id: conv.ad_id ? String(conv.ad_id) : null,
+      text: String(text || '')
+    });
+    saveRecentSends();
+  }
+
+  // Server rows plus the chats messaged in the last 2h (those replace their server row, at the end)
+  function withRecentSends(list) {
+    const now = Date.now();
+    let pruned = false;
+    recentSends.forEach((v, contact) => {
+      if (now - v.at >= SENT_KEEP_MS) { recentSends.delete(contact); pruned = true; }
+    });
+    if (pruned) saveRecentSends();
+    if (!recentSends.size) return list;
+    const sent = [];
+    recentSends.forEach((v, contact) => sent.push({
+      contact,
+      profile_name: v.name,
+      last_message: v.text || 'Follow-up sent',
+      last_direction: 'outgoing',
+      last_timestamp: new Date(v.at).toISOString(),
+      has_tracking: v.has_tracking,
+      ad_id: v.ad_id,
+      triage_fresh: true,
+      triage_status: 'SENT',
+      triage_verdict: null,
+      triage_reason: '',
+      sent_recently: true
+    }));
+    sent.sort((a, b) => (a.last_timestamp < b.last_timestamp ? 1 : -1));
+    return list.filter(c => !recentSends.has(c.contact)).concat(sent);
+  }
+
   // A conversation is hidden only by a fresh HIDE verdict (fresh = no new message since it was checked)
   function isHidden(c) {
     return c.triage_fresh && c.triage_verdict === 'HIDE';
@@ -551,7 +629,10 @@
 
   function setAuthenticated(session) {
     const wasSignedOut = !state.session;
-    if (wasSignedOut) state.authEpoch++;
+    if (wasSignedOut) {
+      state.authEpoch++;
+      loadRecentSends();
+    }
     state.session = session;
     if (el.userEmailDisplay) el.userEmailDisplay.textContent = session.user?.email || "Admin";
     if (el.passwordInput) el.passwordInput.value = '';
@@ -579,6 +660,7 @@
     }
     chatView.reset();
     state.conversations = [];
+    clearRecentSends();
     state.filteredConversations = [];
     state.activeContact = null;
     state.activeConversationData = null;
@@ -666,7 +748,7 @@
       });
       if (epoch !== state.authEpoch) return; // logged out meanwhile
       if (!res.error && Array.isArray(res.data)) {
-        state.conversations = res.data.filter(c => c && typeof c === 'object');
+        state.conversations = withRecentSends(res.data.filter(c => c && typeof c === 'object'));
         filterAndRenderConversations();
         if (state.activeContact) {
           const fresh = state.conversations.find(c => c.contact === state.activeContact);
@@ -770,10 +852,11 @@
     }
 
     state.filteredConversations = list;
-    if (el.pillCountTodo) el.pillCountTodo.textContent = visible.length;
+    const todo = visible.filter(c => !c.sent_recently).length; // sent chats are shown but need nothing
+    if (el.pillCountTodo) el.pillCountTodo.textContent = todo;
     if (el.pillCountUnanswered) el.pillCountUnanswered.textContent = visible.filter(isUnanswered).length;
     if (el.pillCountHidden) el.pillCountHidden.textContent = all.length - visible.length;
-    if (el.convCountBadge) el.convCountBadge.textContent = visible.length;
+    if (el.convCountBadge) el.convCountBadge.textContent = todo;
     if (el.total24hCount) el.total24hCount.textContent = `${all.length} chats in window`;
     renderConversationList();
     if (!state.isTriaging) updateTriageStatus();
@@ -791,6 +874,11 @@
   }
 
   function triagePill(c) {
+    if (c.sent_recently) {
+      const sent = createEl('span', 'triage-pill pill-sent');
+      sent.append(icon('fa-solid fa-check'), ' Sent');
+      return sent;
+    }
     if (!c.triage_fresh) {
       const checking = createEl('span', 'triage-pill pill-checking');
       checking.append(icon('fa-solid fa-circle-notch fa-spin'), ' Checking');
@@ -816,7 +904,7 @@
 
     const frag = document.createDocumentFragment();
     state.filteredConversations.forEach(c => {
-      const item = createEl('div', `conv-item${state.activeContact === c.contact ? ' active' : ''}`);
+      const item = createEl('div', `conv-item${state.activeContact === c.contact ? ' active' : ''}${c.sent_recently ? ' conv-sent' : ''}`);
       item.dataset.contact = String(c.contact);
       item.addEventListener('click', () => selectConversation(c));
 
@@ -868,6 +956,13 @@
     el.btnMarkDone.style.display = hidden ? 'none' : 'flex';
     el.btnShowAgain.style.display = hidden ? 'flex' : 'none';
     el.chatTriageBar.replaceChildren();
+    if (c.sent_recently) {
+      el.btnMarkDone.style.display = 'none';
+      const at = new Date(c.last_timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      el.chatTriageBar.className = 'triage-bar bar-sent';
+      el.chatTriageBar.append(icon('fa-solid fa-check'), ' ', createEl('strong', '', `Follow-up sent at ${at}`), ' · stays in the list for 2h');
+      return;
+    }
     if (!c.triage_fresh) {
       el.chatTriageBar.className = 'triage-bar bar-checking';
       el.chatTriageBar.append(icon('fa-solid fa-circle-notch fa-spin'), ' Not checked yet since the last message');
@@ -935,7 +1030,7 @@
     const c = state.activeConversationData;
     if (!c) return openConversation(state.filteredConversations[0]);
     const next = nextConversationAfter(c.contact);
-    if (!isHidden(c) && !(await setManualVerdict('HIDE'))) return;
+    if (!c.sent_recently && !isHidden(c) && !(await setManualVerdict('HIDE'))) return;
     if (next) openConversation(next);
   }
 
@@ -1070,9 +1165,14 @@
         // Only add the bubble if the same chat is still open
         if (state.activeContact === contact) chatView.appendOutgoing(text);
 
-        // The chat leaves the list now and comes back after 2h only if it still needs action
-        state.conversations = state.conversations.filter(c => normalizePhone(c.contact) !== dest);
+        // The chat stays in the list, greyed as "Sent", for 2h (the inbox query skips it meanwhile)
+        rememberSend(contact, text);
+        state.conversations = withRecentSends(state.conversations);
         filterAndRenderConversations();
+        if (state.activeContact === contact) {
+          const sentRow = state.conversations.find(c => c.contact === contact);
+          if (sentRow) { state.activeConversationData = sentRow; renderTriageBar(sentRow); }
+        }
       } else {
         // Short reason only; the full upstream answer is kept in send_queue, not shown on screen
         el.sendStatusLine.textContent = `Error: ${safeErrorText(resJson.message || resJson.error, 'message was not sent')}`;
@@ -1391,8 +1491,13 @@
         if (state.activeContact === contact) chatView.appendOutgoingVoice(URL.createObjectURL(blob));
         if (myEpoch === voice.epoch) discardVoiceNote(true);
         el.sendStatusLine.textContent = '✓ Voice note sent successfully!';
-        state.conversations = state.conversations.filter(c => normalizePhone(c.contact) !== dest);
+        rememberSend(contact, `[voice note] ${seconds}s`);
+        state.conversations = withRecentSends(state.conversations);
         filterAndRenderConversations();
+        if (state.activeContact === contact) {
+          const sentRow = state.conversations.find(c => c.contact === contact);
+          if (sentRow) { state.activeConversationData = sentRow; renderTriageBar(sentRow); }
+        }
       } else if (maybeSent) {
         if (myEpoch === voice.epoch) voice.maybeSent = true;
         el.sendStatusLine.textContent = 'Voice note may have been sent — check the chat before retrying';

@@ -2361,6 +2361,22 @@ html, body {
   border-color: rgba(16, 185, 129, 0.3);
 }
 
+.triage-pill.pill-sent {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+/* Messaged in the last 2h: kept in the list, greyed (js/app.js withRecentSends) */
+.conv-item.conv-sent {
+  opacity: 0.5;
+}
+
+.conv-item.conv-sent:hover,
+.conv-item.conv-sent.active {
+  opacity: 0.85;
+}
+
 .triage-pill.pill-checking {
   background: rgba(148, 163, 184, 0.12);
   color: var(--text-muted);
