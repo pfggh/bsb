@@ -92,21 +92,55 @@
   const fmtDate = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short' });
   const fmtDayLong = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' });
   const fmtFull = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const dayKey = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(d);
+  // Formatters are built once: an Intl.DateTimeFormat costs far more than formatting with it.
+  const fmtDayKey = new Intl.DateTimeFormat('en-CA', { timeZone: TZ });
+  const dayKey = (d) => fmtDayKey.format(d);
+  let dayRef = { min: -1, today: '', yday: '' };
+  function todayKeys() {
+    const m = Math.floor(now() / 60000);
+    if (dayRef.min !== m) dayRef = { min: m, today: dayKey(new Date(now())), yday: dayKey(new Date(now() - 86400000)) };
+    return dayRef;
+  }
+  const minute = () => Math.floor(now() / 60000);
 
   function listTime(ts) {
     if (!ts) return '';
     const d = new Date(ts);
-    if (dayKey(d) === dayKey(new Date(now()))) return fmtTime.format(d);
-    if (dayKey(d) === dayKey(new Date(now() - 86400000))) return 'Yesterday';
+    const k = dayKey(d), t = todayKeys();
+    if (k === t.today) return fmtTime.format(d);
+    if (k === t.yday) return 'Yesterday';
     if (now() - d.getTime() < 6 * 86400000) return fmtWeekday.format(d);
     return fmtDate.format(d);
   }
-  function dayLabel(d) {
-    const k = dayKey(d);
-    if (k === dayKey(new Date(now()))) return 'Today';
-    if (k === dayKey(new Date(now() - 86400000))) return 'Yesterday';
+  function dayLabel(d, k = dayKey(d)) {
+    const t = todayKeys();
+    if (k === t.today) return 'Today';
+    if (k === t.yday) return 'Yesterday';
     return fmtDayLong.format(d);
+  }
+  // Re-render guard: true when el already shows `key` (nothing to do).
+  function same(el, key) {
+    if (!el) return true;
+    if (el._k === key) return true;
+    el._k = key;
+    return false;
+  }
+  // Puts `want` (an array of nodes) into `box` in that order with as few DOM moves as possible.
+  // Nodes already in place are not touched, so media elements keep playing and focus/hover stay.
+  function reconcile(box, want) {
+    const keep = new Set(want);
+    for (let n = box.firstChild; n;) { const nx = n.nextSibling; if (!keep.has(n)) n.remove(); n = nx; }
+    let ref = box.firstChild;
+    for (const el of want) {
+      if (ref === el) { ref = el.nextSibling; continue; }
+      box.insertBefore(el, ref);
+    }
+  }
+  function inOrder(box, want) {
+    if (box.childNodes.length !== want.length) return false;
+    let n = box.firstChild;
+    for (const el of want) { if (n !== el) return false; n = n.nextSibling; }
+    return true;
   }
   function ago(ts) {
     const s = Math.max(0, (now() - Date.parse(ts)) / 1000);
@@ -193,6 +227,8 @@
     details: store('desk_details2') === true,
     notify: store('desk_notify') === true,
     lastLate: 0,
+    metaVer: 0,         // bumps when labels / channel names change (rows and bars show them)
+    listHover: false, listScrollAt: 0, listFrozen: false, listSig: null,
   };
   const now = () => Date.now() + S.skew;
   const sys = () => S.counts.sys || {};
@@ -203,6 +239,7 @@
     S.views = meta.views || [];
     S.labelById = new Map(S.labels.map((l) => [l.id, l]));
     S.channelNames = meta.channel_names || {};
+    S.metaVer++;
   }
   function labelChip(id, xs = true) {
     const l = S.labelById.get(id);
@@ -416,8 +453,10 @@
   }
   function renderNav() {
     const c = S.counts;
-    const s = sys();
     const isAdmin = S.me && S.me.role === 'admin';
+    if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
+    // the sidebar is rebuilt only when something it shows changed (not on every 8 s poll)
+    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin]))) return;
     $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))));
     // labels: BSB lists every custom label as a filter
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
@@ -425,7 +464,6 @@
     $('#navLabels').replaceChildren(...out);
     // channels (one entry per WhatsApp number / Instagram account)
     const lines = Object.entries(c.lines || {}).sort((x, y) => (y[1].recent - x[1].recent) || (y[1].uncomplete - x[1].uncomplete));
-    if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
     const chItem = (line, name, n, ic) => {
       const b = h('button', { class: `nav-item${S.line === line ? ' on' : ''}`, title: line ? `Only chats on ${name}` : 'Chats on every channel', onclick: () => setLine(line) },
         ic, h('span', { class: 'lbl' }, name), n ? h('span', { class: 'n' }, n > 999 ? '999+' : n) : null);
@@ -466,34 +504,78 @@
   // ------------------------------------------------------------------ list
 
   function listArgs(extra = {}) { return { view: S.view, line: S.line || null, q: S.q, ...extra }; }
-  function applyList(b, replace) {
+  // The user is "on" the list while the pointer is over it or it was scrolled in the last 4 s.
+  const listBusyUser = () => S.listHover || Date.now() - S.listScrollAt < 4000;
+  // Stable order: a poll does not shuffle rows the user is looking at. Rows keep their place
+  // unless the customer wrote again (then they float up to their time slot, like a new chat);
+  // the open chat never moves while it is open; new chats slot in by time. The plain server
+  // order (last message first) comes back when nobody is working the list (no chat open,
+  // pointer elsewhere).
+  function mergeOrder(old, rows) {
+    S.listFrozen = false;
+    if (!old.length) return rows;
+    const act = S.active ? S.active.contact : null;
+    if (!act && !listBusyUser()) return rows;
+    const fresh = new Map(rows.map((x) => [x.contact, x]));
+    const out = [];
+    const float = [];
+    for (const o of old) {
+      const n = fresh.get(o.contact);
+      if (!n) { if (o.contact === act) out.push(o); continue; }
+      fresh.delete(o.contact);
+      if (o.contact !== act && n.last_in_at && n.last_in_at !== o.last_in_at) float.push(n);
+      else out.push(n);
+    }
+    for (const n of rows) if (fresh.has(n.contact)) float.push(n);
+    // keep the server's relative order among the floating rows
+    const rank = new Map(rows.map((x, i) => [x.contact, i]));
+    float.sort((x, y) => rank.get(x.contact) - rank.get(y.contact));
+    for (const f of float) {
+      const i = out.findIndex((x) => x.contact !== act && x.last_at < f.last_at);
+      out.splice(i < 0 ? out.length : i, 0, f);
+    }
+    S.listFrozen = out.length !== rows.length || out.some((x, i) => x !== rows[i]);
+    return out;
+  }
+  function applyList(b, replace, reset = false) {
     if (b.counts) S.counts = b.counts;
     if (b.now) S.skew = Date.parse(b.now) - Date.now();
     // a chat being completed (undo bar showing) is already gone from the list
     const rows = (b.chats || []).filter((x) => !(pending && pending.contact === x.contact));
     if (replace) {
-      if (S.active && !rows.some((x) => x.contact === S.active.contact)) {
-        const keep = S.chats.find((x) => x.contact === S.active.contact);
-        if (keep) {
-          const i = rows.findIndex((x) => x.last_at < keep.last_at);
-          rows.splice(i < 0 ? rows.length : i, 0, keep);
-        }
+      const keep = S.active ? S.chats.find((x) => x.contact === S.active.contact) : null;
+      S.chats = reset ? rows : mergeOrder(S.chats, rows);
+      if (reset) S.listFrozen = false;
+      if (keep && !S.chats.some((x) => x.contact === keep.contact)) {
+        const i = S.chats.findIndex((x) => x.last_at < keep.last_at);
+        S.chats.splice(i < 0 ? S.chats.length : i, 0, keep);
       }
-      S.chats = rows;
       S.more = !S.view.startsWith('sys_') && rows.length >= (b._limit || 60);
     }
     renderNav();
     renderList();
     alertIfLate();
   }
-  async function refreshList(reset = false) {
+  // One inbox request at a time: calls made while one is running are folded into one follow-up.
+  // poll = a timer refresh: it sends the signature of the list it has, and the server answers
+  // "unchanged" (counts only) when the list is the same. Anything the user did asks for the
+  // full list (no signature), so it never waits for the next change to show.
+  let listBusy = false, listAgain = null;
+  async function refreshList(reset = false, poll = false) {
+    if (listBusy && !reset) { listAgain = listAgain === false ? false : poll; return; }
     const seq = ++S.listSeq;
+    listBusy = true;
     const limit = reset ? 60 : Math.min(200, Math.max(60, S.chats.length));
+    // (no signature either when our order was held for the user and could now go back to the server's)
+    const thaw = S.listFrozen && !S.active && !listBusyUser();
+    const sentSig = poll && !reset && !thaw && S.listSig && S.listSig.limit === limit ? S.listSig.sig : null;
     try {
-      const b = await api.call('inbox', listArgs({ limit }));
+      const b = await api.call('inbox', listArgs({ limit, ...(sentSig ? { sig: sentSig } : {}) }));
       if (seq !== S.listSeq) return;
       b._limit = limit;
-      applyList(b, true);
+      const same = !!(b.unchanged && sentSig && b.chats == null);
+      S.listSig = b.sig ? { sig: b.sig, limit } : null;
+      applyList(b, !same, reset);
       if (S.active && S.active.data) {
         const row = S.chats.find((x) => x.contact === S.active.contact);
         if (row && row.last_at !== S.active.data.conv.last_at) pollChat();
@@ -501,6 +583,11 @@
     } catch (e) {
       if (e.status === 401) { api.signOut(); return showLogin('Your access was revoked or expired'); }
       if (seq === S.listSeq) $('#viewCount').title = `offline: ${e.message}`;
+    } finally {
+      if (seq === S.listSeq) {
+        listBusy = false;
+        if (listAgain !== null) { const p = listAgain; listAgain = null; refreshList(false, p); }
+      }
     }
   }
   async function loadMore() {
@@ -519,7 +606,7 @@
   let listTimer = null;
   function loopList() {
     clearTimeout(listTimer);
-    listTimer = setTimeout(async () => { await refreshList(); loopList(); }, document.hidden ? C.pollHiddenMs : C.pollMs);
+    listTimer = setTimeout(async () => { await refreshList(false, true); loopList(); }, document.hidden ? C.pollHiddenMs : C.pollMs);
   }
 
   function preview(c) {
@@ -547,10 +634,17 @@
     if (unsolved) return h('span', { class: `badge-n dot${late ? ' late' : ''}`, title: why, 'aria-label': why });
     return null;
   }
+  // Everything a row shows, as one string: a row is rebuilt only when this changes.
+  function rowKey(c) {
+    const unsolved = c.sys && c.sys.kind === 'support' && c.sys.status === 'open';
+    const late = unsolved && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
+    return JSON.stringify([c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
+      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name]);
+  }
   function row(c) {
     const on = S.active && S.active.contact === c.contact;
     const sb = c.sys && c.sys.kind === 'sales' ? sysBadge(c.sys) : null;
-    return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}`, dataset: { contact: c.contact }, onclick: () => openChat(c.contact) },
+    return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}`, dataset: { contact: c.contact } },
       avatar(c),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
@@ -561,25 +655,92 @@
   }
   function rowLine(l) { return lineShort(l); }
   function shortLine(l) { const n = (S.channelNames || {})[l]; return n ? n.slice(0, 12) : /^\d{8,}$/.test(l) ? '…' + l.slice(-3) : l.replace(/^Channel /, ''); }
-  function renderList() {
-    $('#viewTitle').textContent = viewName();
+  // Row nodes by contact. The list is patched, never rebuilt: unchanged rows are not touched,
+  // changed rows are swapped in place, and the row under the user's eyes stays where it is.
+  const rowEls = new Map();
+  let moreEl = null;
+  function rowEl(c) {
+    const k = rowKey(c);
+    let el = rowEls.get(c.contact);
+    if (el && el._k === k) return el;
+    const n = row(c);
+    n._k = k;
+    if (el && el.isConnected) el.replaceWith(n);
+    rowEls.set(c.contact, n);
+    return n;
+  }
+  // The row to hold still: the open chat if it is on screen, else the first row on screen
+  // (only once the list is scrolled; at the very top new chats simply appear above).
+  function listAnchor(list, stays) {
+    const lt = list.getBoundingClientRect().top, lb = lt + list.clientHeight;
+    const act = S.active && rowEls.get(S.active.contact);
+    if (act && act.isConnected && stays.has(S.active.contact)) {
+      const r = act.getBoundingClientRect();
+      if (r.bottom > lt && r.top < lb) return { contact: S.active.contact, top: r.top };
+    }
+    if (list.scrollTop <= 0) return null;
+    for (const el of list.children) {
+      const ct = el.dataset.contact;
+      if (!ct || !stays.has(ct)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.bottom > lt) return { contact: ct, top: r.top };
+    }
+    return null;
+  }
+  function renderListHead() {
     const n = viewCount();
+    const title = viewName();
+    if (same($('#viewTitle'), JSON.stringify([title, n]))) return;
+    $('#viewTitle').textContent = title;
     $('#viewCount').textContent = n == null ? '' : n;
     $('#viewCount').hidden = n == null;
+  }
+  // noAnchor: the change is the user's own (V / undo): rows above stay, rows below slide.
+  function renderList(noAnchor = false) {
+    renderListHead();
     // BSB-style context: which channel and which view this list is
-    $('#ctxBar').replaceChildren(
-      h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), h('b', null, S.line ? lineName(S.line) : 'All channels'),
-        S.line ? h('button', { class: 'ctx-x', title: 'Show every channel', 'aria-label': 'Show every channel', onclick: () => setLine('') }, '×') : null));
+    if (!same($('#ctxBar'), `${S.line}|${S.metaVer}`)) {
+      $('#ctxBar').replaceChildren(
+        h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), h('b', null, S.line ? lineName(S.line) : 'All channels'),
+          S.line ? h('button', { class: 'ctx-x', title: 'Show every channel', 'aria-label': 'Show every channel', onclick: () => setLine('') }, '×') : null));
+    }
     const list = $('#list');
-    const top = list.scrollTop;
     if (!S.chats.length) {
       const done = S.view === 'unresolved' && !S.q;
+      rowEls.clear();
+      if (same(list, `empty|${done}|${!!S.q}`)) return;
       list.replaceChildren(h('li', { class: 'list-empty' }, done ? [h('div', { class: 'empty-big' }, '🎉'), h('b', null, 'All resolved'), h('div', { class: 'muted' }, 'No open support and nothing unread.')]
         : S.q ? 'Nothing matches your search.' : 'No chats here.'));
       return;
     }
-    list.replaceChildren(...S.chats.map(row), S.more ? h('li', { class: 'list-more' }, 'Scroll for more…') : null);
-    list.scrollTop = top;
+    list._k = null;
+    const stays = new Set();
+    for (const c of S.chats) if (rowEls.get(c.contact)?.isConnected) stays.add(c.contact);
+    // nothing to do? (same rows, same order, same content) -> no DOM writes, no layout reads
+    const fresh = S.chats.every((c) => { const el = rowEls.get(c.contact); return el && el._k === rowKey(c); });
+    if (S.more && !moreEl) moreEl = h('li', { class: 'list-more' }, 'Scroll for more…');
+    const tail = S.more ? [moreEl] : [];
+    if (fresh) {
+      const want = [...S.chats.map((c) => rowEls.get(c.contact)), ...tail];
+      if (inOrder(list, want)) return;
+    }
+    const anchor = noAnchor ? null : listAnchor(list, stays);
+    const want = [...S.chats.map(rowEl), ...tail];
+    reconcile(list, want);
+    // forget rows that left the list
+    if (rowEls.size > want.length + 50) { const live = new Set(S.chats.map((c) => c.contact)); for (const k of rowEls.keys()) if (!live.has(k)) rowEls.delete(k); }
+    if (anchor) {
+      const el = rowEls.get(anchor.contact);
+      if (el && el.isConnected) {
+        const d = el.getBoundingClientRect().top - anchor.top;
+        if (Math.abs(d) >= 1) list.scrollTop += d;
+      }
+    }
+  }
+  function markActiveRow(contact) {
+    for (const el of $('#list').querySelectorAll('.row.on')) if (el.dataset.contact !== contact) el.classList.remove('on');
+    const el = contact && rowEls.get(contact);
+    if (el) el.classList.add('on');
   }
 
   // ------------------------------------------------------------------ alerts
@@ -608,14 +769,38 @@
     if (S.active && S.active.contact === contact) { showChatPane(); return; }
     voiceDiscard();
     S.detailsNarrow = false;
-    S.active = { contact, data: null, pending: [], customer: null, draft: (store('desk_drafts') || {})[contact] || '' };
+    const a = S.active = { contact, data: null, pending: [], customer: null, draft: (store('desk_drafts') || {})[contact] || '',
+      nodes: new Map(), media: new Map(), sig: '', srvSig: null };
     history.replaceState(null, '', `#c=${contact}`);
-    document.querySelectorAll('.row').forEach((r) => r.classList.toggle('on', r.dataset.contact === contact));
+    markActiveRow(contact);
     renderChatSkeleton(S.chats.find((x) => x.contact === contact));
     showChatPane();
+    // A chat seen (or prefetched) in the last minute shows at once; the poll below refreshes it.
+    const hit = chatCache.get(contact);
+    if (hit && Date.now() - hit.at < 60000) { a.data = hit.d; a.sig = hit.sig; a.srvSig = hit.srvSig; a.loaded = hit.d.messages.length; renderChat(true); }
     await pollChat(true);
-    if (S.active && S.active.contact === contact && S.active.data && S.active.data.conv.unread) markRead(contact);
+    if (S.active !== a) return;
+    if (a.data && a.data.conv.unread) markRead(contact);
     loadCustomer(contact);
+    // V and J usually go to the next row: fetch it now so it opens instantly too.
+    const i = S.chats.findIndex((x) => x.contact === contact);
+    const next = i >= 0 ? S.chats[i + 1] : null;
+    if (next) setTimeout(() => { if (S.active === a) prefetchChat(next.contact); }, 600);
+  }
+  // Recently loaded chats (last payload per contact), for instant J/K/V.
+  const chatCache = new Map();
+  function cachePut(contact, d, sigv, srvSig = null) {
+    chatCache.delete(contact);
+    chatCache.set(contact, { d, sig: sigv, srvSig, at: Date.now() });
+    if (chatCache.size > 12) chatCache.delete(chatCache.keys().next().value);
+  }
+  const prefetching = new Set();
+  async function prefetchChat(contact) {
+    const hit = chatCache.get(contact);
+    if (prefetching.has(contact) || (hit && Date.now() - hit.at < 30000) || document.hidden) return;
+    prefetching.add(contact);
+    try { const d = await api.call('chat', { contact, limit: 80 }); if (!d.unchanged) cachePut(contact, d, sig(d), d.sig ? { sig: d.sig, limit: 80 } : null); } catch (e) { /* only a head start */ }
+    finally { prefetching.delete(contact); }
   }
   function showChatPane() { $('#app').classList.add('chat-open'); }
   function closeChat() {
@@ -627,7 +812,8 @@
     chat.className = 'chat-pane empty';
     chat.replaceChildren(...emptyChat());
     $('#details').hidden = true;
-    document.querySelectorAll('.row.on').forEach((r) => r.classList.remove('on'));
+    $('#details')._k = null;
+    markActiveRow(null);
   }
   function emptyChat() {
     const k = (key, what) => h('div', { class: 'ek' }, h('kbd', null, key), h('span', null, what));
@@ -654,31 +840,45 @@
     clearTimeout(chatTimer);
     chatTimer = setTimeout(async () => { if (S.active && !document.hidden) await pollChat(); loopChat(); }, C.threadPollMs);
   }
-  let chatBusy = false;
-  const sig = (d) => JSON.stringify([d.messages.length, d.messages.at(-1)?.id, d.messages.at(-1)?.status, d.events.length, d.sends,
-    d.conv.labels, d.conv.window_ends, d.thread, d.gate && [d.gate.can_resolve, d.gate.suggested, d.gate.reasons]]);
+  // Signature of a chat payload without the media links: signed links change on every request,
+  // which must not count as "the chat changed".
+  // (`now` and the server's `sig` differ per response too.)
+  const sig = (d) => JSON.stringify(d, (k, v) => (k === 'now' || k === 'sig' ? undefined
+    : typeof v === 'string' && (k === 'media' || k === 'media_raw' || k === 'url') ? 1 : v));
   async function pollChat(first = false) {
     const a = S.active;
-    if (!a || chatBusy) return;
-    chatBusy = true;
+    if (!a || a.busy) return; // busy is per chat: a slow poll of the previous chat never blocks the next one
+    a.busy = true;
     try {
-      const d = await api.call('chat', { contact: a.contact, limit: Math.max(80, a.loaded || 0) });
+      const limit = Math.max(80, a.loaded || 0);
+      // the server's signature of what we show: it answers {unchanged} when nothing changed
+      const sent = a.data && a.srvSig && a.srvSig.limit === limit ? a.srvSig.sig : null;
+      const d = await api.call('chat', { contact: a.contact, limit, ...(sent ? { sig: sent } : {}) });
       if (S.active !== a) return;
+      if (d.now) S.skew = Date.parse(d.now) - Date.now();
+      if (d.unchanged) {
+        if (sent && a.data) { const hit = chatCache.get(a.contact); if (hit) hit.at = Date.now(); return; }
+        a.srvSig = null; return; // unexpected: ask for the full chat next time
+      }
+      a.srvSig = d.sig ? { sig: d.sig, limit } : null;
+      const s = sig(d);
       const prev = a.data;
-      const changed = !prev || sig(d) !== sig(prev);
+      const changed = !prev || s !== a.sig;
       a.data = d;
+      a.sig = s;
       a.loaded = d.messages.length;
+      cachePut(a.contact, d, s, a.srvSig);
       const row0 = S.chats.find((x) => x.contact === a.contact);
       if (row0) { row0.sys = d.thread; row0.labels = d.conv.labels; }
-      if (first) renderChat(true);
+      if (!prev) renderChat(true);
       else if (changed) {
-        const newIn = prev && d.messages.length && d.messages.at(-1).id !== prev.messages.at(-1)?.id && d.messages.at(-1).dir === 'Incoming';
+        const newIn = d.messages.length && d.messages.at(-1).id !== prev.messages.at(-1)?.id && d.messages.at(-1).dir === 'Incoming';
         renderHead(); renderSysbar(); renderLabelbar(); renderMessages(false); renderComposerState(); renderDetails();
         if (newIn && !document.hidden) markRead(a.contact);
-      }
+      } else noteMedia(d);
     } catch (e) {
       if (e.status === 404 && first) { toast('Chat not found', 'error'); closeChat(); }
-    } finally { chatBusy = false; }
+    } finally { a.busy = false; }
   }
 
   function renderChatSkeleton(c) {
@@ -690,6 +890,10 @@
       h('div', { class: 'labelbar', id: 'labelbar', role: 'toolbar', 'aria-label': 'Your labels' }),
       h('div', { class: 'msgs', id: 'msgs' }),
       h('div', { class: 'composer-wrap', id: 'composerWrap' }));
+    const box = $('#msgs');
+    box._stick = true;
+    box.addEventListener('scroll', () => { box._stick = nearBottom(box); }, { passive: true });
+    $('#details')._k = null;
     if (c) { S.active.data = null; renderHead(c); renderLabelbar(c); }
     renderComposer();
   }
@@ -705,6 +909,7 @@
   function renderHead(c0) {
     const c = c0 || S.active.data.conv;
     const w = windowInfo(c);
+    if (same($('#chatHead'), JSON.stringify([c.contact, c.name, c.handle, c.channel, c.line, c.last_in_at, w.open, w.open ? dur(w.left) : 0, detailsOn(), S.metaVer]))) return;
     let win;
     if (!c.last_in_at) win = h('span', { class: 'win closed', title: 'The customer has never written' }, icon('lock'), h('span', { class: 'wtxt' }, 'No window'));
     else if (!w.open) win = h('span', { class: 'win closed', title: isIg(c) ? 'Instagram allows replies up to 7 days after the last customer message' : 'WhatsApp allows free replies up to 24h after the last customer message' }, icon('lock'), h('span', { class: 'wtxt' }, 'Window closed'));
@@ -746,6 +951,12 @@
     if (!bar || !S.active || !S.active.data) return;
     const d = S.active.data;
     const t = d.thread;
+    // Rebuilt only when the episode / gate changed, or once a minute for the "x min ago" texts
+    // (but not while the product menu is open: rebuilding would close it).
+    const dataKey = JSON.stringify([t, d.gate, S.closers.length]);
+    if (bar._k === `${dataKey}|${minute()}`) return;
+    if (bar._k && bar._k.startsWith(dataKey + '|') && bar.contains(document.activeElement)) return;
+    bar._k = `${dataKey}|${minute()}`;
     if (!t || (t.status === 'closed' && t.kind !== 'support')) {
       bar.className = 'sysbar quiet';
       bar.replaceChildren(h('span', { class: 'sys-title' }, 'System'), h('span', { class: 'muted' }, t ? 'Earlier episode closed; a new customer message starts a new one.' : 'No episode in the last days.'));
@@ -852,12 +1063,17 @@
   // ---- complete (V) and the undo bar
   // One pending action at a time: a new one sends the previous one straight away.
   let pending = null;
+  let lastRemoved = null; // the row goNext took out, so Undo can put it back in the same place
   function flushPending() { if (pending) { const p = pending; pending = null; clearTimeout(p.timer); p.box.remove(); p.run(); } }
   function cancelPending(msg = 'Undone, nothing was sent') {
     if (!pending) return false;
     clearTimeout(pending.timer); pending.box.remove();
-    const back = pending.contact; pending = null;
+    const back = pending.contact, restore = pending.restore; pending = null;
     toast(msg);
+    if (restore && !S.chats.some((x) => x.contact === restore.row.contact)) {
+      S.chats.splice(Math.min(restore.index, S.chats.length), 0, restore.row);
+      renderList(true);
+    }
     if (back) openChat(back);
     return true;
   }
@@ -871,20 +1087,34 @@
       h('div', { class: 'undo-progress' }, h('i', { style: `animation-duration:${ms}ms` })));
     document.querySelectorAll('.undo').forEach((x) => x.remove());
     document.body.append(box);
-    pending = { box, run, contact, timer: setTimeout(flushPending, ms) };
+    const restore = lastRemoved && lastRemoved.row.contact === contact ? lastRemoved : null;
+    lastRemoved = null;
+    pending = { box, run, contact, restore, timer: setTimeout(flushPending, ms) };
   }
   function neighbour(contact) {
     const i = S.chats.findIndex((x) => x.contact === contact);
     if (i < 0) return S.chats[0] || null;
     return S.chats[i + 1] || S.chats[i - 1] || null;
   }
+  // Takes the solved chat out of the list (rows above it do not move; the ones below slide up
+  // by one) and opens the row that took its place.
   function goNext(contact) {
-    if (!S.active || S.active.contact !== contact) { S.chats = S.chats.filter((x) => x.contact !== contact); renderList(); return; }
+    const i = S.chats.findIndex((x) => x.contact === contact);
+    lastRemoved = i >= 0 ? { row: S.chats[i], index: i } : null;
+    if (!S.active || S.active.contact !== contact) { S.chats = S.chats.filter((x) => x.contact !== contact); renderList(true); return; }
     const n = neighbour(contact);
     S.chats = S.chats.filter((x) => x.contact !== contact);
-    renderList();
-    if (n && n.contact !== contact) { openChat(n.contact); const el = document.querySelector(`.row[data-contact="${n.contact}"]`); if (el) el.scrollIntoView({ block: 'nearest' }); }
+    renderList(true);
+    if (n && n.contact !== contact) { openChat(n.contact); scrollRowIntoView(n.contact); }
     else closeChat();
+  }
+  function scrollRowIntoView(contact) {
+    const el = rowEls.get(contact);
+    if (!el || !el.isConnected) return;
+    const list = $('#list');
+    const r = el.getBoundingClientRect(), l = list.getBoundingClientRect();
+    if (r.top < l.top) list.scrollTop += r.top - l.top;
+    else if (r.bottom > l.bottom) list.scrollTop += r.bottom - l.bottom;
   }
   function hComplete() { return S.labels.find((l) => /^h-?complete$/i.test(l.name)); }
   async function labelComplete(contact) {
@@ -903,7 +1133,7 @@
     planning = true;
     if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), 'Solving…'); }
     let plan;
-    try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderHead(); }
+    try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderLabelbar(null, true); }
     if (plan.action === 'blocked') {
       toast(`Can't solve ${name}: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')}`, 'error');
       return;
@@ -1014,10 +1244,14 @@
 
   // ---- manual labels
 
-  function renderLabelbar(c0) {
+  function renderLabelbar(c0, force = false) {
     const c = c0 || S.active.data.conv;
+    const t = S.active && S.active.data ? S.active.data.thread : null;
+    const bar = $('#labelbar');
+    if (force && bar) bar._k = null;
+    if (same(bar, JSON.stringify([c.labels, t && t.kind, t && t.status, t && t.id, S.metaVer]))) return;
     const on = S.labels.filter((l) => (c.labels || []).includes(l.id));
-    $('#labelbar').replaceChildren(
+    bar.replaceChildren(
       completeButton(),
       h('button', { class: 'btn ghost sm', title: 'Mark as unread and leave the chat (U)', onclick: markUnreadAndLeave }, icon('mail', 'sm'), 'Unread', h('kbd', null, 'U')),
       h('span', { class: 'act-sep' }),
@@ -1126,34 +1360,131 @@
     items.sort((x, y) => x.ts - y.ts);
     const threads = new Map((d.threads || []).map((t) => [t.id, t]));
 
-    const out = [];
-    if (d.more) out.push(h('button', { class: 'btn load-older', onclick: loadOlder }, 'Load earlier messages'));
+    // Keyed rendering: every line has a key (message id, send request id, day, …) and a
+    // signature of what it shows. Unchanged lines keep their node; only new or changed ones are
+    // built. Media elements live in a.media by message id, so a voice note that is playing (or
+    // a photo that loaded) is never recreated by a poll, even when its signed link changes.
+    const a = S.active;
+    const used = new Set();
+    const want = [];
+    let dirty = false;
+    const put = (key, sigv, build) => {
+      while (used.has(key)) key += '+';
+      used.add(key);
+      let el = a.nodes.get(key);
+      if (!el || el._s !== sigv) {
+        const n = build();
+        n._s = sigv;
+        dirty = true;
+        if (el && el.isConnected) el.replaceWith(n);
+        a.nodes.set(key, n);
+        el = n;
+      }
+      want.push(el);
+    };
+    if (d.more) put('older', '', () => h('button', { class: 'btn load-older', onclick: loadOlder }, 'Load earlier messages'));
     let lastDay = '', lastDir = '', lastTs = 0, lastThread = null;
     for (const it of items) {
       const dt = new Date(it.ts);
       const dk = dayKey(dt);
-      if (dk !== lastDay) { out.push(h('div', { class: 'day' }, dayLabel(dt))); lastDay = dk; lastDir = ''; }
+      if (dk !== lastDay) { const lbl = dayLabel(dt, dk); put(`d:${dk}`, lbl, () => h('div', { class: 'day' }, lbl)); lastDay = dk; lastDir = ''; }
       if (it.kind === 'm' && it.m.thread_id && it.m.thread_id !== lastThread) {
         const t = threads.get(it.m.thread_id);
         if (t) {
-          out.push(h('div', { class: `episode k-${t.kind}` }, h('span', null,
-            `${t.kind === 'pending' || t.kind === 'unsure' ? 'Unlabelled' : t.kind[0].toUpperCase() + t.kind.slice(1)} episode${t.product ? ' · ' + (PRODUCTS[t.product] || t.product) : ''} · started ${fmtTime.format(new Date(t.opened_at))}`)));
+          const txt = `${t.kind === 'pending' || t.kind === 'unsure' ? 'Unlabelled' : t.kind[0].toUpperCase() + t.kind.slice(1)} episode${t.product ? ' · ' + (PRODUCTS[t.product] || t.product) : ''} · started ${fmtTime.format(new Date(t.opened_at))}`;
+          put(`t:${t.id}`, `${t.kind}|${txt}`, () => h('div', { class: `episode k-${t.kind}` }, h('span', null, txt)));
           lastDir = '';
         }
         lastThread = it.m.thread_id;
       }
-      if (it.kind === 'e') { const e = eventLine(it.e); if (e) { out.push(e); lastDir = ''; } continue; }
+      if (it.kind === 'e') {
+        if (EVENT_KINDS.has(it.e.kind)) { put(`e:${it.e.at}|${it.e.kind}|${it.e.label}`, JSON.stringify(it.e), () => eventLine(it.e)); lastDir = ''; }
+        continue;
+      }
       const dir = it.kind === 'm' ? (it.m.dir === 'Outgoing' ? 'out' : 'in') : 'out';
       const first = dir !== lastDir || it.ts - lastTs > 10 * 60000;
       lastDir = dir; lastTs = it.ts;
-      if (it.kind === 'm') out.push(bubble(it.m, first, reactions.get(it.m.id)));
-      else if (it.kind === 's') out.push(sendBubble(it.s, first));
-      else out.push(pendingBubble(it.p, first));
+      if (it.kind === 'm') {
+        const m = it.m, rx = reactions.get(m.id);
+        const src = api.mediaSource(m);
+        put(`m:${m.id}`, JSON.stringify([m.text, m.status, m.dir, m.ts, m.by, m.media_type, src ? (src.ours ? 'o' : 'r') : '', m.quoted, m.ad, m.ref, first, rx]),
+          () => bubble(m, first, rx));
+        if (src) noteSrc(`m:${m.id}`, src.url);
+      } else if (it.kind === 's') {
+        const s = it.s;
+        put(`s:${s.request_id}`, sig([s, first]), () => sendBubble(s, first));
+        if (s.media && s.media.url) noteSrc(`s:${s.request_id}`, s.media.url);
+      } else {
+        const p = it.p;
+        put(`p:${p.request_id}`, JSON.stringify([p.status, p.error, p.text, first]), () => pendingBubble(p, first));
+      }
     }
-    box.replaceChildren(...out);
+    // forget nodes and media of lines that are gone
+    for (const k of a.nodes.keys()) if (!used.has(k)) a.nodes.delete(k);
+    for (const k of a.media.keys()) if (!used.has(k)) a.media.delete(k);
+    const placed = inOrder(box, want);
+    if (!dirty && placed) {
+      if (scroll) box.scrollTop = box.scrollHeight;
+      return;
+    }
+    if (!placed) reconcile(box, want);
     if (stick) box.scrollTop = box.scrollHeight;
-    else if (S.active.keepScroll) { box.scrollTop = box.scrollHeight - prevH + prevTop; S.active.keepScroll = false; }
-    else box.scrollTop = prevTop;
+    else if (a.keepScroll) { box.scrollTop = box.scrollHeight - prevH + prevTop; a.keepScroll = false; }
+  }
+  const EVENT_KINDS = new Set(['relabel', 'label_add', 'label_remove', 'sys_label', 'stage', 'resolved', 'reopened']);
+
+  // ---- media that survives polls
+  // a.media: line key -> { el (what the bubble shows), media (img/audio/video), kind, url, latest }
+  function keepMedia(key, kind, url, build) {
+    const a = S.active;
+    const hit = a && a.media.get(key);
+    // same kind, or (BSB link -> our copy) an element that already plays / loaded: keep it
+    if (hit && (hit.kind === kind || inUse(hit.media))) { hit.latest = url; return hit.el; }
+    const ent = { kind, url, latest: url, el: null, media: null };
+    build(ent);
+    if (a) a.media.set(key, ent);
+    return ent.el;
+  }
+  function inUse(el) {
+    if (!el) return false;
+    if (el.tagName === 'IMG') return el.complete && el.naturalWidth > 0;
+    return !el.paused || el.currentTime > 0 || el.readyState > 0;
+  }
+  // A new signed link for a media element we already have: keep the element and its link (so
+  // nothing reloads or restarts); remember the new link for when the old one fails or expires.
+  function noteSrc(key, url) {
+    const ent = S.active && S.active.media.get(key);
+    if (!ent || !url) return;
+    ent.latest = url;
+    // a voice note / video whose link had failed for good gets the new link (nothing plays)
+    const el = ent.media;
+    if (ent.failed && el && el.tagName !== 'IMG' && el.getAttribute('src') !== url) {
+      ent.failed = false; ent.retries = 0; ent.url = url; el.src = url;
+    }
+  }
+  function noteMedia(d) {
+    for (const m of d.messages) { const src = api.mediaSource(m); if (src) noteSrc(`m:${m.id}`, src.url); }
+    for (const s of d.sends) if (s.media && s.media.url) noteSrc(`s:${s.request_id}`, s.media.url);
+  }
+  // On a load error, try the newest link once (an expired signed URL), keeping the position.
+  function retryMedia(ent, onGiveUp) {
+    const el = ent.media;
+    el.addEventListener('play', () => { ent.wantPlay = true; });
+    el.addEventListener('error', () => {
+      const cur = el.getAttribute('src');
+      if (ent.latest && ent.latest !== cur && (ent.retries || 0) < 3) {
+        ent.retries = (ent.retries || 0) + 1; ent.url = ent.latest;
+        const t = el.currentTime || 0, play = ent.wantPlay;
+        el.src = ent.latest;
+        if (el.tagName !== 'IMG') {
+          if (t) el.addEventListener('loadedmetadata', () => { try { el.currentTime = t; } catch (e) { /* not seekable */ } }, { once: true });
+          if (play) el.play().catch(() => {});
+        }
+        return;
+      }
+      ent.failed = true;
+      if (onGiveUp) onGiveUp();
+    });
   }
   async function loadOlder() {
     const a = S.active;
@@ -1165,6 +1496,7 @@
       a.data.events = mergeEvents(d.events, a.data.events);
       a.data.more = d.more;
       a.loaded = a.data.messages.length;
+      a.srvSig = null;
       a.keepScroll = true;
       renderMessages(false);
     } catch (e) { toast(e.message, 'error'); }
@@ -1255,9 +1587,15 @@
   function sendBubble(s, first) {
     const failed = s.status === 'failed';
     const md = s.media;
-    const mediaEl = md && md.url ? (md.type === 'image' ? h('img', { src: md.url, class: 'media-img', alt: 'photo', onclick: () => lightbox(md.url) })
-      : md.type === 'voice' ? h('audio', { src: md.url, controls: true, preload: 'none' })
-      : h('a', { class: 'doc', href: md.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), md.name || 'file')) : null;
+    const mediaEl = md && md.url ? keepMedia(`s:${s.request_id}`, md.type, md.url, (ent) => {
+      if (md.type === 'image') {
+        ent.el = ent.media = h('img', { src: md.url, class: 'media-img', alt: 'photo', referrerpolicy: 'no-referrer', onclick: () => lightbox(ent.media.getAttribute('src')) });
+        retryMedia(ent, null);
+      } else if (md.type === 'voice') {
+        ent.el = ent.media = h('audio', { src: md.url, controls: true, preload: 'none' });
+        retryMedia(ent, null);
+      } else ent.el = h('a', { class: 'doc', href: md.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), md.name || 'file');
+    }) : null;
     return h('div', { class: `msg out pending${failed ? ' failed' : ''}${first ? ' first' : ''}` }, mediaEl, s.body ? richText(s.body) : null,
       h('span', { class: 'meta' }, h('span', { class: 'by' }, s.actor), fmtTime.format(new Date(s.at)),
         failed ? h('span', { class: 'bad' }, ` not sent: ${s.error || 'error'}`) : s.status === 'sending' ? ' sending…' : h('span', { class: 'st', title: 'Sent; waiting for BSB to confirm' }, '✓')));
@@ -1289,15 +1627,30 @@
       return h('div', { class: 'media-missing', title: 'Not copied into our storage yet; the media job copies it within a few minutes' },
         isImg ? '🖼 Photo' : isVid ? '🎬 Video' : isDoc ? '📄 Document' : '🎤 Voice note', h('span', { class: 'muted' }, ' · copying…'));
     }
-    const badge = src.ours ? null : h('span', { class: 'media-src', title: 'Shown from the BSB / Instagram link until our copy is ready' }, 'BSB link');
-    if (isImg) {
-      const img = h('img', { src: src.url, loading: 'lazy', alt: 'photo', class: `media-img${/sticker/.test(media) ? ' sticker' : ''}`, referrerpolicy: 'no-referrer', onclick: () => lightbox(src.url) });
-      img.addEventListener('error', () => img.replaceWith(h('div', { class: 'media-missing' }, '🖼 Photo unavailable')), { once: true });
-      return h('div', { class: 'media' }, img, badge);
-    }
-    if (isVid) return h('div', { class: 'media' }, h('video', { src: src.url, controls: true, preload: 'metadata', class: 'media-video' }), badge);
-    if (isDoc) return h('a', { class: 'doc', href: src.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), (m.text || '').replace(/^📎\s*/, '').slice(0, 60) || 'Document');
-    return h('div', { class: 'media voice' }, h('audio', { src: src.url, controls: true, preload: 'none' }), badge);
+    const kind = `${isImg ? 'img' : isVid ? 'vid' : isDoc ? 'doc' : 'aud'}|${src.ours ? 'o' : 'r'}|${media}`;
+    // the same element for this message id across polls (see keepMedia)
+    return keepMedia(`m:${m.id}`, kind, src.url, (ent) => {
+      const badge = src.ours ? null : h('span', { class: 'media-src', title: 'Shown from the BSB / Instagram link until our copy is ready' }, 'BSB link');
+      if (isImg) {
+        const img = h('img', { src: src.url, loading: 'lazy', decoding: 'async', alt: 'photo', class: `media-img${/sticker/.test(media) ? ' sticker' : ''}`, referrerpolicy: 'no-referrer', onclick: () => lightbox(img.getAttribute('src')) });
+        ent.media = img;
+        retryMedia(ent, () => img.replaceWith(h('div', { class: 'media-missing' }, '🖼 Photo unavailable')));
+        // a photo that finishes loading while the chat is at the bottom keeps it at the bottom
+        img.addEventListener('load', () => { const box = img.closest('.msgs'); if (box && box._stick) box.scrollTop = box.scrollHeight; }, { once: true });
+        ent.el = h('div', { class: 'media' }, img, badge);
+      } else if (isVid) {
+        ent.media = h('video', { src: src.url, controls: true, preload: 'metadata', class: 'media-video' });
+        retryMedia(ent, null);
+        ent.el = h('div', { class: 'media' }, ent.media, badge);
+      } else if (isDoc) {
+        ent.el = h('a', { class: 'doc', href: src.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), (m.text || '').replace(/^📎\s*/, '').slice(0, 60) || 'Document');
+        ent.el.addEventListener('click', () => { if (ent.latest) ent.el.href = ent.latest; });
+      } else {
+        ent.media = h('audio', { src: src.url, controls: true, preload: 'none' });
+        retryMedia(ent, null);
+        ent.el = h('div', { class: 'media voice' }, ent.media, badge);
+      }
+    });
   }
   function lightbox(src) {
     const el = h('div', { class: 'lightbox', onclick: () => el.remove() }, h('img', { src, alt: '' }));
@@ -1623,10 +1976,11 @@
   const SERVICES = { chatgpt: 'ChatGPT', chatgpt_private: 'ChatGPT private', anghami: 'Anghami', spotify: 'Spotify', canva: 'Canva', capcut: 'CapCut', gemini: 'Gemini', netflix_legacy: 'Netflix' };
   function renderDetails() {
     const pane = $('#details');
-    if (!S.active || !S.active.data || !detailsOn()) { pane.hidden = true; return; }
+    if (!S.active || !S.active.data || !detailsOn()) { pane.hidden = true; pane._k = null; return; }
     pane.hidden = false;
     const d = S.active.data;
     const c = d.conv;
+    if (same(pane, JSON.stringify([c, d.thread, d.threads, d.events.length, d.events.slice(-10), S.active.customer, S.metaVer, minute()]))) return;
     const link = isIg(c) ? (c.handle ? `https://instagram.com/${encodeURIComponent(c.handle)}` : null) : `https://wa.me/${c.contact}`;
     const head = h('div', { class: 'd-head' },
       h('button', { class: 'icon-btn d-close', 'aria-label': 'Close details', onclick: toggleDetails }, icon('x')),
@@ -1822,15 +2176,35 @@
       clearTimeout(qTimer);
       qTimer = setTimeout(() => { S.q = e.target.value.trim(); refreshList(true); }, 250);
     });
-    $('#list').addEventListener('scroll', (e) => { const el = e.target; if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) loadMore(); });
+    const list = $('#list');
+    // one listener for every row (rows are reused across polls)
+    list.addEventListener('click', (e) => { const r = e.target.closest('.row'); if (r && r.dataset.contact) openChat(r.dataset.contact); });
+    // the "waiting for 2h 10m" tooltip of a red dot is refreshed when hovered (rows are not
+    // rebuilt every minute just for that text)
+    list.addEventListener('pointerover', (e) => {
+      const dot = e.target.closest && e.target.closest('.badge-n.late');
+      const r = dot && dot.closest('.row');
+      const c = r && S.chats.find((x) => x.contact === r.dataset.contact);
+      if (c && c.last_in_at) dot.title = `Unsolved · customer last wrote ${dur(now() - Date.parse(c.last_in_at))} ago`;
+    });
+    list.addEventListener('pointerenter', () => { S.listHover = true; });
+    list.addEventListener('pointerleave', () => { S.listHover = false; });
+    let moreQueued = false;
+    list.addEventListener('scroll', () => {
+      S.listScrollAt = Date.now();
+      if (moreQueued) return;
+      moreQueued = true;
+      requestAnimationFrame(() => { moreQueued = false; if (list.scrollHeight - list.scrollTop - list.clientHeight < 300) loadMore(); });
+    }, { passive: true });
     $('#chat').replaceChildren(...emptyChat());
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
-        refreshList(); loopList();
-        if (S.active && S.active.data && S.active.data.conv.unread) markRead(S.active.contact);
+        refreshList(false, true); loopList();
+        if (S.active && S.active.data) { pollChat(); if (S.active.data.conv.unread) markRead(S.active.contact); }
       }
     });
-    setInterval(() => { if (S.active && S.active.data) renderSysbar(); }, 30000); // waiting timers
+    // waiting timers / "x min left" (both re-render only when their minute changed)
+    setInterval(() => { if (S.active && S.active.data && !document.hidden) { renderHead(); renderSysbar(); } }, 30000);
     document.addEventListener('keydown', onKey);
   }
 
@@ -1838,7 +2212,7 @@
     if (!S.chats.length) return;
     const i = S.active ? S.chats.findIndex((x) => x.contact === S.active.contact) : -1;
     const next = S.chats[Math.max(0, Math.min(S.chats.length - 1, i < 0 ? 0 : i + dir))];
-    if (next) { openChat(next.contact); const el = document.querySelector(`.row[data-contact="${next.contact}"]`); if (el) el.scrollIntoView({ block: 'nearest' }); }
+    if (next) { openChat(next.contact); scrollRowIntoView(next.contact); }
   }
   function focusSearch() { const el = $('#search'); el.focus(); el.select(); }
   function focusReply() { const ta = $('#reply'); if (ta && !ta.closest('[hidden]')) ta.focus(); else if (S.active) toast('The reply window is closed for this chat'); }
