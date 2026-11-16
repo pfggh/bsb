@@ -128,7 +128,8 @@
     return `+${d}`;
   }
   const isIg = (c) => c && (c.channel === 'ig' || /^ig_/.test(c.contact || ''));
-  const displayName = (c) => c.name || (isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram user') : phoneLabel(c.contact));
+  const realName = (n) => n && /[\p{L}\p{N}]/u.test(n) ? n : null;
+  const displayName = (c) => realName(c.name) || (isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram user') : phoneLabel(c.contact));
   const subtitle = (c) => isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram') : phoneLabel(c.contact);
 
   const AV_COLORS = ['#0ea5e9', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#84cc16', '#ef4444', '#06b6d4', '#a855f7', '#f59e0b', '#10b981'];
@@ -165,14 +166,16 @@
     me: null,
     labels: [], labelById: new Map(), views: [],
     counts: { labels: {}, views: {}, views_unread: {}, sys: {} },
-    view: store('desk_view') || '',
-    channel: store('desk_channel') || '',
+    view: store('desk_view2') || 'uncomplete',
+    line: store('desk_line') || '',
+    channelNames: {},
+    moreOpen: store('desk_more') === true,
     q: '',
     chats: [], more: false, loadingMore: false, listSeq: 0,
     active: null,       // { contact, data, pending: [], customer, draft }
     canned: [], closers: [],
     skew: 0,
-    details: store('desk_details') !== false,
+    details: store('desk_details2') === true,
     notify: store('desk_notify') === true,
     lastLate: 0,
   };
@@ -184,6 +187,7 @@
     S.labels = meta.labels || [];
     S.views = meta.views || [];
     S.labelById = new Map(S.labels.map((l) => [l.id, l]));
+    S.channelNames = meta.channel_names || {};
   }
   function labelChip(id, xs = true) {
     const l = S.labelById.get(id);
@@ -191,22 +195,29 @@
     return h('span', { class: `chip${xs ? ' xs' : ''}`, style: `--c:${l.color}` }, l.name);
   }
 
-  // System views (episodes)
+  // Main views, BSB-style. Uncomplete is the home view: every open support chat + every unread
+  // chat (sales only show while unread). The number is the keyboard shortcut.
+  const MAIN_VIEWS = [
+    ['uncomplete', 'inbox', 'Uncomplete', () => S.counts.uncomplete, true, 'Open support chats and everything unread. Press V to complete a chat.'],
+    ['unread', 'unread', 'Unread', () => S.counts.unread, false, 'Chats with messages nobody has opened'],
+    ['sys_support', 'life', 'Support', () => sys().support_open, false, 'Every open support chat'],
+    ['sys_sales', 'dollar', 'Sales', () => sys().sales_open, false, 'Every open sales chat'],
+    ['sys_label', 'help', 'Needs label', () => sys().needs_label, true, 'The system is not sure: sales or support? Press S or H to decide'],
+    ['closed', 'check', 'Closed', () => S.counts.closed, false, 'Support chats marked complete (a new customer message reopens them)'],
+    ['all', 'all', 'All chats', () => null, false, 'Every conversation'],
+  ];
+  // Detailed work lists, under "More views".
   const SYS_VIEWS = [
     ['sys_waiting', 'alarm', 'Waiting on us', () => sys().support_waiting, true, 'Support customers waiting for our reply (longest wait first)'],
-    ['sys_support', 'life', 'Support open', () => sys().support_open, false, 'Every open support episode'],
-    ['sys_closing', 'hourglass', 'Window closing', () => sys().support_window_closing, true, 'Open support whose reply window closes within 4h: reply or resolve before it closes'],
+    ['sys_closing', 'hourglass', 'Window closing', () => sys().support_window_closing, true, 'Open support whose reply window closes within 4h: reply or complete before it closes'],
     ['sys_unanswered', 'dollar', 'Sales unanswered', () => sys().sales_unanswered, true, 'Sales customers waiting for our reply'],
     ['sys_followup', 'clock', 'Follow-ups due', () => sys().sales_followup_due, false, 'We spoke last, the customer went quiet 2h+, the window is still open'],
-    ['sys_sales', 'dollar', 'Sales open', () => sys().sales_open, false, 'Every open sales episode'],
-    ['sys_label', 'help', 'Needs label', () => sys().needs_label, true, 'The system is not sure: sales or support?'],
-    ['sys_resolved', 'check', 'Resolved 24h', () => sys().resolved_24h, false, 'Support resolved in the last 24 hours'],
+    ['sys_resolved', 'check', 'Completed 24h', () => sys().resolved_24h, false, 'Support completed in the last 24 hours'],
   ];
+  const ALL_VIEWS = [...MAIN_VIEWS, ...SYS_VIEWS];
   function viewName(v = S.view) {
-    if (v === 'all') return 'All chats';
-    if (v === 'unread') return 'Unread';
     if (v === 'unlabelled') return 'No label';
-    const sv = SYS_VIEWS.find((x) => x[0] === v);
+    const sv = ALL_VIEWS.find((x) => x[0] === v);
     if (sv) return sv[2];
     if (/^v\d+$/.test(v)) return (S.views.find((x) => 'v' + x.id === v) || {}).name || 'View';
     if (/^l\d+$/.test(v)) return (S.labelById.get(Number(v.slice(1))) || {}).name || 'Label';
@@ -214,18 +225,27 @@
   }
   function viewCount(v = S.view) {
     const c = S.counts;
-    if (v === 'all') return c.all;
-    if (v === 'unread') return c.unread;
     if (v === 'unlabelled') return c.unlabelled;
-    const sv = SYS_VIEWS.find((x) => x[0] === v);
+    const sv = ALL_VIEWS.find((x) => x[0] === v);
     if (sv) return sv[3]();
     if (/^v\d+$/.test(v)) return (c.views || {})[v.slice(1)];
     if (/^l\d+$/.test(v)) return (c.labels || {})[v.slice(1)];
     return null;
   }
-  const validView = (v) => v === 'all' || v === 'unread' || v === 'unlabelled' || SYS_VIEWS.some((x) => x[0] === v)
+  const validView = (v) => v === 'unlabelled' || ALL_VIEWS.some((x) => x[0] === v)
     || (/^v\d+$/.test(v) && S.views.some((x) => 'v' + x.id === v))
     || (/^l\d+$/.test(v) && S.labelById.has(Number(v.slice(1))));
+
+  // Channels = the lines (WhatsApp numbers / BSB channels, Instagram @teshrij), like BSB.
+  function lineName(l) {
+    const n = (S.channelNames || {})[l];
+    if (n) return n;
+    if (/^@/.test(l)) return `Instagram ${l}`;
+    if (/^\d{8,}$/.test(l)) return phoneLabel(l);
+    if (/^\d+$/.test(l)) return `Line ${l}`;
+    return l;
+  }
+  const lineIcon = (l) => icon(/^@|^Channel /.test(l) ? 'ig' : 'phone');
 
   // System label vocabulary
   const PRODUCTS = { gpt: 'ChatGPT', gpt_private: 'ChatGPT private', anghami: 'Anghami', netflix: 'Netflix', shahid: 'Shahid', spotify: 'Spotify', gemini: 'Gemini', capcut: 'CapCut', canva: 'Canva', other: 'Other' };
@@ -270,7 +290,7 @@
     $('#app').hidden = false;
     bindUi();
     try {
-      const b = await api.call('boot', { view: /^(all|unread|unlabelled|v\d+|l\d+|sys_[a-z]+)$/.test(S.view) ? S.view : 'all', channel: S.channel });
+      const b = await api.call('boot', { view: /^(all|unread|unlabelled|uncomplete|closed|v\d+|l\d+|sys_[a-z]+)$/.test(S.view) ? S.view : 'uncomplete', line: S.line || null });
       S.me = b.me;
       setMeta(b.meta);
       S.canned = b.canned || [];
@@ -278,7 +298,7 @@
       S.skew = b.now ? Date.parse(b.now) - Date.now() : 0;
       renderStaff();
       if (!validView(S.view)) {
-        S.view = 'sys_waiting';
+        S.view = 'uncomplete';
         S.counts = b.counts;
         renderNav();
         await refreshList(true);
@@ -385,52 +405,81 @@
 
   // ------------------------------------------------------------------ sidebar
 
-  function navItem(key, ic, name, n, hot, title) {
-    return h('button', { class: `nav-item${S.view === key ? ' on' : ''}`, onclick: () => setView(key), title },
+  function navItem(key, ic, name, n, hot, title, keyHint) {
+    return h('button', { class: `nav-item${S.view === key ? ' on' : ''}`, onclick: () => setView(key), title: title ? `${title}${keyHint ? ` (key ${keyHint})` : ''}` : null },
       typeof ic === 'string' ? icon(ic) : ic, h('span', { class: 'lbl' }, name),
-      n ? h('span', { class: `n${hot ? ' hot' : ''}` }, n > 999 ? '999+' : n) : null);
+      n ? h('span', { class: `n${hot ? ' hot' : ''}` }, n > 999 ? '999+' : n) : null,
+      keyHint ? h('kbd', { class: 'nav-key' }, keyHint) : null);
   }
   function renderNav() {
     const c = S.counts;
     const s = sys();
-    $('#navSys').replaceChildren(...SYS_VIEWS.map(([key, ic, name, n, hot, title]) => {
+    const isAdmin = S.me && S.me.role === 'admin';
+    $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))));
+    // labels: BSB lists every custom label as a filter
+    const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
+    if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
+    $('#navLabels').replaceChildren(...out);
+    // channels
+    const lines = Object.entries(c.lines || {}).sort((x, y) => (y[1].recent - x[1].recent) || (y[1].uncomplete - x[1].uncomplete));
+    const chItem = (line, name, n, ic) => {
+      const b = h('button', { class: `nav-item${S.line === line ? ' on' : ''}`, title: line ? `Only chats on ${name}` : 'Chats on every channel', onclick: () => setLine(line) },
+        ic, h('span', { class: 'lbl' }, name), n ? h('span', { class: 'n' }, n > 999 ? '999+' : n) : null);
+      if (line && isAdmin) b.append(h('span', { class: 'nav-edit', role: 'button', title: 'Rename this channel', onclick: (e) => { e.stopPropagation(); renameLine(line); } }, '✎'));
+      return b;
+    };
+    $('#navChannels').replaceChildren(chItem('', 'All channels', null, icon('all')),
+      ...lines.map(([line, v]) => chItem(line, lineName(line), v.uncomplete, lineIcon(line))));
+    // more views + today's numbers
+    $('#moreToggle').replaceChildren(h('span', null, S.moreOpen ? 'Fewer views' : 'More views'), h('span', { class: 'caret' }, S.moreOpen ? '▴' : '▾'));
+    $('#navMore').hidden = !S.moreOpen;
+    $('#navMore').replaceChildren(...SYS_VIEWS.map(([key, ic, name, n, hot, title]) => {
       const it = navItem(key, ic, name, n(), hot && n() > 0, title);
       if (key === 'sys_waiting' && s.support_late) it.classList.add('late');
       return it;
-    }), h('div', { class: 'nav-stats', title: 'Today, Beirut time' },
-      h('span', null, h('b', null, s.resolved_today || 0), ' resolved'),
+    }), ...S.views.map((v) => navItem('v' + v.id, 'inbox', v.name, (c.views || {})[v.id], false)),
+    navItem('unlabelled', 'nolabel', 'No label', null),
+    h('div', { class: 'nav-stats', title: 'Today, Beirut time' },
+      h('span', null, h('b', null, s.resolved_today || 0), ' completed'),
       h('span', null, h('b', null, s.reopened_today || 0), ' reopened'),
       s.first_reply_median_min != null ? h('span', null, h('b', null, `${s.first_reply_median_min}m`), ' 1st reply') : null));
-    const views = S.views.map((v) => navItem('v' + v.id, 'inbox', v.name, (c.views || {})[v.id], true));
-    $('#navViews').replaceChildren(...views,
-      navItem('unread', 'unread', 'Unread', c.unread, false),
-      navItem('all', 'all', 'All chats', null),
-      navItem('unlabelled', 'nolabel', 'No label', null));
-    const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id]));
-    if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, 'No labels yet.'));
-    $('#navLabels').replaceChildren(...out);
-    const waiting = (s.support_waiting || 0) + (s.sales_unanswered || 0);
-    document.title = waiting ? `(${waiting}) Teshrij Desk` : 'Teshrij Desk';
-    $('#manageBtn').hidden = !(S.me && S.me.role === 'admin');
+    const todo = c.uncomplete || 0;
+    document.title = todo ? `(${todo}) Teshrij Desk` : 'Teshrij Desk';
+    $('#manageBtn').hidden = !isAdmin;
   }
+  function closeSide() { $('#app').classList.remove('side-open'); $('#scrim').hidden = true; }
   function setView(key) {
     S.view = key;
-    store('desk_view', key);
-    $('#app').classList.remove('side-open');
-    $('#scrim').hidden = true;
+    store('desk_view2', key);
+    closeSide();
     renderNav();
     S.chats = [];
     renderList();
     refreshList(true);
   }
+  function setLine(line) {
+    S.line = line;
+    store('desk_line', line);
+    closeSide();
+    renderNav();
+    S.chats = [];
+    renderList();
+    refreshList(true);
+  }
+  async function renameLine(line) {
+    const name = prompt(`Name for ${lineName(line)} (empty = default name):`, (S.channelNames || {})[line] || '');
+    if (name === null) return;
+    try { setMeta(await api.call('channel_name', { line, name })); renderNav(); renderList(); } catch (e) { toast(e.message, 'error'); }
+  }
 
   // ------------------------------------------------------------------ list
 
-  function listArgs(extra = {}) { return { view: S.view, channel: S.channel, q: S.q, ...extra }; }
+  function listArgs(extra = {}) { return { view: S.view, line: S.line || null, q: S.q, ...extra }; }
   function applyList(b, replace) {
     if (b.counts) S.counts = b.counts;
     if (b.now) S.skew = Date.parse(b.now) - Date.now();
-    const rows = b.chats || [];
+    // a chat being completed (undo bar showing) is already gone from the list
+    const rows = (b.chats || []).filter((x) => !(pending && pending.contact === x.contact));
     if (replace) {
       if (S.active && !rows.some((x) => x.contact === S.active.contact)) {
         const keep = S.chats.find((x) => x.contact === S.active.contact);
@@ -501,20 +550,30 @@
     return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}`, dataset: { contact: c.contact }, onclick: () => openChat(c.contact) },
       avatar(c),
       h('div', { class: 'row-main' },
-        h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)), h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
+        h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
+          !S.line && c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), shortLine(c.line)) : null,
+          h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
         h('div', { class: 'row-mid' }, preview(c), c.unread ? h('span', { class: 'badge-n' }, c.unread_n > 99 ? '99+' : c.unread_n || '') : null),
         sb || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb, (c.labels || []).map((id) => labelChip(id))) : null));
   }
+  function shortLine(l) { const n = (S.channelNames || {})[l]; return n ? n.slice(0, 12) : /^\d{8,}$/.test(l) ? '…' + l.slice(-3) : l.replace(/^Channel /, ''); }
   function renderList() {
     $('#viewTitle').textContent = viewName();
     const n = viewCount();
     $('#viewCount').textContent = n == null ? '' : n;
     $('#viewCount').hidden = n == null;
-    document.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.ch === S.channel));
+    // BSB-style context: which channel and which view this list is
+    $('#ctxBar').replaceChildren(
+      h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), h('b', null, S.line ? lineName(S.line) : 'All channels'),
+        S.line ? h('button', { class: 'ctx-x', title: 'Show every channel', 'aria-label': 'Show every channel', onclick: () => setLine('') }, '×') : null),
+      h('span', { class: 'ctx-sep' }, '·'),
+      h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'View'), h('b', null, viewName())));
     const list = $('#list');
     const top = list.scrollTop;
     if (!S.chats.length) {
-      list.replaceChildren(h('li', { class: 'list-empty' }, S.q ? 'Nothing matches your search.' : S.view.startsWith('sys_') || S.view.startsWith('v') ? 'All caught up. 🎉' : 'No chats here.'));
+      const done = S.view === 'uncomplete' && !S.q;
+      list.replaceChildren(h('li', { class: 'list-empty' }, done ? [h('div', { class: 'empty-big' }, '🎉'), h('b', null, 'All complete'), h('div', { class: 'muted' }, 'No open support and nothing unread.')]
+        : S.q ? 'Nothing matches your search.' : 'No chats here.'));
       return;
     }
     list.replaceChildren(...S.chats.map(row), S.more ? h('li', { class: 'list-more' }, 'Scroll for more…') : null);
@@ -569,11 +628,13 @@
     document.querySelectorAll('.row.on').forEach((r) => r.classList.remove('on'));
   }
   function emptyChat() {
+    const k = (key, what) => h('div', { class: 'ek' }, h('kbd', null, key), h('span', null, what));
     return [h('div', { class: 'chat-empty' },
       h('div', { class: 'chat-empty-ic' }, icon('chat')),
-      h('h3', null, 'Pick a chat'),
-      h('p', { class: 'muted' }, h('b', null, 'System labels'), ' (sales / support, set automatically) and ', h('b', null, 'your labels'), ' (set by hand) sit above every chat. Support chats stay open until you resolve them with a closing message.'),
-      h('p', { class: 'muted kbd-hint' }, h('kbd', null, '↑'), h('kbd', null, '↓'), ' move · ', h('kbd', null, 'Alt'), '+', h('kbd', null, '1…9'), ' label · ', h('kbd', null, '/'), ' quick replies · ', h('kbd', null, 'Esc'), ' close'))];
+      h('h3', null, 'Open a chat to start'),
+      h('p', { class: 'muted' }, 'Work down ', h('b', null, 'Uncomplete'), ': open support chats and everything unread. Reply, then press ', h('kbd', null, 'V'), ' to complete. The AI picks the closing message for support chats.'),
+      h('div', { class: 'empty-keys' }, k('J', 'next chat'), k('K', 'previous'), k('V', 'complete'), k('R', 'reply'), k('L', 'labels'), k('U', 'unread'), k('/', 'search'), k('?', 'all shortcuts')),
+      h('button', { class: 'btn', onclick: () => { if (S.chats[0]) openChat(S.chats[0].contact); } }, 'Open the first chat', h('kbd', null, 'J')))];
   }
 
   async function markRead(contact, unread = false) {
@@ -651,11 +712,28 @@
       avatar(c),
       h('div', { class: 'chat-who' },
         h('div', { class: 'chat-name' }, displayName(c)),
-        h('div', { class: 'chat-sub' }, h('span', null, subtitle(c)), !isIg(c) && c.line ? h('span', null, `· line ${c.line}`) : null)),
+        h('div', { class: 'chat-sub' }, h('span', null, subtitle(c)),
+          c.line ? h('span', { class: 'chan-badge', title: 'Channel this chat is on' }, lineIcon(c.line), lineName(c.line)) : null)),
       win,
       h('div', { class: 'chat-actions' },
-        h('button', { class: 'icon-btn', title: 'Mark as unread', 'aria-label': 'Mark as unread', onclick: () => { const ct = S.active.contact; markRead(ct, true); closeChat(); toast('Marked as unread'); } }, icon('mail')),
-        h('button', { class: `icon-btn${detailsOn() ? ' on' : ''}`, title: 'Contact details', 'aria-label': 'Contact details', onclick: toggleDetails }, icon('panel'))));
+        h('button', { class: 'icon-btn', title: 'Keyboard shortcuts (?)', 'aria-label': 'Keyboard shortcuts', onclick: openHelp }, icon('help')),
+        h('button', { class: `icon-btn${detailsOn() ? ' on' : ''}`, title: 'Contact details (C)', 'aria-label': 'Contact details', onclick: toggleDetails }, icon('panel'))));
+  }
+  // The one big action, like BSB's "Mark complete". V on the keyboard.
+  function completeButton() {
+    const t = S.active && S.active.data ? S.active.data.thread : null;
+    if (t && t.kind === 'support' && t.status === 'resolved') {
+      return h('button', { class: 'btn sm', title: 'Completed. Reopen it?', onclick: () => reopen(t) }, icon('check', 'sm'), 'Reopen');
+    }
+    const support = t && t.kind === 'support' && t.status === 'open';
+    return h('button', { class: `btn sm ${support ? 'primary' : ''}`, id: 'completeBtn',
+      title: support ? 'Mark complete: the AI picks the right closing message, you get 5 seconds to undo (V)' : 'Mark done: it leaves Uncomplete (V)',
+      onclick: completeChat }, icon('check', 'sm'), support ? 'Complete' : 'Done', h('kbd', null, 'V'));
+  }
+  function markUnreadAndLeave() {
+    if (!S.active) return;
+    const ct = S.active.contact;
+    markRead(ct, true); closeChat(); toast('Marked as unread');
   }
 
   // ---- system label bar (episode)
@@ -673,7 +751,8 @@
     const src = t.kind_source === 'staff' ? `set by ${t.kind_by || 'staff'}` : t.kind_source === 'ai' ? `AI ${Math.round((t.kind_confidence || 0) * 100)}%` : t.kind_source === 'rule' ? 'rule' : '';
     const kindSeg = h('div', { class: 'seg-kind', role: 'group', 'aria-label': 'Sales or support' }, ['sales', 'support', 'ignore'].map((k) =>
       h('button', { class: `k-${k}${t.kind === k ? ' on' : ''}`, title: k === 'ignore' ? 'Nothing to do (spam, wrong number, only a sticker)' : `This episode is ${k}`, onclick: () => setKind(t, k) },
-        k === 'sales' ? icon('dollar', 'xs') : k === 'support' ? icon('life', 'xs') : null, k[0].toUpperCase() + k.slice(1))));
+        k === 'sales' ? icon('dollar', 'xs') : k === 'support' ? icon('life', 'xs') : null, k[0].toUpperCase() + k.slice(1),
+        h('kbd', { class: 'mini' }, k === 'sales' ? 'S' : k === 'support' ? 'H' : 'X'))));
     const prod = h('select', { class: 'prod', title: 'Product', onchange: (e) => setKind(t, ['sales', 'support', 'ignore'].includes(t.kind) ? t.kind : null, e.target.value) },
       h('option', { value: '' }, 'Product…'), Object.entries(PRODUCTS).map(([k, l]) => h('option', { value: k, selected: t.product === k }, l)));
     const left = [h('span', { class: 'sys-title', title: 'Set automatically for this conversation episode; you can correct it' }, 'System'), kindSeg, prod,
@@ -706,7 +785,7 @@
         t.reopened_count ? h('span', { class: 'muted' }, `· reopened ${t.reopened_count}×`) : null,
         !g.can_resolve && reasons.length ? h('span', { class: 'why', title: reasons.join('\n') }, reasons[0]) : null,
         g.can_close_no_reply ? h('button', { class: 'btn sm', onclick: () => closeNoReply(t), title: 'The window is closed and we spoke last: close without a message' }, 'Close · no reply') : null,
-        h('button', { class: 'btn sm resolve', disabled: !g.can_resolve, title: g.can_resolve ? 'Send a closing message and resolve' : reasons.join('\n'), onclick: openResolve }, icon('check', 'xs'), 'Resolve'));
+        g.can_resolve ? h('button', { class: 'link', title: 'Choose the closing message yourself instead of the AI', onclick: openResolve }, 'Pick message myself') : null);
       }
     } else if (t.kind === 'ignore') {
       right.push(h('span', { class: 'muted' }, t.kind_reason || 'Nothing to do.'));
@@ -772,48 +851,213 @@
         h('div', { class: 'closers' }, list)),
       h('div', { class: 'sheet-foot' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Cancel'), go)), true);
   }
-  let undoTimer = null;
-  function startResolve(t, c) {
-    const request_id = uuid();
-    const box = h('div', { class: 'undo' },
-      h('div', { class: 'undo-bar' }, h('span', null, `Sending “${c.title}” and resolving…`), h('button', { class: 'btn sm', onclick: () => { clearTimeout(undoTimer); box.remove(); toast('Cancelled, nothing was sent'); } }, 'Undo')),
-      h('div', { class: 'undo-progress' }, h('i', { style: `animation-duration:${C.undoMs}ms` })));
+  // ---- complete (V) and the undo bar
+  // One pending action at a time: a new one sends the previous one straight away.
+  let pending = null;
+  function flushPending() { if (pending) { const p = pending; pending = null; clearTimeout(p.timer); p.box.remove(); p.run(); } }
+  function cancelPending(msg = 'Undone, nothing was sent') {
+    if (!pending) return false;
+    clearTimeout(pending.timer); pending.box.remove();
+    const back = pending.contact; pending = null;
+    toast(msg);
+    if (back) openChat(back);
+    return true;
+  }
+  function startPending({ text, sub, ms, run, contact }) {
+    flushPending();
+    const box = h('div', { class: 'undo', role: 'status' },
+      h('div', { class: 'undo-bar' },
+        h('div', { class: 'undo-text' }, h('div', null, text), sub ? h('div', { class: 'undo-sub' }, sub) : null),
+        h('button', { class: 'btn sm', title: 'Undo (Z or Esc)', onclick: () => cancelPending() }, 'Undo', h('kbd', null, 'Z')),
+        h('button', { class: 'btn sm primary', title: 'Do it now (Enter)', onclick: flushPending }, 'Now', h('kbd', null, '↵'))),
+      h('div', { class: 'undo-progress' }, h('i', { style: `animation-duration:${ms}ms` })));
     document.querySelectorAll('.undo').forEach((x) => x.remove());
     document.body.append(box);
-    clearTimeout(undoTimer);
-    undoTimer = setTimeout(async () => {
-      box.querySelector('button').disabled = true;
-      try {
-        await api.call('resolve', { thread_id: t.id, closer: c.key, request_id });
-        toast(`Resolved · “${c.title}” sent`, 'ok');
-      } catch (e) {
-        toast(`Not resolved: ${e.message}`, 'error');
-      } finally {
-        box.remove();
-        if (S.active) pollChat();
+    pending = { box, run, contact, timer: setTimeout(flushPending, ms) };
+  }
+  function neighbour(contact) {
+    const i = S.chats.findIndex((x) => x.contact === contact);
+    if (i < 0) return S.chats[0] || null;
+    return S.chats[i + 1] || S.chats[i - 1] || null;
+  }
+  function goNext(contact) {
+    if (!S.active || S.active.contact !== contact) { S.chats = S.chats.filter((x) => x.contact !== contact); renderList(); return; }
+    const n = neighbour(contact);
+    S.chats = S.chats.filter((x) => x.contact !== contact);
+    renderList();
+    if (n && n.contact !== contact) { openChat(n.contact); const el = document.querySelector(`.row[data-contact="${n.contact}"]`); if (el) el.scrollIntoView({ block: 'nearest' }); }
+    else closeChat();
+  }
+  function hComplete() { return S.labels.find((l) => /^h-?complete$/i.test(l.name)); }
+  async function labelComplete(contact) {
+    const l = hComplete();
+    if (!l) return;
+    try { await api.call('label', { contact, label_id: l.id, on: true }); } catch (e) { /* the label is a convenience */ }
+  }
+  let planning = false;
+  async function completeChat() {
+    const a = S.active;
+    if (!a || !a.data || planning) return;
+    flushPending();
+    const contact = a.contact;
+    const name = displayName(a.data.conv);
+    const btn = $('#completeBtn');
+    planning = true;
+    if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), 'AI choosing…'); }
+    let plan;
+    try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not completed: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderHead(); }
+    if (plan.action === 'blocked') {
+      toast(`Can't complete ${name} yet: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ') || 'not allowed'}`, 'error');
+      return;
+    }
+    const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
+    if (plan.action === 'resolve') {
+      const c = plan.closer;
+      const request_id = uuid();
+      goNext(contact);
+      startPending({
+        contact, ms: C.undoMs,
+        text: [h('b', null, `Completing ${name}`), ' · sending “', c.body, '”'],
+        sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
+        run: async () => {
+          try {
+            await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id });
+            await labelComplete(contact);
+            toast(`${name}: completed · “${c.title}” sent`, 'ok');
+          } catch (e) { toast(`${name} not completed: ${e.message}`, 'error'); }
+          after();
+        },
+      });
+    } else if (plan.action === 'close_no_reply') {
+      goNext(contact);
+      startPending({
+        contact, ms: C.undoMs, text: [h('b', null, `Completing ${name}`), ' · no message (the reply window is closed)'],
+        run: async () => {
+          try { const r = await api.call('close_no_reply', { thread_id: plan.thread_id }); if (r && r.ok === false) throw new Error(r.error); await labelComplete(contact); toast(`${name}: completed`, 'ok'); }
+          catch (e) { toast(`${name} not completed: ${e.message}`, 'error'); }
+          after();
+        },
+      });
+    } else {
+      goNext(contact);
+      startPending({
+        contact, ms: 1800, text: [h('b', null, `${name}`), ' marked done'],
+        run: async () => { try { await api.call('read', { contact }); } catch (e) { /* next poll */ } after(); },
+      });
+    }
+  }
+  // Manual choice from the "Pick message myself" dialog uses the same undo bar.
+  function startResolve(t, c) {
+    const contact = S.active && S.active.contact;
+    const name = S.active && S.active.data ? displayName(S.active.data.conv) : 'chat';
+    const request_id = uuid();
+    if (contact) goNext(contact);
+    startPending({
+      contact, ms: C.undoMs, text: [h('b', null, `Completing ${name}`), ' · sending “', c.body, '”'],
+      run: async () => {
+        try { await api.call('resolve', { thread_id: t.id, closer: c.key, request_id }); if (contact) await labelComplete(contact); toast(`${name}: completed · “${c.title}” sent`, 'ok'); }
+        catch (e) { toast(`${name} not completed: ${e.message}`, 'error'); }
         refreshList();
-      }
-    }, C.undoMs);
+      },
+    });
+  }
+
+  // ---- keyboard shortcuts sheet (the ? / info button)
+  const SHORTCUTS = [
+    ['Move', [
+      ['J', '↓', 'Next chat', 'Tab · Alt+↓'],
+      ['K', '↑', 'Previous chat', 'Shift+Tab · Alt+↑'],
+      ['Esc', null, 'Leave the message box, then close the chat', ''],
+      ['1', '7', 'Views: 1 Uncomplete · 2 Unread · 3 Support · 4 Sales · 5 Needs label · 6 Closed · 7 All', ''],
+      ['/', 'F', 'Search', 'Ctrl+K'],
+    ]],
+    ['Act on the open chat', [
+      ['V', null, 'Complete. Support: the AI picks the closing message (5 s to undo). Other chats: mark done', 'Ctrl+Shift+E'],
+      ['R', 'Enter', 'Reply: jump into the message box', 'Ctrl+M'],
+      ['U', null, 'Mark unread and leave', 'Ctrl+Shift+U'],
+      ['L', null, 'Labels: add or remove (then 1…9)', 'Ctrl+Shift+L'],
+      ['Alt+1', '9', 'Toggle label 1…9 directly', ''],
+      ['S', null, 'System label: this is Sales', ''],
+      ['H', null, 'System label: this is Support (help)', ''],
+      ['X', null, 'System label: ignore (spam, wrong number)', ''],
+      ['Q', null, 'Quick replies (or type / in the message box)', ''],
+      ['C', null, 'Contact details panel', ''],
+    ]],
+    ['While “Completing…” shows', [
+      ['Z', 'Esc', 'Undo: nothing is sent', ''],
+      ['Enter', null, 'Send it now', ''],
+    ]],
+    ['Message box', [
+      ['Enter', null, 'Send', ''],
+      ['Shift+Enter', null, 'New line', ''],
+      ['/', null, 'Quick replies (at the start of the box)', 'Tab after /'],
+    ]],
+  ];
+  function openHelp() {
+    openModal(h('div', { class: 'sheet help-sheet' },
+      h('div', { class: 'sheet-head' }, h('h3', null, 'Keyboard shortcuts'), h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+      h('div', { class: 'sheet-body' },
+        h('p', { class: 'hint' }, 'Single letters work whenever you are not typing. The BSB shortcuts in grey work too.'),
+        SHORTCUTS.map(([title, rows]) => h('div', { class: 'help-group' }, h('h5', null, title),
+          rows.map(([k1, k2, what, bsb]) => h('div', { class: 'help-row' },
+            h('span', { class: 'help-keys' }, h('kbd', null, k1), k2 ? [h('span', { class: 'muted' }, k1 === '1' || k1 === 'Alt+1' ? '…' : ' or '), h('kbd', null, k2)] : null),
+            h('span', { class: 'help-what' }, what),
+            h('span', { class: 'help-bsb' }, bsb)))))),
+      h('div', { class: 'sheet-foot' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Got it'))), true);
   }
 
   // ---- manual labels
 
   function renderLabelbar(c0) {
     const c = c0 || S.active.data.conv;
-    const on = new Set(c.labels || []);
-    const kids = [h('span', { class: 'lb-title', title: 'Your own labels, set by hand' }, 'Labels')];
-    let lastGrp;
-    S.labels.forEach((l, i) => {
-      if (i && (l.grp || '') !== lastGrp) kids.push(h('span', { class: 'lt-sep' }));
-      lastGrp = l.grp || '';
-      kids.push(h('button', {
-        class: `lt${on.has(l.id) ? ' on' : ''}`, style: `--c:${l.color}`, 'aria-pressed': on.has(l.id) ? 'true' : 'false',
-        title: `${on.has(l.id) ? 'Remove' : 'Set'} ${l.name}${i < 9 ? ` (Alt+${i + 1})` : ''}${l.grp ? ` · replaces the other “${l.grp}” labels` : ''}`,
-        onclick: () => toggleLabel(l.id),
-      }, l.name));
+    const on = S.labels.filter((l) => (c.labels || []).includes(l.id));
+    $('#labelbar').replaceChildren(
+      completeButton(),
+      h('button', { class: 'btn ghost sm', title: 'Mark as unread and leave the chat (U)', onclick: markUnreadAndLeave }, icon('mail', 'sm'), 'Unread', h('kbd', null, 'U')),
+      h('span', { class: 'act-sep' }),
+      ...on.map((l) => h('span', { class: 'lchip', style: `--c:${l.color}` }, h('span', { class: 'dot', style: `background:${l.color}` }), l.name,
+        h('button', { class: 'lchip-x', title: `Remove ${l.name}`, 'aria-label': `Remove ${l.name}`, onclick: () => toggleLabel(l.id) }, '×'))),
+      h('button', { class: 'lchip add', title: 'Add or remove labels (L)', onclick: (e) => openLabelPicker(e.currentTarget) }, '+ Label', h('kbd', { class: 'mini' }, 'L')));
+  }
+  // Label picker (BSB-style): every label with a number key; type to filter.
+  function openLabelPicker(anchor) {
+    if (!S.active || !S.active.data) return;
+    document.querySelectorAll('.pop').forEach((p) => p.remove());
+    const anchorEl = anchor || document.querySelector('#labelbar .lchip.add') || $('#chatHead');
+    const r = anchorEl.getBoundingClientRect();
+    const input = h('input', { type: 'search', placeholder: 'Find a label…', 'aria-label': 'Find a label' });
+    const ul = h('div', { class: 'lp-list' });
+    let sel = 0, items = [];
+    const draw = () => {
+      const q = input.value.trim().toLowerCase();
+      const conv = S.active && S.active.data ? S.active.data.conv : { labels: [] };
+      items = S.labels.map((l, i) => ({ l, i })).filter((x) => !q || x.l.name.toLowerCase().includes(q));
+      sel = Math.min(sel, Math.max(0, items.length - 1));
+      ul.replaceChildren(...items.map((x, j) => {
+        const isOn = conv.labels.includes(x.l.id);
+        return h('button', { class: `lp-item${j === sel ? ' sel' : ''}${isOn ? ' on' : ''}`, onmousedown: (e) => { e.preventDefault(); pick(x.l); } },
+          h('span', { class: 'lp-check' }, isOn ? '✓' : ''), h('span', { class: 'dot', style: `background:${x.l.color}` }),
+          h('span', { class: 'lp-name' }, x.l.name), x.i < 9 ? h('kbd', null, String(x.i + 1)) : null);
+      }), items.length ? null : h('p', { class: 'hint', style: 'padding:8px' }, 'No label matches.'));
+    };
+    const close = () => { pop.remove(); document.removeEventListener('mousedown', outside); };
+    const pick = async (l) => { await toggleLabel(l.id); draw(); };
+    input.addEventListener('input', () => { sel = 0; draw(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { sel = Math.min(items.length - 1, sel + 1); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); }
+      else if (e.key === 'Enter') { if (items[sel]) pick(items[sel].l); e.preventDefault(); }
+      else if (e.key === 'Escape') { close(); e.preventDefault(); e.stopPropagation(); }
+      else if (/^[1-9]$/.test(e.key) && !input.value) { const l = S.labels[Number(e.key) - 1]; if (l) pick(l); e.preventDefault(); }
     });
-    if (!S.labels.length && S.me && S.me.role === 'admin') kids.push(h('button', { class: 'btn ghost', onclick: openManage }, icon('plus', 'sm'), 'Create labels'));
-    $('#labelbar').replaceChildren(...kids);
+    const pop = h('div', { class: 'pop label-pop', style: `left:${Math.max(8, Math.min(r.left, innerWidth - 280))}px;top:${Math.min(r.bottom + 6, innerHeight - 340)}px` },
+      input, ul, h('div', { class: 'lp-foot' }, h('span', { class: 'muted' }, h('kbd', null, '1'), '…', h('kbd', null, '9'), ' toggle · ', h('kbd', null, 'Esc'), ' close'),
+        S.me && S.me.role === 'admin' ? h('button', { class: 'link', onmousedown: (e) => { e.preventDefault(); close(); openManage(); } }, 'Manage labels') : null));
+    const outside = (e) => { if (!pop.contains(e.target)) close(); };
+    document.body.append(pop);
+    setTimeout(() => document.addEventListener('mousedown', outside), 0);
+    draw();
+    input.focus();
   }
   async function toggleLabel(id) {
     const a = S.active;
@@ -1313,7 +1557,7 @@
   const wide = () => innerWidth > 1180;
   const detailsOn = () => (wide() ? S.details : S.detailsNarrow);
   function toggleDetails() {
-    if (wide()) { S.details = !S.details; store('desk_details', S.details); } else S.detailsNarrow = !S.detailsNarrow;
+    if (wide()) { S.details = !S.details; store('desk_details2', S.details); } else S.detailsNarrow = !S.detailsNarrow;
     renderHead();
     renderDetails();
   }
@@ -1392,7 +1636,7 @@
       body.replaceChildren(
         h('h5', null, 'Your labels'),
         h('p', { class: 'hint' }, 'These are set by hand. (Sales / support are system labels, set automatically, and are not managed here.) Labels in the same group replace each other (h-complete ↔ h-uncomplete). “When the customer writes” runs on every new customer message after the label was set.'),
-        h('div', { class: 'col-heads' }, h('span', null, ''), h('span', null, 'Name'), h('span', null, 'Group'), h('span', null, 'When the customer writes'), h('span', null, '')),
+        h('div', { class: 'col-heads' }, h('span', null, ''), h('span', null, 'Name'), h('span', null, 'Group'), h('span', null, 'When the customer writes'), h('span', null, ''), h('span', null, '')),
         ...rows, newRow,
         h('h5', null, 'Views'),
         h('p', { class: 'hint' }, 'A view shows every chat that has one of its labels, plus unread chats if you tick it.'),
@@ -1429,6 +1673,12 @@
       rule.addEventListener('change', () => { to.hidden = rule.value !== 'switch'; if (!isNew && (rule.value !== 'switch' || to.value)) commit(); });
       name.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); });
       return h('div', { class: 'lab-row' }, sw, name, grp, h('div', { class: 'rule' }, rule, to),
+        isNew ? null : h('button', { class: 'icon-btn del', title: 'Remove this label from every chat (the label stays)', 'aria-label': 'Remove from every chat', onclick: async () => {
+          const n = (S.counts.labels || {})[l.id] || 0;
+          if (!n) return toast(`No chat has ${l.name}`);
+          if (!confirm(`Remove “${l.name}” from all ${n} chat${n > 1 ? 's' : ''}? The label itself stays.`)) return;
+          try { const r = await api.call('label_clear', { label_id: l.id }); toast(`Removed from ${r.removed} chats`); refreshList(); if (S.active) pollChat(); } catch (e) { toast(e.message, 'error'); }
+        } }, '⌫'),
         isNew ? h('button', { class: 'icon-btn del', title: 'Add label', 'aria-label': 'Add label', onclick: commit }, icon('plus'))
           : h('button', { class: 'icon-btn del', title: 'Delete label', 'aria-label': 'Delete label', onclick: () => {
             const n = (S.counts.labels || {})[l.id] || 0;
@@ -1510,10 +1760,13 @@
     };
     applyTheme(store('desk_theme'));
     renderStaff();
-    document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
-      S.channel = b.dataset.ch; store('desk_channel', S.channel); S.chats = []; renderList(); refreshList(true);
-    }));
+    $('#moreToggle').onclick = () => { S.moreOpen = !S.moreOpen; store('desk_more', S.moreOpen); renderNav(); };
+    $('#helpBtn').replaceChildren(icon('help'));
+    $('#helpBtn').onclick = openHelp;
     let qTimer;
+    $('#search').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && S.chats[0]) { e.preventDefault(); e.target.blur(); openChat(S.chats[0].contact); }
+    });
     $('#search').addEventListener('input', (e) => {
       clearTimeout(qTimer);
       qTimer = setTimeout(() => { S.q = e.target.value.trim(); refreshList(true); }, 250);
@@ -1527,31 +1780,82 @@
       }
     });
     setInterval(() => { if (S.active && S.active.data) renderSysbar(); }, 30000); // waiting timers
-    document.addEventListener('keydown', (e) => {
-      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
-      if (e.key === 'Escape') {
-        if (!$('#modal').hidden) { if (modalClosable) closeModal(); return; }
-        if (document.querySelector('.lightbox')) { document.querySelector('.lightbox').remove(); return; }
-        if (S.active && !typing) closeChat();
-        return;
-      }
-      if (!$('#modal').hidden) return;
-      if (e.altKey && /^[1-9]$/.test(e.key) && S.active) {
-        const l = S.labels[Number(e.key) - 1];
-        if (l) { e.preventDefault(); toggleLabel(l.id); }
-        return;
-      }
-      if (typing) return;
-      if (e.key === '/' && S.active) { e.preventDefault(); openQuick(); return; }
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'j' || e.key === 'k') {
-        if (!S.chats.length) return;
-        e.preventDefault();
-        const i = S.active ? S.chats.findIndex((x) => x.contact === S.active.contact) : -1;
-        const next = S.chats[Math.max(0, Math.min(S.chats.length - 1, i + (e.key === 'ArrowDown' || e.key === 'j' ? 1 : -1)))];
-        if (next) { openChat(next.contact); const el = document.querySelector(`.row[data-contact="${next.contact}"]`); if (el) el.scrollIntoView({ block: 'nearest' }); }
-      }
-      if (e.key === 'r' && S.active) { e.preventDefault(); const ta = $('#reply'); if (ta) ta.focus(); }
-    });
+    document.addEventListener('keydown', onKey);
+  }
+
+  function moveChat(dir) {
+    if (!S.chats.length) return;
+    const i = S.active ? S.chats.findIndex((x) => x.contact === S.active.contact) : -1;
+    const next = S.chats[Math.max(0, Math.min(S.chats.length - 1, i < 0 ? 0 : i + dir))];
+    if (next) { openChat(next.contact); const el = document.querySelector(`.row[data-contact="${next.contact}"]`); if (el) el.scrollIntoView({ block: 'nearest' }); }
+  }
+  function focusSearch() { const el = $('#search'); el.focus(); el.select(); }
+  function focusReply() { const ta = $('#reply'); if (ta && !ta.closest('[hidden]')) ta.focus(); else if (S.active) toast('The reply window is closed for this chat'); }
+  function setKindKey(kind) {
+    const t = S.active && S.active.data && S.active.data.thread;
+    if (!t) return toast('No conversation episode to label');
+    if (t.kind === kind) return toast(`Already ${kind}`);
+    setKind(t, kind);
+  }
+  function onKey(e) {
+    const el = document.activeElement;
+    const typing = el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
+    const k = e.key;
+    const ctrl = e.ctrlKey || e.metaKey;
+    const modalOpen = !$('#modal').hidden;
+    const popOpen = document.querySelector('.label-pop');
+
+    // undo bar first
+    if (pending && !typing && !modalOpen) {
+      if (k === 'z' || k === 'Z' || k === 'Escape') { e.preventDefault(); cancelPending(); return; }
+      if (k === 'Enter' && !S.active) { e.preventDefault(); flushPending(); return; }
+    }
+    if (k === 'Escape') {
+      if (modalOpen) { if (modalClosable) closeModal(); return; }
+      if (document.querySelector('.lightbox')) { document.querySelector('.lightbox').remove(); return; }
+      if (popOpen) { popOpen.remove(); return; }
+      if (typing) { el.blur(); return; }
+      if (S.active) closeChat();
+      return;
+    }
+    if (modalOpen) return;
+
+    // BSB combinations (work even while typing)
+    if (ctrl && !e.shiftKey && (k === 'k' || k === 'K')) { e.preventDefault(); focusSearch(); return; }
+    if (ctrl && !e.shiftKey && (k === 'm' || k === 'M')) { e.preventDefault(); focusReply(); return; }
+    if (ctrl && e.shiftKey && (k === 'E' || k === 'e')) { e.preventDefault(); completeChat(); return; }
+    if (ctrl && e.shiftKey && (k === 'U' || k === 'u')) { e.preventDefault(); markUnreadAndLeave(); return; }
+    if (ctrl && e.shiftKey && (k === 'L' || k === 'l')) { e.preventDefault(); openLabelPicker(); return; }
+    if (ctrl && e.shiftKey && (k === '[' || k === '{')) { e.preventDefault(); moveChat(-1); return; }
+    if (ctrl && e.shiftKey && (k === ']' || k === '}')) { e.preventDefault(); moveChat(1); return; }
+    if (e.altKey && (k === 'ArrowDown' || k === 'ArrowUp')) { e.preventDefault(); moveChat(k === 'ArrowDown' ? 1 : -1); return; }
+    if (e.altKey && /^[1-9]$/.test(k) && S.active) {
+      const l = S.labels[Number(k) - 1];
+      if (l) { e.preventDefault(); toggleLabel(l.id); }
+      return;
+    }
+    if (typing || ctrl || e.altKey) return;
+    if (popOpen) return;
+
+    switch (k) {
+      case 'j': case 'ArrowDown': e.preventDefault(); moveChat(1); return;
+      case 'k': case 'ArrowUp': e.preventDefault(); moveChat(-1); return;
+      case 'Tab': e.preventDefault(); moveChat(e.shiftKey ? -1 : 1); return;
+      case 'Enter': if (pending) { e.preventDefault(); flushPending(); return; } if (S.active) { e.preventDefault(); focusReply(); } return;
+      case 'r': case 'R': if (S.active) { e.preventDefault(); focusReply(); } return;
+      case 'v': case 'V': if (S.active) { e.preventDefault(); completeChat(); } return;
+      case 'u': case 'U': if (S.active) { e.preventDefault(); markUnreadAndLeave(); } return;
+      case 'l': case 'L': if (S.active) { e.preventDefault(); openLabelPicker(); } return;
+      case 's': case 'S': if (S.active) { e.preventDefault(); setKindKey('sales'); } return;
+      case 'h': case 'H': if (S.active) { e.preventDefault(); setKindKey('support'); } return;
+      case 'x': case 'X': if (S.active) { e.preventDefault(); setKindKey('ignore'); } return;
+      case 'q': case 'Q': if (S.active) { e.preventDefault(); openQuick(); } return;
+      case 'c': case 'C': if (S.active) { e.preventDefault(); toggleDetails(); } return;
+      case '/': case 'f': case 'F': e.preventDefault(); focusSearch(); return;
+      case '?': case 'i': case 'I': e.preventDefault(); openHelp(); return;
+      default:
+        if (/^[1-7]$/.test(k)) { e.preventDefault(); setView(MAIN_VIEWS[Number(k) - 1][0]); }
+    }
   }
 
   start();
