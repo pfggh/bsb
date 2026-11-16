@@ -415,16 +415,6 @@
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
     $('#navLabels').replaceChildren(...out);
-    // channels
-    const lines = Object.entries(c.lines || {}).sort((x, y) => (y[1].recent - x[1].recent) || (y[1].uncomplete - x[1].uncomplete));
-    const chItem = (line, name, n, ic) => {
-      const b = h('button', { class: `nav-item${S.line === line ? ' on' : ''}`, title: line ? `Only chats on ${name}` : 'Chats on every channel', onclick: () => setLine(line) },
-        ic, h('span', { class: 'lbl' }, name), n ? h('span', { class: 'n' }, n > 999 ? '999+' : n) : null);
-      if (line && isAdmin) b.append(h('span', { class: 'nav-edit', role: 'button', title: 'Rename this channel', onclick: (e) => { e.stopPropagation(); renameLine(line); } }, '✎'));
-      return b;
-    };
-    $('#navChannels').replaceChildren(chItem('', 'All channels', null, icon('all')),
-      ...lines.map(([line, v]) => chItem(line, lineName(line), v.uncomplete, lineIcon(line))));
     const todo = c.uncomplete || 0;
     document.title = todo ? `(${todo}) Teshrij Desk` : 'Teshrij Desk';
     $('#manageBtn').hidden = !isAdmin;
