@@ -127,7 +127,7 @@
     if (d.startsWith('961') && d.length >= 10) return `+961 ${d.slice(3, d.length - 6)} ${d.slice(-6, -3)} ${d.slice(-3)}`;
     return `+${d}`;
   }
-  // Lebanese numbers as staff type them: 96171083892 -> 71083892, 9613123456 -> 03123456.
+  // Lebanese numbers as staff type them: 961 70 123 456 -> 70123456, 961 3 123 456 -> 03123456.
   function localNumber(contact) {
     const d = String(contact || '').replace(/\D/g, '');
     if (!d.startsWith('961')) return d;
