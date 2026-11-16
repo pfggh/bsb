@@ -540,6 +540,7 @@
   }
   function cleanPreview(t) {
     return String(t || '')
+      .replace(/^\[Outgoing Message\]$/, 'sent from BSB')
       .replace(/^👍 \*Reaction Received\*: (\S+)[\s\S]*/u, 'Reacted $1')
       .replace(/^↩️ \*Reply\*[\s\S]*?📝 \*Reply\*:\s*([\s\S]*?)\s*🔗[\s\S]*$/u, '↩ $1')
       .replace(/\*([^*\n]+)\*/g, '$1').replace(/\s+/g, ' ');
