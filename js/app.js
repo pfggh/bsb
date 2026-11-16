@@ -972,7 +972,7 @@
       ['H', null, 'This is Support (help)', ''],
       ['X', null, 'System label: ignore (spam, wrong number)', ''],
       ['Q', null, 'Quick replies (or type / in the message box)', ''],
-      ['N', null, 'Copy the customer’s number (71083892 format)', ''],
+      ['N', null, 'Copy the customer’s number, local format (e.g. 70123456)', ''],
       ['C', null, 'Contact details panel', ''],
     ]],
     ['While “Solving…” shows', [
