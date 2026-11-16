@@ -16,8 +16,8 @@
     // The local demo (demo/run.sh) serves this page and the API itself (same tokens, sending simulated).
     demo: local && !/[?&]prod\b/.test(location.search),
     supabaseUrl: 'https://kfgswynickhywzhneltu.supabase.co',
-    pollMs: 5000,
-    pollHiddenMs: 20000,
+    pollMs: 8000,
+    pollHiddenMs: 30000,
     threadPollMs: 4000,
     undoMs: 5000,
   });

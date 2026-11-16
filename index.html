@@ -11,7 +11,7 @@
   <link rel="icon" href="img/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="css/desk.css">
   <script src="js/config.js"></script>
 </head>
@@ -39,12 +39,13 @@
         </div>
       </div>
       <nav class="nav">
-        <div class="nav-title">System <span class="nav-sub" title="Set by the system: sales / support episodes">auto</span></div>
-        <div id="navSys"></div>
-        <div class="nav-title">Inbox</div>
-        <div id="navViews"></div>
-        <div class="nav-title nav-title-row">Labels <button id="manageBtn" class="icon-btn sm" title="Manage labels and views" aria-label="Manage labels and views"></button></div>
+        <div id="navMain"></div>
+        <div class="nav-title nav-title-row">Labels <button id="manageBtn" class="icon-btn sm" title="Manage labels" aria-label="Manage labels"></button></div>
         <div id="navLabels"></div>
+        <div class="nav-title">Channels</div>
+        <div id="navChannels"></div>
+        <button id="moreToggle" class="nav-more" type="button"></button>
+        <div id="navMore" hidden></div>
       </nav>
       <div class="sidebar-foot">
         <button id="staffBtn" class="staff-btn" title="Change who is working"></button>
@@ -58,31 +59,23 @@
     <section class="list-pane" aria-label="Chats">
       <header class="list-head">
         <button id="menuBtn" class="icon-btn only-narrow" aria-label="Views and labels"></button>
-        <h2 id="viewTitle">Inbox</h2>
+        <h2 id="viewTitle">Uncomplete</h2>
         <span id="viewCount" class="count-pill"></span>
+        <button id="helpBtn" class="icon-btn help-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"></button>
       </header>
       <div class="list-tools">
         <label class="search">
           <span class="search-ic" aria-hidden="true"></span>
-          <input id="search" type="search" placeholder="Search name, number or message" autocomplete="off">
+          <input id="search" type="search" placeholder="Search name, number or message   ( / )" autocomplete="off">
         </label>
-        <div class="seg" role="radiogroup" aria-label="Channel">
-          <button data-ch="" role="radio">All</button>
-          <button data-ch="wa" role="radio">WhatsApp</button>
-          <button data-ch="ig" role="radio">Instagram</button>
-        </div>
+        <div id="ctxBar" class="ctx-bar" role="status" aria-live="polite"></div>
       </div>
       <ul id="list" class="list" aria-live="polite"></ul>
     </section>
 
     <!-- Chat -->
     <section id="chat" class="chat-pane empty" aria-label="Conversation">
-      <div class="chat-empty">
-        <div class="chat-empty-ic" aria-hidden="true"></div>
-        <h3>Pick a chat</h3>
-        <p class="muted"><b>System labels</b> (sales / support, set automatically) and <b>your labels</b> (set by hand) sit above every chat. Support chats stay open until you resolve them with a closing message.</p>
-        <p class="muted kbd-hint"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> toggle a label · <kbd>/</kbd> quick replies · <kbd>Esc</kbd> close</p>
-      </div>
+      <div class="chat-empty"></div>
     </section>
 
     <!-- Details -->
