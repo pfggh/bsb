@@ -242,10 +242,17 @@
     if (n) return n;
     if (/^@/.test(l)) return `Instagram ${l}`;
     if (/^\d{8,}$/.test(l)) return phoneLabel(l);
-    if (/^\d+$/.test(l)) return `Line ${l}`;
     return l;
   }
-  const lineIcon = (l) => icon(/^@|^Channel /.test(l) ? 'ig' : 'phone');
+  // Short form for the chat rows: 71 083 892 / @teshrij
+  function lineShort(l) {
+    const n = (S.channelNames || {})[l];
+    if (n) return n.slice(0, 16);
+    if (/^@/.test(l)) return l;
+    if (/^961\d{7,8}$/.test(l)) { const r = l.slice(3); return r.length === 8 ? `${r.slice(0, 2)} ${r.slice(2, 5)} ${r.slice(5)}` : `0${r.slice(0, 1)} ${r.slice(1, 4)} ${r.slice(4)}`; }
+    return l;
+  }
+  const lineIcon = (l) => icon(/^@/.test(l) ? 'ig' : 'phone');
 
   // System label vocabulary
   const PRODUCTS = { gpt: 'ChatGPT', gpt_private: 'ChatGPT private', anghami: 'Anghami', netflix: 'Netflix', shahid: 'Shahid', spotify: 'Spotify', gemini: 'Gemini', capcut: 'CapCut', canva: 'Canva', other: 'Other' };
@@ -415,6 +422,17 @@
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
     $('#navLabels').replaceChildren(...out);
+    // channels (one entry per WhatsApp number / Instagram account)
+    const lines = Object.entries(c.lines || {}).sort((x, y) => (y[1].recent - x[1].recent) || (y[1].uncomplete - x[1].uncomplete));
+    if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
+    const chItem = (line, name, n, ic) => {
+      const b = h('button', { class: `nav-item${S.line === line ? ' on' : ''}`, title: line ? `Only chats on ${name}` : 'Chats on every channel', onclick: () => setLine(line) },
+        ic, h('span', { class: 'lbl' }, name), n ? h('span', { class: 'n' }, n > 999 ? '999+' : n) : null);
+      if (line && isAdmin) b.append(h('span', { class: 'nav-edit', role: 'button', title: 'Rename this channel', onclick: (e) => { e.stopPropagation(); renameLine(line); } }, '✎'));
+      return b;
+    };
+    $('#navChannels').replaceChildren(chItem('', 'All channels', null, icon('all')),
+      ...lines.map(([line, v]) => chItem(line, lineName(line), v.uncomplete, lineIcon(line))));
     const todo = c.uncomplete || 0;
     document.title = todo ? `(${todo}) Teshrij Desk` : 'Teshrij Desk';
     $('#manageBtn').hidden = !isAdmin;
@@ -529,15 +547,8 @@
         h('div', { class: 'row-mid' }, preview(c), c.unread ? h('span', { class: 'badge-n' }, c.unread_n > 99 ? '99+' : c.unread_n || '') : null),
         sb || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb, (c.labels || []).map((id) => labelChip(id))) : null));
   }
-  function rowLine(l) { const n = lineName(l); return n.replace(/^Instagram /, ''); }
+  function rowLine(l) { return lineShort(l); }
   function shortLine(l) { const n = (S.channelNames || {})[l]; return n ? n.slice(0, 12) : /^\d{8,}$/.test(l) ? '…' + l.slice(-3) : l.replace(/^Channel /, ''); }
-  function channelSelect() {
-    const lines = Object.entries(S.counts.lines || {}).sort((x, y) => (y[1].recent - x[1].recent));
-    const sel = h('select', { class: 'chan-select', 'aria-label': 'Channel', onchange: (e) => setLine(e.target.value) },
-      h('option', { value: '', selected: !S.line }, 'All channels'),
-      lines.map(([line, v]) => h('option', { value: line, selected: S.line === line }, `${lineName(line)}${v.uncomplete ? ` (${v.uncomplete})` : ''}`)));
-    return sel;
-  }
   function renderList() {
     $('#viewTitle').textContent = viewName();
     const n = viewCount();
@@ -545,7 +556,8 @@
     $('#viewCount').hidden = n == null;
     // BSB-style context: which channel and which view this list is
     $('#ctxBar').replaceChildren(
-      h('label', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), channelSelect()));
+      h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), h('b', null, S.line ? lineName(S.line) : 'All channels'),
+        S.line ? h('button', { class: 'ctx-x', title: 'Show every channel', 'aria-label': 'Show every channel', onclick: () => setLine('') }, '×') : null));
     const list = $('#list');
     const top = list.scrollTop;
     if (!S.chats.length) {
