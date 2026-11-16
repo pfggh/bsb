@@ -732,3 +732,5 @@ kbd.mini { min-width: 14px; padding: 0 3px; font-size: 9.5px; line-height: 1.35;
 .qr-fields input, .qr-fields textarea { width: 100%; border: 1px solid var(--border-strong); border-radius: 8px; padding: 7px 10px; background: var(--panel); resize: vertical; }
 .qr-fields input { font-weight: 600; }
 .qr-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.badge-n.dot { padding: 0; width: 20px; }
+.badge-n.late { background: var(--danger); }

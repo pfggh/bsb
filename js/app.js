@@ -536,16 +536,27 @@
       .replace(/^↩️ \*Reply\*[\s\S]*?📝 \*Reply\*:\s*([\s\S]*?)\s*🔗[\s\S]*$/u, '↩ $1')
       .replace(/\*([^*\n]+)\*/g, '$1').replace(/\s+/g, ' ');
   }
+  // List markers: Sales gets its tag; support gets no tag, only a dot while unsolved (green,
+  // red once the customer has been waiting more than an hour). Unread keeps its number.
+  const LATE_MS = 60 * 60 * 1000;
+  function rowDot(c) {
+    const unsolved = c.sys && c.sys.kind === 'support' && c.sys.status === 'open';
+    const late = unsolved && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
+    const why = unsolved ? (late ? `Unsolved · customer last wrote ${dur(now() - Date.parse(c.last_in_at))} ago` : 'Unsolved support chat') : '';
+    if (c.unread) return h('span', { class: `badge-n${late ? ' late' : ''}`, title: why || 'Unread' }, c.unread_n > 99 ? '99+' : c.unread_n || '');
+    if (unsolved) return h('span', { class: `badge-n dot${late ? ' late' : ''}`, title: why, 'aria-label': why });
+    return null;
+  }
   function row(c) {
     const on = S.active && S.active.contact === c.contact;
-    const sb = sysBadge(c.sys);
+    const sb = c.sys && c.sys.kind === 'sales' ? sysBadge(c.sys) : null;
     return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}`, dataset: { contact: c.contact }, onclick: () => openChat(c.contact) },
       avatar(c),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
           c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), rowLine(c.line)) : null,
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
-        h('div', { class: 'row-mid' }, preview(c), c.unread ? h('span', { class: 'badge-n' }, c.unread_n > 99 ? '99+' : c.unread_n || '') : null),
+        h('div', { class: 'row-mid' }, preview(c), rowDot(c)),
         sb || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb, (c.labels || []).map((id) => labelChip(id))) : null));
   }
   function rowLine(l) { return lineShort(l); }
