@@ -1,319 +1,98 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- Content-Security-Policy: no inline/eval script, only the hosts this page really uses.
-       (frame-ancestors cannot be set from a <meta>; js/config.js has a frame guard instead.) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/ https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/; img-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; media-src 'self' blob: https://kfgswynickhywzhneltu.supabase.co; connect-src 'self' https://kfgswynickhywzhneltu.supabase.co wss://kfgswynickhywzhneltu.supabase.co; base-uri 'self'; form-action 'self'; object-src 'none'; frame-src 'none'; worker-src blob:; manifest-src 'self'" />
-  <meta name="referrer" content="no-referrer" />
-  <title>Teshrij Follow-up - Live Chat Panel</title>
-  <link rel="icon" type="image/png" href="img/logo.png" />
-
-  <!-- Google Fonts: Inter -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-
-  <!-- FontAwesome 6 Icons -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
-
-  <!-- Application Stylesheet -->
-  <link rel="stylesheet" href="css/style.css?v=20261115_keepsent" />
-
-  <!-- Supabase JS Client v2 (CDN, pinned to an exact version + Subresource Integrity) -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob: https://cdn.jsdelivr.net; connect-src 'self' https://kfgswynickhywzhneltu.supabase.co https://cdn.jsdelivr.net; img-src 'self' data: blob: https:; media-src 'self' blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light dark">
+  <title>Teshrij Desk</title>
+  <link rel="icon" href="img/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="css/desk.css">
+  <script src="js/config.js"></script>
 </head>
 <body>
-
-  <!-- ======================================================================
-       1. LOGIN VIEW
-       ====================================================================== -->
-  <div id="login-view" class="login-page">
-    <div class="login-container">
-      <img src="img/logo.png" alt="Teshrij Logo" class="login-logo" />
-      <h1 class="login-title">Follow-up Panel</h1>
-      <p class="login-subtitle">Sign in to open the live chat follow-up panel</p>
-
-      <form id="login-form" class="login-form" method="post">
-        <div class="input-group">
-          <i class="fa-solid fa-envelope"></i>
-          <input type="email" id="login-email" class="input-field" placeholder="Email address" required autocomplete="email" />
-        </div>
-        <div class="input-group">
-          <i class="fa-solid fa-lock"></i>
-          <input type="password" id="login-password" class="input-field" placeholder="Password" required autocomplete="current-password" />
-        </div>
-        <button type="submit" id="login-submit-btn" class="btn-primary">
-          <i class="fa-solid fa-arrow-right-to-bracket"></i> Sign In
-        </button>
-      </form>
-      <div id="login-error" class="login-error"></div>
-    </div>
+  <!-- Sign in with a personal access token -->
+  <div id="login" class="screen-center" hidden>
+    <form id="loginForm" class="login-card" autocomplete="off">
+      <img src="img/logo.png" alt="" class="login-logo">
+      <h1>Teshrij Desk</h1>
+      <p class="muted">Paste your personal access token, or open the sign-in link your admin sent you.</p>
+      <label>Access token<input id="loginToken" type="password" placeholder="dsk_…" required spellcheck="false" autocomplete="off"></label>
+      <button class="btn primary block" type="submit">Sign in</button>
+      <p id="loginError" class="error" role="alert"></p>
+    </form>
   </div>
 
-  <!-- ======================================================================
-       2. LIVE CHAT FOLLOW-UP PANEL
-       ====================================================================== -->
-  <div id="app-view" class="app-layout" style="display: none;">
-
-    <header class="top-navbar">
-      <div class="brand-section">
-        <img src="img/logo.png" alt="Teshrij" class="brand-logo-small" />
-        <span class="brand-title">
-          Teshrij Follow-up
-          <span class="badge-24h">Live chats</span>
-        </span>
+  <div id="app" class="app" hidden>
+    <!-- Sidebar: views + labels -->
+    <aside id="sidebar" class="sidebar" aria-label="Views and labels">
+      <div class="brand">
+        <img src="img/logo.png" alt="">
+        <div>
+          <strong>Teshrij Desk</strong>
+          <span id="demoBadge" class="demo-badge" hidden title="Local demo: chats are mirrored read-only from production; nothing you send leaves this computer">Demo · sends simulated</span>
+        </div>
       </div>
-
-      <div class="nav-actions">
-        <span id="triage-status" class="triage-status" title="AI check that hides finished chats">
-          <i class="fa-solid fa-shield-halved"></i> <span id="triage-status-text">AI check starting...</span>
-        </span>
-        <button id="sync-btn" class="btn-nav btn-sync" title="Reload chats now">
-          <i class="fa-solid fa-rotate"></i>
-          <span>Sync</span>
-        </button>
-        <button id="btn-ingest-backup" class="btn-nav" title="Upload and ingest BSB backup CSV into bsb_messages" style="color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">
-          <i class="fa-solid fa-file-arrow-up"></i>
-          <span>Ingest Backup</span>
-        </button>
-        <input type="file" id="followup-backup-input" accept=".csv,text/csv" style="display: none;" />
-        <a href="https://teshrij.xyz/pnl/" target="_blank" rel="noopener noreferrer" class="btn-nav" title="Open Main Admin Panel">
-          <i class="fa-solid fa-gauge-high"></i>
-          <span>Admin Panel</span>
-        </a>
-        <!-- Panels: Follow-up is the default; Support is a small icon, and a back button shows while it is open -->
-        <button type="button" class="suite-tab-btn btn-nav nav-back-followup active" data-tab="followup" title="Back to Follow-up">
-          <i class="fa-solid fa-arrow-left"></i>
-          <span>Follow-up</span>
-        </button>
-        <button type="button" class="suite-tab-btn nav-support-discreet" data-tab="support" title="Support (live WhatsApp chats)" aria-label="Support">
-          <i class="fa-solid fa-headset"></i>
-          <span id="tab-count-support" class="nav-pill" title="Unread chats" style="display: none;">0</span>
-        </button>
-        <div class="btn-nav" style="cursor: default; opacity: 0.85;">
-          <i class="fa-regular fa-user"></i>
-          <span id="user-email-display">Admin</span>
-        </div>
-        <button id="logout-btn" class="btn-nav" title="Sign Out">
-          <i class="fa-solid fa-arrow-right-from-bracket"></i>
-          <span>Logout</span>
-        </button>
+      <nav class="nav">
+        <div class="nav-title">System <span class="nav-sub" title="Set by the system: sales / support episodes">auto</span></div>
+        <div id="navSys"></div>
+        <div class="nav-title">Inbox</div>
+        <div id="navViews"></div>
+        <div class="nav-title nav-title-row">Labels <button id="manageBtn" class="icon-btn sm" title="Manage labels and views" aria-label="Manage labels and views"></button></div>
+        <div id="navLabels"></div>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="staffBtn" class="staff-btn" title="Change who is working"></button>
+        <button id="bellBtn" class="icon-btn" title="Alerts" aria-label="Alerts"></button>
+        <button id="themeBtn" class="icon-btn" title="Light / dark" aria-label="Toggle dark mode"></button>
       </div>
-    </header>
+    </aside>
+    <div id="scrim" class="scrim" hidden></div>
 
-    <div class="suite-content-wrapper">
-      <section id="view-chats" class="suite-view active">
-        <div class="main-split" style="width: 100%; height: 100%;">
-
-          <!-- Left Sidebar: Conversations needing a follow-up -->
-          <aside class="conv-sidebar">
-            <div class="sidebar-header">
-              <div class="sidebar-title-row">
-                <span class="sidebar-title">
-                  <i class="fa-brands fa-whatsapp" style="color: #25d366;"></i>
-                  Needs follow-up
-                  <span id="conv-count-badge" class="counter-badge">0</span>
-                </span>
-                <span id="total-24h-count" style="font-size: 0.75rem; color: var(--text-dim); font-weight: 600;">0 chats in window</span>
-              </div>
-
-              <div class="search-wrapper">
-                <i class="fa-solid fa-magnifying-glass"></i>
-                <input type="text" id="search-input" class="search-input" placeholder="Search phone, name, message..." autocomplete="off" spellcheck="false" maxlength="200" />
-              </div>
-
-              <div class="filter-pills">
-                <button class="pill-btn active" data-filter="todo">To follow up <span id="pill-count-todo" class="pill-count">0</span></button>
-                <button class="pill-btn" data-filter="unanswered">Unanswered <span id="pill-count-unanswered" class="pill-count">0</span></button>
-                <button class="pill-btn" data-filter="hidden" title="Chats the AI check hid as finished">Hidden <span id="pill-count-hidden" class="pill-count">0</span></button>
-              </div>
-            </div>
-
-            <div id="conv-list" class="conv-list">
-              <!-- Populated by JavaScript -->
-            </div>
-          </aside>
-
-          <!-- Right Panel: Conversation View -->
-          <main class="chat-panel">
-
-            <div id="chat-empty-state" class="chat-empty-state">
-              <div class="chat-empty-icon">
-                <i class="fa-solid fa-comments"></i>
-              </div>
-              <h3 style="font-weight: 700; color: var(--text-main); font-size: 1.15rem;">Select a conversation</h3>
-              <p style="max-width: 380px; font-size: 0.85rem;">Customers who wrote in the last 24h and whose chat has been quiet for at least 2h. Chats that are clearly finished or already got their final follow-up are moved to <strong>Hidden</strong>.</p>
-            </div>
-
-            <div id="chat-active-view" style="display: none; flex-direction: column; height: 100%; width: 100%;">
-
-              <div class="chat-header">
-                <div class="chat-header-user">
-                  <div class="conv-avatar" style="width: 38px; height: 38px; font-size: 0.9rem;">
-                    <i class="fa-solid fa-user"></i>
-                  </div>
-                  <div class="chat-header-info">
-                    <h2 id="chat-phone">Phone Number</h2>
-                    <div class="chat-header-sub">
-                      <span id="chat-profile-name">BSB Contact</span>
-                      <div id="chat-ad-banner" class="meta-ad-banner" style="display: none;"></div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="chat-header-actions">
-                  <span class="shortcut-hint"><kbd>C</kbd> next · <kbd>V</kbd> done &amp; next</span>
-                  <button id="btn-mark-done" class="btn-nav" title="Hide this chat until the customer writes again (V = mark done and open next)">
-                    <i class="fa-solid fa-check"></i> Mark done
-                  </button>
-                  <button id="btn-show-again" class="btn-nav" style="display: none;" title="Bring this chat back to the follow-up list">
-                    <i class="fa-solid fa-rotate-left"></i> Show again
-                  </button>
-                  <a id="chat-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
-                    <i class="fa-brands fa-whatsapp"></i> WhatsApp Web
-                  </a>
-                </div>
-              </div>
-
-              <div id="chat-triage-bar" class="triage-bar"></div>
-
-              <div id="chat-messages-container" class="chat-messages-container">
-                <!-- Messages rendered dynamically -->
-              </div>
-
-              <div class="chat-input-bar">
-                <div class="quick-templates-row">
-                  <button class="template-pill" data-text="Meshe l hal?">Meshe l hal?</button>
-                  <button class="template-pill" data-text="Need private or shared? both are completely unlimited">Private or shared?</button>
-                  <button class="template-pill" data-text="Final Followup; would you like to activate?">Final follow-up</button>
-                  <button class="template-pill" data-text="Whish payment, instant activation.">Whish Info</button>
-                  <button class="template-pill" data-text="1 month: 4$ | 3 months: 10$ | 6 months: 15$ | 1 year: 21$">Netflix Price</button>
-                  <button class="template-pill" data-text="ChatGPT+ Shared Account: 3 months: $15 | 6 months: $25 | 1 year: $45">ChatGPT Price</button>
-                  <button class="template-pill" data-text="Anghami Plus: 1 month: 3$ | 3 months: 7.5$ | 1 year: 15$">Anghami Price</button>
-                </div>
-
-                <div class="input-row">
-                  <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="Type a message via BestSMSBulk... (Enter to send, Shift+Enter for newline)"></textarea>
-                  <button id="btn-voice" class="btn-voice" type="button" title="Record a voice note">
-                    <i class="fa-solid fa-microphone"></i>
-                  </button>
-                  <button id="btn-send" class="btn-send" title="Send WhatsApp Message">
-                    <i class="fa-solid fa-paper-plane"></i>
-                  </button>
-                </div>
-
-                <div id="voice-recorder-bar" class="voice-recorder-bar" style="display:none">
-                  <span class="voice-rec-dot"></span>
-                  <span id="voice-rec-timer" class="voice-rec-timer">0:00</span>
-                  <audio id="voice-rec-preview" class="voice-rec-preview" controls preload="metadata" style="display:none"></audio>
-                  <button id="btn-voice-cancel" class="btn-voice-action" type="button" title="Discard voice note">
-                    <i class="fa-solid fa-trash"></i> Cancel
-                  </button>
-                  <button id="btn-voice-send" class="btn-voice-action primary" type="button" title="Stop and send voice note">
-                    <i class="fa-solid fa-paper-plane"></i> <span id="btn-voice-send-label">Stop &amp; Send</span>
-                  </button>
-                </div>
-
-                <div id="send-status-line" class="send-status-line"></div>
-              </div>
-
-            </div>
-
-          </main>
-
+    <!-- Conversation list -->
+    <section class="list-pane" aria-label="Chats">
+      <header class="list-head">
+        <button id="menuBtn" class="icon-btn only-narrow" aria-label="Views and labels"></button>
+        <h2 id="viewTitle">Inbox</h2>
+        <span id="viewCount" class="count-pill"></span>
+      </header>
+      <div class="list-tools">
+        <label class="search">
+          <span class="search-ic" aria-hidden="true"></span>
+          <input id="search" type="search" placeholder="Search name, number or message" autocomplete="off">
+        </label>
+        <div class="seg" role="radiogroup" aria-label="Channel">
+          <button data-ch="" role="radio">All</button>
+          <button data-ch="wa" role="radio">WhatsApp</button>
+          <button data-ch="ig" role="radio">Instagram</button>
         </div>
-      </section>
+      </div>
+      <ul id="list" class="list" aria-live="polite"></ul>
+    </section>
 
-      <!-- ====================================================================
-           3. SUPPORT: plain live chat (js/support.js)
-           ==================================================================== -->
-      <section id="view-support" class="suite-view">
-        <div class="main-split" style="width: 100%; height: 100%;">
+    <!-- Chat -->
+    <section id="chat" class="chat-pane empty" aria-label="Conversation">
+      <div class="chat-empty">
+        <div class="chat-empty-ic" aria-hidden="true"></div>
+        <h3>Pick a chat</h3>
+        <p class="muted"><b>System labels</b> (sales / support, set automatically) and <b>your labels</b> (set by hand) sit above every chat. Support chats stay open until you resolve them with a closing message.</p>
+        <p class="muted kbd-hint"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> toggle a label · <kbd>/</kbd> quick replies · <kbd>Esc</kbd> close</p>
+      </div>
+    </section>
 
-          <aside class="conv-sidebar">
-            <div class="sidebar-header">
-              <div class="sidebar-title-row">
-                <span class="sidebar-title">
-                  <i class="fa-solid fa-headset" style="color: var(--accent-cyan);"></i>
-                  Chats
-                  <span id="sup-count-badge" class="counter-badge">0</span>
-                </span>
-                <span id="sup-updated" class="sup-updated"></span>
-              </div>
-
-              <div class="search-wrapper">
-                <i class="fa-solid fa-magnifying-glass"></i>
-                <input type="text" id="sup-search-input" class="search-input" placeholder="Search name, phone or message ( / )" autocomplete="off" spellcheck="false" maxlength="200" />
-              </div>
-
-              <div class="filter-pills">
-                <button type="button" class="pill-btn active" data-sup-filter="all" title="Every chat of the last 3 days">All <span id="sup-count-all" class="pill-count">0</span></button>
-                <button type="button" class="pill-btn" data-sup-filter="unread" title="Chats with messages nobody has opened">Unread <span id="sup-count-unread" class="pill-count">0</span></button>
-                <button type="button" class="pill-btn" data-sup-filter="waiting" title="The customer wrote last">Waiting <span id="sup-count-waiting" class="pill-count">0</span></button>
-              </div>
-            </div>
-
-            <div id="sup-list" class="conv-list"></div>
-          </aside>
-
-          <main id="sup-panel" class="chat-panel">
-
-            <div id="sup-empty-state" class="chat-empty-state">
-              <div class="chat-empty-icon"><i class="fa-solid fa-headset"></i></div>
-              <h3 class="sup-empty-title">Select a chat</h3>
-            </div>
-
-            <div id="sup-active-view" class="sup-active-view" style="display: none;">
-
-              <div class="chat-header">
-                <div class="chat-header-user">
-                  <button type="button" id="sup-back-btn" class="btn-nav sup-back-btn" title="Back to the list">
-                    <i class="fa-solid fa-arrow-left"></i>
-                  </button>
-                  <div class="conv-avatar sup-header-avatar"><i class="fa-solid fa-user"></i></div>
-                  <div class="chat-header-info">
-                    <h2 id="sup-name"></h2>
-                    <div class="chat-header-sub"><span id="sup-phone"></span></div>
-                  </div>
-                </div>
-                <div class="chat-header-actions">
-                  <button type="button" id="sup-mark-unread" class="btn-nav" title="Mark as unread">
-                    <i class="fa-solid fa-envelope"></i> <span>Mark unread</span>
-                  </button>
-                  <a id="sup-wa-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-header-action btn-whatsapp-direct" title="Open in WhatsApp Web">
-                    <i class="fa-brands fa-whatsapp"></i> <span>WhatsApp Web</span>
-                  </a>
-                </div>
-              </div>
-
-              <div id="sup-messages" class="chat-messages-container"></div>
-
-              <div class="chat-input-bar">
-                <div id="sup-window-note" class="sup-window-note" style="display: none;"></div>
-                <div class="input-row">
-                  <textarea id="sup-textarea" class="chat-textarea" rows="1" maxlength="4096" placeholder="Message (Enter = send, Shift+Enter = new line)"></textarea>
-                  <button id="sup-send-btn" class="btn-send" type="button" title="Send (Enter)">
-                    <i class="fa-solid fa-paper-plane"></i>
-                  </button>
-                </div>
-                <div id="sup-status" class="send-status-line"></div>
-              </div>
-
-            </div>
-
-          </main>
-
-        </div>
-      </section>
-    </div>
+    <!-- Details -->
+    <aside id="details" class="details-pane" aria-label="Contact details" hidden></aside>
   </div>
 
-  <!-- Scripts (Cache-Busted) -->
-  <script src="https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/recorder.min.js" integrity="sha384-gh3hk6R0W1LEVQaMXfcGb6beNwAVN+/dwrc46kqaqxNv3cmsb352oE0mmZTCzj8W" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script src="js/config.js?v=20261014_voice"></script>
-  <script src="js/app.js?v=20261115_keepsent"></script>
-  <script src="js/support.js?v=20261102_unread"></script>
+  <div id="modal" class="modal" hidden></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="js/api.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

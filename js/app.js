@@ -1,1694 +1,1558 @@
-/**
- * Teshrij Follow-up - Live Chat Panel
+/* Teshrij Desk — one inbox for WhatsApp + Instagram, one conversation per contact.
  *
- * Shows WhatsApp conversations from the past 24h whose latest message is at least 2h old,
- * minus the ones the `triage` edge function hid as finished (explicit confirmation, explicit
- * decline, or final follow-up already sent, each double-checked by two AI models).
- * Anything not yet checked, changed since its check, or uncertain stays in the list.
+ * Two kinds of labels, kept apart on purpose:
+ *  - SYSTEM labels (set automatically, shown as square badges): every conversation episode is
+ *    sales or support. Support stays open until someone resolves it with a fixed closing message
+ *    (the server decides when that is allowed); sales carries a stage. Unsure ones wait in
+ *    "Needs label". Staff can correct them.
+ *  - MANUAL labels (the staff's own, colored pills): groups, "customer wrote again" rules, views.
+ * Every staff member signs in with a personal access token; the server records who did what.
+ * All rules live in SQL (schema desk); this file shows state and sends staff intent.
  */
-
-(() => {
+(function () {
   'use strict';
+  const C = window.DESK;
+  const api = window.DeskApi;
+  const $ = (s, el = document) => el.querySelector(s);
 
-  const HOURS_LOOKBACK_CONVS = 24; // 24h window
-  const MIN_HOURS_OLD = 2.0;       // At least 2h old
-  const REFRESH_MS = 3 * 60 * 1000;
-  // A chat you just messaged stays in the list (greyed, "Sent") for this long. The inbox query drops
-  // it meanwhile: its newest message is under 2h old and send_queue has a send from the last hour.
-  const SENT_KEEP_MS = 2 * 60 * 60 * 1000;
-  const SENT_STORAGE_KEY = 'followup_recent_sends'; // sessionStorage, cleared on sign-out
-  const MAX_BACKUP_BYTES = 50 * 1024 * 1024; // upper bound for an "Ingest Backup" CSV
-  const MAX_MEDIA_BYTES = 30 * 1024 * 1024;  // upper bound for one image / voice note
+  // ------------------------------------------------------------------ helpers
 
-  const STATUS_LABELS = {
-    NEEDS_REPLY: 'Unanswered',
-    OPEN: 'Follow up',
-    CONFIRMED: 'Confirmed working',
-    DECLINED: 'Declined',
-    ACKNOWLEDGED: 'Thanked',
-    FOLLOWED_UP: 'Final follow-up sent',
-    NOT_RELEVANT: 'Not a customer',
-    MANUAL_DONE: 'Marked done',
-    MANUAL_SHOW: 'Kept visible',
-    SENT: 'Follow-up sent'
-  };
-
-  const state = {
-    session: null,
-    conversations: [],
-    filteredConversations: [],
-    activeContact: null,
-    activeConversationData: null,
-    activeFilter: 'todo',
-    searchQuery: '',
-    isLoadingConversations: false,
-    isTriaging: false,
-    lastTriage: null,
-    refreshTimer: null,
-    triageTimer: null,
-    authEpoch: 0,          // bumped on every login/logout so stale async work is dropped
-    activeTab: 'followup'  // 'followup' or the id of a view registered by another script
-  };
-
-  const views = {};        // extra top-bar tabs (js/support.js), see registerView()
-  let chatView = null;     // message renderer of the follow-up chat pane
-
-  const el = {};
-
-  function initDOMElements() {
-    el.loginView = document.getElementById('login-view');
-    el.appView = document.getElementById('app-view');
-    el.loginForm = document.getElementById('login-form');
-    el.emailInput = document.getElementById('login-email');
-    el.passwordInput = document.getElementById('login-password');
-    el.loginError = document.getElementById('login-error');
-    el.loginSubmitBtn = document.getElementById('login-submit-btn');
-    el.userEmailDisplay = document.getElementById('user-email-display');
-    el.logoutBtn = document.getElementById('logout-btn');
-    el.syncBtn = document.getElementById('sync-btn');
-    el.triageStatusText = document.getElementById('triage-status-text');
-
-    el.convCountBadge = document.getElementById('conv-count-badge');
-    el.total24hCount = document.getElementById('total-24h-count');
-    el.searchInput = document.getElementById('search-input');
-    el.convList = document.getElementById('conv-list');
-    el.filterPills = document.querySelectorAll('#view-chats .pill-btn');
-    el.pillCountTodo = document.getElementById('pill-count-todo');
-    el.pillCountUnanswered = document.getElementById('pill-count-unanswered');
-    el.pillCountHidden = document.getElementById('pill-count-hidden');
-
-    el.chatEmptyState = document.getElementById('chat-empty-state');
-    el.chatActiveView = document.getElementById('chat-active-view');
-    el.chatPhone = document.getElementById('chat-phone');
-    el.chatProfileName = document.getElementById('chat-profile-name');
-    el.chatWaLink = document.getElementById('chat-wa-link');
-    el.chatAdBanner = document.getElementById('chat-ad-banner');
-    el.chatTriageBar = document.getElementById('chat-triage-bar');
-    el.btnMarkDone = document.getElementById('btn-mark-done');
-    el.btnShowAgain = document.getElementById('btn-show-again');
-    el.chatMessagesContainer = document.getElementById('chat-messages-container');
-    el.chatTextarea = document.getElementById('chat-textarea');
-    el.btnSend = document.getElementById('btn-send');
-    el.sendStatusLine = document.getElementById('send-status-line');
-    el.btnVoice = document.getElementById('btn-voice');
-    el.voiceBar = document.getElementById('voice-recorder-bar');
-    el.voiceTimer = document.getElementById('voice-rec-timer');
-    el.voicePreview = document.getElementById('voice-rec-preview');
-    el.btnVoiceCancel = document.getElementById('btn-voice-cancel');
-    el.btnVoiceSend = document.getElementById('btn-voice-send');
-    el.btnVoiceSendLabel = document.getElementById('btn-voice-send-label');
-    el.quickTemplates = document.querySelectorAll('#view-chats .template-pill');
-    chatView = createChatRenderer(el.chatMessagesContainer);
-
-    el.viewChats = document.getElementById('view-chats');
-    el.triageStatus = document.getElementById('triage-status');
-    el.tabButtons = document.querySelectorAll('.suite-tab-btn[data-tab]');
-  }
-
-  // =========================================================================
-  // Phone Formatting & Utilities
-  // =========================================================================
-  function normalizePhone(phoneStr) {
-    if (!phoneStr) return "";
-    let raw = String(phoneStr).trim();
-    let digits = raw.replace(/\D/g, "");
-    if (!digits) return "";
-    if (digits.startsWith("00")) digits = digits.slice(2);
-    if (digits.startsWith("961")) {
-      let rest = digits.slice(3);
-      if (rest.startsWith("03") && rest.length === 8) return "961" + rest.slice(1);
-      return digits;
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v == null || v === false) continue;
+        if (k === 'class') el.className = v;
+        else if (k === 'style') el.setAttribute('style', v);
+        else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+        else if (k === 'dataset') Object.assign(el.dataset, v);
+        else if (k === 'value') el.value = v;
+        else if (k === 'checked' || k === 'disabled' || k === 'selected') el[k] = !!v;
+        else el.setAttribute(k, v === true ? '' : String(v));
+      }
     }
-    if (digits.length === 8 && digits.startsWith("03")) return "961" + digits.slice(1);
-    if (digits.length === 7 && digits.startsWith("3")) return "961" + digits;
-    if (digits.length === 7 && (digits.startsWith("7") || digits.startsWith("8"))) return "961" + digits;
-    if (digits.length === 8 && (digits.startsWith("7") || digits.startsWith("8"))) return "961" + digits;
-    return digits;
-  }
-
-  function formatPhoneDisplay(contact) {
-    if (!contact) return "Unknown";
-    const str = String(contact);
-    if (str.startsWith("961") && str.length >= 10) {
-      const rest = str.slice(3);
-      if (rest.length === 8) return `+961 ${rest.slice(0, 2)} ${rest.slice(2, 5)} ${rest.slice(5)}`;
-      return `+961 ${rest}`;
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
     }
-    return `+${str}`;
+    return el;
   }
 
-  function formatRelativeTime(isoStr) {
-    if (!isoStr) return "";
-    const diffSec = Math.floor((new Date() - new Date(isoStr)) / 1000);
-    if (diffSec < 60) return "Just now";
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
-    const diffDays = Math.floor(diffHr / 24);
-    return `${diffDays}d ago`;
+  const ICONS = {
+    search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+    inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+    unread: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
+    all: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    nolabel: '<path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z" stroke-dasharray="3 3"/>',
+    send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+    panel: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
+    mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/>',
+    back: '<path d="m15 18-6-6 6-6"/>',
+    sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+    moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-14.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/>',
+    zap: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
+    ext: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    x: '<path d="M18 6 6 18M6 6l12 12"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
+    ig: '<rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    chat: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+    life: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m4.9 4.9 4.3 4.3m5.6 5.6 4.3 4.3m0-14.2-4.3 4.3m-5.6 5.6-4.3 4.3"/>',
+    dollar: '<path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+    alarm: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3 2 6m20 0-3-3"/>',
+    hourglass: '<path d="M5 22h14M5 2h14M17 22v-4.2a2 2 0 0 0-.6-1.4L12 12l-4.4 4.4a2 2 0 0 0-.6 1.4V22M7 2v4.2a2 2 0 0 0 .6 1.4L12 12l4.4-4.4a2 2 0 0 0 .6-1.4V2"/>',
+    help: '<circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    reply: '<path d="m9 17-5-5 5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
+    mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4"/>',
+    clip: '<path d="m21.4 11-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/>',
+    file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>',
+    team: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>',
+    bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
+    belloff: '<path d="M8.7 3A6 6 0 0 1 18 8a21 21 0 0 0 .6 5M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-2M10.3 21a1.9 1.9 0 0 0 3.4 0M2 2l20 20"/>',
+    logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+    key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
+  };
+  function icon(name, cls = '') {
+    const span = document.createElement('span');
+    span.innerHTML = `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+    return span.firstChild;
   }
 
-  function formatMessageTime(isoStr) {
-    if (!isoStr) return "";
-    const date = new Date(isoStr);
-    return date.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const TZ = 'Asia/Beirut';
+  const fmtTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+  const fmtWeekday = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short' });
+  const fmtDate = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short' });
+  const fmtDayLong = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' });
+  const fmtFull = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const dayKey = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(d);
+
+  function listTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (dayKey(d) === dayKey(new Date(now()))) return fmtTime.format(d);
+    if (dayKey(d) === dayKey(new Date(now() - 86400000))) return 'Yesterday';
+    if (now() - d.getTime() < 6 * 86400000) return fmtWeekday.format(d);
+    return fmtDate.format(d);
+  }
+  function dayLabel(d) {
+    const k = dayKey(d);
+    if (k === dayKey(new Date(now()))) return 'Today';
+    if (k === dayKey(new Date(now() - 86400000))) return 'Yesterday';
+    return fmtDayLong.format(d);
+  }
+  function ago(ts) {
+    const s = Math.max(0, (now() - Date.parse(ts)) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    return fmtDate.format(new Date(ts));
+  }
+  function dur(ms) {
+    const m = Math.max(0, Math.round(ms / 60000));
+    if (m < 60) return `${m}m`;
+    const hh = Math.floor(m / 60);
+    if (hh < 48) return `${hh}h ${String(m % 60).padStart(2, '0')}m`;
+    return `${Math.floor(hh / 24)}d ${hh % 24}h`;
+  }
+  function phoneLabel(contact) {
+    const d = String(contact);
+    if (d.startsWith('961') && d.length >= 10) return `+961 ${d.slice(3, d.length - 6)} ${d.slice(-6, -3)} ${d.slice(-3)}`;
+    return `+${d}`;
+  }
+  const isIg = (c) => c && (c.channel === 'ig' || /^ig_/.test(c.contact || ''));
+  const displayName = (c) => c.name || (isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram user') : phoneLabel(c.contact));
+  const subtitle = (c) => isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram') : phoneLabel(c.contact);
+
+  const AV_COLORS = ['#0ea5e9', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#84cc16', '#ef4444', '#06b6d4', '#a855f7', '#f59e0b', '#10b981'];
+  function avColor(key) { let x = 0; for (const ch of String(key)) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return AV_COLORS[x % AV_COLORS.length]; }
+  function initials(c) {
+    const n = (c.name || c.handle || '').replace(/[^\p{L}\p{N} ]/gu, '').trim();
+    if (!n) return isIg(c) ? '@' : '#';
+    const p = n.split(/\s+/).map((w) => Array.from(w));
+    return ((p[0][0] || '') + (p.length > 1 ? p[p.length - 1][0] || '' : '')).toUpperCase();
+  }
+  function avatar(c, size = '') {
+    return h('div', { class: `av ${size}`, style: `background:${avColor(c.contact || c.name)}` }, initials(c),
+      size === 'sm' ? null : h('span', { class: `ch ${isIg(c) ? 'ig' : 'wa'}`, title: isIg(c) ? 'Instagram' : 'WhatsApp' }, icon(isIg(c) ? 'ig' : 'phone')));
   }
 
-  // Rendering uses DOM nodes + textContent everywhere; this helper is kept for any HTML string
-  // that might be needed later. It escapes & < > " ' so it is safe in text and quoted attributes.
-  function escapeHTML(str) {
-    if (str === null || str === undefined) return "";
-    return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  function toast(msg, kind = '') {
+    const el = h('div', { class: `toast ${kind}`, role: kind === 'error' ? 'alert' : 'status' }, msg);
+    $('#toasts').append(el);
+    setTimeout(() => el.classList.add('out'), kind === 'error' ? 6000 : 2600);
+    setTimeout(() => el.remove(), kind === 'error' ? 6400 : 3000);
+  }
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16)));
+  function store(key, val) {
+    try {
+      if (val === undefined) return JSON.parse(localStorage.getItem(key) || 'null');
+      localStorage.setItem(key, JSON.stringify(val));
+    } catch (e) { return null; }
+    return val;
   }
 
-  // Short, single-line text for messages shown to the user (never dump raw server payloads)
-  function safeErrorText(value, fallback) {
-    let text = '';
-    if (typeof value === 'string') text = value;
-    else if (value && typeof value.message === 'string') text = value.message;
-    text = text.slice(0, 2000).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
-    // Never echo anything that looks like a token or key
-    text = text.replace(/eyJ[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]+)*/g, '[redacted]').replace(/\b(sb_[a-z]+_|sk-)[A-Za-z0-9_-]+/g, '[redacted]');
-    if (!text) return fallback || 'Unexpected error';
-    return text.length > 200 ? text.slice(0, 200) + '...' : text;
+  // ------------------------------------------------------------------ state
+
+  const S = {
+    me: null,
+    labels: [], labelById: new Map(), views: [],
+    counts: { labels: {}, views: {}, views_unread: {}, sys: {} },
+    view: store('desk_view') || '',
+    channel: store('desk_channel') || '',
+    q: '',
+    chats: [], more: false, loadingMore: false, listSeq: 0,
+    active: null,       // { contact, data, pending: [], customer, draft }
+    canned: [], closers: [],
+    skew: 0,
+    details: store('desk_details') !== false,
+    notify: store('desk_notify') === true,
+    lastLate: 0,
+  };
+  const now = () => Date.now() + S.skew;
+  const sys = () => S.counts.sys || {};
+  const slaMin = () => 10;
+
+  function setMeta(meta) {
+    S.labels = meta.labels || [];
+    S.views = meta.views || [];
+    S.labelById = new Map(S.labels.map((l) => [l.id, l]));
+  }
+  function labelChip(id, xs = true) {
+    const l = S.labelById.get(id);
+    if (!l) return null;
+    return h('span', { class: `chip${xs ? ' xs' : ''}`, style: `--c:${l.color}` }, l.name);
   }
 
-  function createEl(tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text !== undefined && text !== null) node.textContent = String(text);
-    return node;
+  // System views (episodes)
+  const SYS_VIEWS = [
+    ['sys_waiting', 'alarm', 'Waiting on us', () => sys().support_waiting, true, 'Support customers waiting for our reply (longest wait first)'],
+    ['sys_support', 'life', 'Support open', () => sys().support_open, false, 'Every open support episode'],
+    ['sys_closing', 'hourglass', 'Window closing', () => sys().support_window_closing, true, 'Open support whose reply window closes within 4h: reply or resolve before it closes'],
+    ['sys_unanswered', 'dollar', 'Sales unanswered', () => sys().sales_unanswered, true, 'Sales customers waiting for our reply'],
+    ['sys_followup', 'clock', 'Follow-ups due', () => sys().sales_followup_due, false, 'We spoke last, the customer went quiet 2h+, the window is still open'],
+    ['sys_sales', 'dollar', 'Sales open', () => sys().sales_open, false, 'Every open sales episode'],
+    ['sys_label', 'help', 'Needs label', () => sys().needs_label, true, 'The system is not sure: sales or support?'],
+    ['sys_resolved', 'check', 'Resolved 24h', () => sys().resolved_24h, false, 'Support resolved in the last 24 hours'],
+  ];
+  function viewName(v = S.view) {
+    if (v === 'all') return 'All chats';
+    if (v === 'unread') return 'Unread';
+    if (v === 'unlabelled') return 'No label';
+    const sv = SYS_VIEWS.find((x) => x[0] === v);
+    if (sv) return sv[2];
+    if (/^v\d+$/.test(v)) return (S.views.find((x) => 'v' + x.id === v) || {}).name || 'View';
+    if (/^l\d+$/.test(v)) return (S.labelById.get(Number(v.slice(1))) || {}).name || 'Label';
+    return 'Inbox';
   }
-
-  function icon(classes) {
-    return createEl('i', classes);
+  function viewCount(v = S.view) {
+    const c = S.counts;
+    if (v === 'all') return c.all;
+    if (v === 'unread') return c.unread;
+    if (v === 'unlabelled') return c.unlabelled;
+    const sv = SYS_VIEWS.find((x) => x[0] === v);
+    if (sv) return sv[3]();
+    if (/^v\d+$/.test(v)) return (c.views || {})[v.slice(1)];
+    if (/^l\d+$/.test(v)) return (c.labels || {})[v.slice(1)];
+    return null;
   }
+  const validView = (v) => v === 'all' || v === 'unread' || v === 'unlabelled' || SYS_VIEWS.some((x) => x[0] === v)
+    || (/^v\d+$/.test(v) && S.views.some((x) => 'v' + x.id === v))
+    || (/^l\d+$/.test(v) && S.labelById.has(Number(v.slice(1))));
 
-  const SUPABASE_ORIGIN = (() => {
-    try { return new URL(window.SUPABASE_URL).origin; } catch (e) { return ''; }
-  })();
-  const PUBLIC_MEDIA_PATH = '/storage/v1/object/public/bsb-media/';
-
-  // Only an https URL on our own Supabase host inside the public bsb-media bucket may be used
-  // directly as <img>/<audio> src. Anything else (javascript:, data:, other hosts, markup) is rejected.
-  function safePublicMediaUrl(rawUrl) {
-    if (typeof rawUrl !== 'string') return null;
-    const trimmed = rawUrl.trim();
-    if (!trimmed || trimmed.length > 2048 || !SUPABASE_ORIGIN) return null;
-    let u;
-    try { u = new URL(trimmed); } catch (e) { return null; }
-    if (u.protocol !== 'https:' || u.origin !== SUPABASE_ORIGIN) return null;
-    if (u.username || u.password) return null;
-    if (!u.pathname.startsWith(PUBLIC_MEDIA_PATH) || u.pathname.includes('..')) return null;
-    return u.href;
-  }
-
-  // Media is either already cached in the public bucket (direct URL) or must be fetched from the
-  // admin-only bsb_media function. The access token is sent as a header, never in the URL.
-  function resolveMedia(chatId, mediaType, rawUrl) {
-    const direct = safePublicMediaUrl(rawUrl);
-    if (direct) return { kind: 'direct', url: direct };
-    if (chatId !== null && chatId !== undefined && String(chatId) !== '') {
-      const typeParam = String(mediaType || '').toLowerCase().includes('image') ? 'image' : 'audio';
-      return {
-        kind: 'protected',
-        type: typeParam,
-        url: `${SUPABASE_ORIGIN}/functions/v1/bsb_media?chatid=${encodeURIComponent(String(chatId))}&type=${typeParam}`
-      };
+  // System label vocabulary
+  const PRODUCTS = { gpt: 'ChatGPT', gpt_private: 'ChatGPT private', anghami: 'Anghami', netflix: 'Netflix', shahid: 'Shahid', spotify: 'Spotify', gemini: 'Gemini', capcut: 'CapCut', canva: 'Canva', other: 'Other' };
+  const STAGES = { unanswered: 'Unanswered', got_price: 'Got price', waiting_payment: 'Waiting payment', needs_followup: 'Needs follow-up', bought: 'Bought', lost: 'Lost' };
+  const GATE_TEXT = {
+    not_support: 'Only support episodes are resolved.',
+    not_open: 'This episode is already closed.',
+    never_replied: 'Nobody has replied to the customer yet.',
+    customer_waiting: "The customer's last message is unanswered: reply first.",
+    window_closed: 'The reply window is closed, so no closing message can be sent.',
+  };
+  function waitMs(t) { return t && t.waiting && t.waiting_since ? now() - Date.parse(t.waiting_since) : 0; }
+  function sysBadge(t, big = false) {
+    if (!t) return null;
+    const cls = big ? 'sys big' : 'sys';
+    if (t.kind === 'pending') return h('span', { class: `${cls} k-label`, title: 'The system is labelling this episode' }, icon('help', 'xs'), 'labelling…');
+    if (t.kind === 'unsure') return h('span', { class: `${cls} k-label`, title: t.kind_reason || '' }, icon('help', 'xs'), 'Needs label');
+    if (t.kind === 'ignore') return h('span', { class: `${cls} k-ignore`, title: t.kind_reason || '' }, 'Ignored');
+    const prod = t.product ? ` · ${PRODUCTS[t.product] || t.product}` : '';
+    if (t.kind === 'support') {
+      if (t.status === 'resolved') return h('span', { class: `${cls} k-done`, title: `Resolved by ${t.resolved_by || '?'}` }, icon('check', 'xs'), `Resolved${prod}`);
+      if (t.status === 'closed') return h('span', { class: `${cls} k-ignore` }, `Support closed${prod}`);
+      const w = waitMs(t);
+      return h('span', { class: `${cls} k-support${t.waiting ? (w > slaMin() * 60e3 ? ' late' : ' wait') : ''}`, title: t.kind_reason || '' },
+        icon('life', 'xs'), `Support${prod}`, t.waiting ? ` · waiting ${dur(w)}` : t.last_in_ack ? ' · said thanks' : '');
+    }
+    if (t.kind === 'sales') {
+      return h('span', { class: `${cls} k-sales stage-${t.stage}`, title: t.kind_reason || '' }, icon('dollar', 'xs'),
+        `${STAGES[t.stage] || 'Sales'}${prod}`, t.stage === 'unanswered' && t.waiting_since ? ` · ${dur(waitMs(t))}` : '',
+        t.followup_due ? ' · follow up' : '');
     }
     return null;
   }
 
-  async function fetchProtectedMedia(url, expectedType) {
-    const { data: { session } } = await window.supabaseClient.auth.getSession();
-    const token = session && session.access_token;
-    if (!token) throw new Error('Not signed in');
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}`, apikey: window.SUPABASE_ANON_KEY },
-      credentials: 'omit',
-      cache: 'default',
-      referrerPolicy: 'no-referrer'
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const blob = await resp.blob();
-    if (!blob.size || blob.size > MAX_MEDIA_BYTES) throw new Error('Unexpected media size');
-    // The upstream content type is not trustworthy. Refuse anything that could be an active
-    // document (HTML, SVG, XML, script...) and give every other payload a fixed, inert media type,
-    // so a blob: URL opened in a new tab can never run script in this origin.
-    const mime = String(blob.type || '').toLowerCase().split(';')[0].trim();
-    if (/^text\/|html|xml|svg|script|json/.test(mime)) throw new Error('Unexpected media type');
-    const allowed = expectedType === 'image'
-      ? /^image\/[a-z0-9.+-]+$/.test(mime)             // svg/xml already refused above
-      : /^(audio|video)\/[a-z0-9.+-]+$/.test(mime);
-    if (allowed) return blob;
-    return new Blob([blob], { type: expectedType === 'image' ? 'image/jpeg' : 'audio/ogg' });
+  // ------------------------------------------------------------------ boot
+
+  async function start() {
+    applyTheme(store('desk_theme'));
+    if (C.demo) $('#demoBadge').hidden = false;
+    if (!api.hasToken()) return showLogin();
+    $('#login').hidden = true;
+    $('#app').hidden = false;
+    bindUi();
+    try {
+      const b = await api.call('boot', { view: /^(all|unread|unlabelled|v\d+|l\d+|sys_[a-z]+)$/.test(S.view) ? S.view : 'all', channel: S.channel });
+      S.me = b.me;
+      setMeta(b.meta);
+      S.canned = b.canned || [];
+      S.closers = b.closers || [];
+      S.skew = b.now ? Date.parse(b.now) - Date.now() : 0;
+      renderStaff();
+      if (!validView(S.view)) {
+        S.view = 'sys_waiting';
+        S.counts = b.counts;
+        renderNav();
+        await refreshList(true);
+      } else {
+        applyList(b, true);
+      }
+    } catch (e) {
+      if (e.status === 401) { api.signOut(); return showLogin(e.message); }
+      toast(`Could not load: ${e.message}`, 'error');
+    }
+    const m = location.hash.match(/^#c=([0-9a-z_]+)$/i);
+    if (m) openChat(m[1]);
+    loopList();
+    loopChat();
   }
 
-  function showMediaError(holder, text) {
-    const old = holder.querySelector('.media-status');
-    if (old) old.remove();
-    const note = createEl('div', 'media-status media-status-error');
-    note.append(icon('fa-solid fa-triangle-exclamation'), ' ' + text);
-    holder.appendChild(note);
-  }
-
-  function buildMessageRow(isIncoming, bubbleChildren, timeText, statusIconClasses) {
-    const row = createEl('div', `chat-msg ${isIncoming ? 'incoming' : 'outgoing'}`);
-    const bubble = createEl('div', 'msg-bubble');
-    bubbleChildren.forEach(child => { if (child) bubble.appendChild(child); });
-    const meta = createEl('div', 'msg-meta');
-    meta.appendChild(createEl('span', '', timeText));
-    if (statusIconClasses) meta.appendChild(icon(statusIconClasses));
-    row.append(bubble, meta);
-    return row;
-  }
-
-  // One renderer per message pane (follow-up chat, support chat). Each keeps its own media
-  // bookkeeping, so re-rendering one pane never drops or leaks the downloads of the other.
-  function createChatRenderer(container) {
-    const media = {
-      renderToken: 0,   // identifies the current chat render; late media downloads are dropped
-      objectUrls: [],   // blob: URLs created for the open chat (revoked on re-render)
-      observer: null
+  function showLogin(err) {
+    $('#app').hidden = true;
+    $('#login').hidden = false;
+    $('#loginError').textContent = err && err !== 'Signed out' ? err : '';
+    $('#loginForm').onsubmit = async (ev) => {
+      ev.preventDefault();
+      $('#loginError').textContent = '';
+      try {
+        await api.signIn($('#loginToken').value);
+        location.reload();
+      } catch (e) { $('#loginError').textContent = e.status === 401 ? 'This token is not valid or was revoked.' : e.message; }
     };
+  }
 
-    function releaseMediaResources() {
-      if (media.observer) {
-        media.observer.disconnect();
-        media.observer = null;
-      }
-      media.objectUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
-      media.objectUrls = [];
-    }
+  function applyTheme(t) {
+    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+    else delete document.documentElement.dataset.theme;
+    const dark = t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches);
+    const b = $('#themeBtn');
+    if (b) b.replaceChildren(icon(dark ? 'sun' : 'moon'));
+  }
 
-    // Download one protected media item and attach it as a blob: URL
-    async function loadProtectedMedia(node) {
-      const job = node.__mediaJob;
-      if (!job || job.started) return;
-      job.started = true;
-      const epoch = state.authEpoch;
-      const renderToken = job.renderToken;
-      const status = job.holder.querySelector('.media-status');
+  // ------------------------------------------------------------------ me / team
+
+  function renderStaff() {
+    const b = $('#staffBtn');
+    const n = S.me ? S.me.name : '…';
+    b.replaceChildren(h('div', { class: 'av sm', style: `background:${avColor(n)}` }, initials({ name: n })),
+      h('span', null, n), S.me && S.me.role === 'admin' ? h('span', { class: 'role' }, 'admin') : null);
+    $('#bellBtn').replaceChildren(icon(S.notify ? 'bell' : 'belloff'));
+    $('#bellBtn').title = S.notify ? 'Alerts on: sound + notification when a support customer waits more than 10 min' : 'Alerts off';
+  }
+  function openAccount() {
+    const isAdmin = S.me && S.me.role === 'admin';
+    openModal(h('div', { class: 'sheet narrow' },
+      h('div', { class: 'sheet-head' }, h('h3', null, S.me ? S.me.name : 'Account'), h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+      h('div', { class: 'sheet-body' },
+        h('p', { class: 'hint' }, `Signed in with your personal access token${S.me ? ` (${S.me.role})` : ''}. Everything you do is saved under your name.`),
+        h('div', { class: 'menu-list' },
+          isAdmin ? h('button', { class: 'btn block', onclick: openTeam }, icon('team', 'sm'), 'Team & access tokens') : null,
+          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openManage(); } }, icon('sliders', 'sm'), 'Labels & views') : null,
+          h('button', { class: 'btn block', onclick: () => { if (confirm('Sign out of the desk on this device?')) { api.signOut(); location.reload(); } } }, icon('logout', 'sm'), 'Sign out')))));
+  }
+  async function openTeam() {
+    let list = [];
+    const body = h('div', { class: 'sheet-body' });
+    const signLink = (t) => `${location.origin}${location.pathname}#token=${t}`;
+    const showToken = (name, token) => openModal(h('div', { class: 'sheet narrow' },
+      h('div', { class: 'sheet-head' }, h('h3', null, `Access for ${name}`)),
+      h('div', { class: 'sheet-body' },
+        h('p', { class: 'hint' }, 'Send this link to them privately (it signs them in on that device). It is shown only once; if it is lost, make a new one.'),
+        h('div', { class: 'token-box' }, h('code', null, signLink(token))),
+        h('div', { class: 'menu-list' },
+          h('button', { class: 'btn', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(signLink(token)); toast('Sign-in link copied'); } }, icon('copy', 'sm'), 'Copy sign-in link'),
+          h('button', { class: 'btn', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(token); toast('Token copied'); } }, icon('key', 'sm'), 'Copy token only'))),
+      h('div', { class: 'sheet-foot' }, h('button', { class: 'btn primary', onclick: openTeam }, 'Done'))), false);
+    const save = async (payload, label) => {
       try {
-        const blob = await fetchProtectedMedia(job.url, job.type);
-        // The chat was re-rendered or the user logged out while downloading: drop the result
-        if (epoch !== state.authEpoch || renderToken !== media.renderToken || !node.isConnected) return;
-        const objectUrl = URL.createObjectURL(blob);
-        media.objectUrls.push(objectUrl);
-        node.src = objectUrl;
-        if (job.link) job.link.href = objectUrl;
-        node.style.display = '';
-        if (status) status.remove();
+        const r = await api.call('staff_save', payload);
+        list = r.staff;
+        if (r.token) return showToken(label, r.token);
+        draw();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    const draw = () => {
+      const name = h('input', { type: 'text', placeholder: 'Name, e.g. Jeanpaul', maxlength: 40 });
+      const role = h('select', null, h('option', { value: 'staff' }, 'Staff'), h('option', { value: 'admin' }, 'Admin'));
+      body.replaceChildren(
+        h('p', { class: 'hint' }, 'Each person signs in with their own token. Revoke a token and that person is signed out everywhere at their next click.'),
+        h('div', { class: 'team' }, list.map((s) => h('div', { class: `team-row${s.active ? '' : ' off'}` },
+          h('div', { class: 'av sm', style: `background:${avColor(s.name)}` }, initials({ name: s.name })),
+          h('div', { class: 'team-main' }, h('b', null, s.name), h('span', { class: 'muted' },
+            `${s.role} · token …${s.token_hint}${s.last_seen_at ? ' · seen ' + ago(s.last_seen_at) : ' · never used'}${s.active ? '' : ' · revoked'}`)),
+          s.active ? [
+            h('button', { class: 'btn sm', title: 'Make a new token (the old one stops working)', onclick: () => { if (confirm(`Make a new token for ${s.name}? The old one stops working.`)) save({ id: s.id, new_token: true }, s.name); } }, icon('key', 'sm'), 'New token'),
+            h('button', { class: 'btn sm danger', disabled: S.me && s.id === S.me.id, onclick: () => { if (confirm(`Revoke ${s.name}'s access?`)) save({ id: s.id, active: false }); } }, 'Revoke'),
+          ] : h('button', { class: 'btn sm', onclick: () => save({ id: s.id, active: true, new_token: true }, s.name) }, 'Restore'))),
+        ),
+        h('h5', null, 'Add someone'),
+        h('div', { class: 'team-add' }, name, role, h('button', { class: 'btn primary', onclick: () => { if (name.value.trim()) save({ name: name.value, role: role.value }, name.value.trim()); } }, icon('plus', 'sm'), 'Create access')));
+    };
+    openModal(h('div', { class: 'sheet' },
+      h('div', { class: 'sheet-head' }, h('h3', null, 'Team & access tokens'), h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+      body, h('div', { class: 'sheet-foot' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Done'))), true);
+    body.replaceChildren(h('p', { class: 'hint' }, 'Loading…'));
+    try { list = await api.call('staff_list'); draw(); } catch (e) { body.replaceChildren(h('p', { class: 'error' }, e.message)); }
+  }
+
+  // ------------------------------------------------------------------ sidebar
+
+  function navItem(key, ic, name, n, hot, title) {
+    return h('button', { class: `nav-item${S.view === key ? ' on' : ''}`, onclick: () => setView(key), title },
+      typeof ic === 'string' ? icon(ic) : ic, h('span', { class: 'lbl' }, name),
+      n ? h('span', { class: `n${hot ? ' hot' : ''}` }, n > 999 ? '999+' : n) : null);
+  }
+  function renderNav() {
+    const c = S.counts;
+    const s = sys();
+    $('#navSys').replaceChildren(...SYS_VIEWS.map(([key, ic, name, n, hot, title]) => {
+      const it = navItem(key, ic, name, n(), hot && n() > 0, title);
+      if (key === 'sys_waiting' && s.support_late) it.classList.add('late');
+      return it;
+    }), h('div', { class: 'nav-stats', title: 'Today, Beirut time' },
+      h('span', null, h('b', null, s.resolved_today || 0), ' resolved'),
+      h('span', null, h('b', null, s.reopened_today || 0), ' reopened'),
+      s.first_reply_median_min != null ? h('span', null, h('b', null, `${s.first_reply_median_min}m`), ' 1st reply') : null));
+    const views = S.views.map((v) => navItem('v' + v.id, 'inbox', v.name, (c.views || {})[v.id], true));
+    $('#navViews').replaceChildren(...views,
+      navItem('unread', 'unread', 'Unread', c.unread, false),
+      navItem('all', 'all', 'All chats', null),
+      navItem('unlabelled', 'nolabel', 'No label', null));
+    const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id]));
+    if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, 'No labels yet.'));
+    $('#navLabels').replaceChildren(...out);
+    const waiting = (s.support_waiting || 0) + (s.sales_unanswered || 0);
+    document.title = waiting ? `(${waiting}) Teshrij Desk` : 'Teshrij Desk';
+    $('#manageBtn').hidden = !(S.me && S.me.role === 'admin');
+  }
+  function setView(key) {
+    S.view = key;
+    store('desk_view', key);
+    $('#app').classList.remove('side-open');
+    $('#scrim').hidden = true;
+    renderNav();
+    S.chats = [];
+    renderList();
+    refreshList(true);
+  }
+
+  // ------------------------------------------------------------------ list
+
+  function listArgs(extra = {}) { return { view: S.view, channel: S.channel, q: S.q, ...extra }; }
+  function applyList(b, replace) {
+    if (b.counts) S.counts = b.counts;
+    if (b.now) S.skew = Date.parse(b.now) - Date.now();
+    const rows = b.chats || [];
+    if (replace) {
+      if (S.active && !rows.some((x) => x.contact === S.active.contact)) {
+        const keep = S.chats.find((x) => x.contact === S.active.contact);
+        if (keep) {
+          const i = rows.findIndex((x) => x.last_at < keep.last_at);
+          rows.splice(i < 0 ? rows.length : i, 0, keep);
+        }
+      }
+      S.chats = rows;
+      S.more = !S.view.startsWith('sys_') && rows.length >= (b._limit || 60);
+    }
+    renderNav();
+    renderList();
+    alertIfLate();
+  }
+  async function refreshList(reset = false) {
+    const seq = ++S.listSeq;
+    const limit = reset ? 60 : Math.min(200, Math.max(60, S.chats.length));
+    try {
+      const b = await api.call('inbox', listArgs({ limit }));
+      if (seq !== S.listSeq) return;
+      b._limit = limit;
+      applyList(b, true);
+      if (S.active && S.active.data) {
+        const row = S.chats.find((x) => x.contact === S.active.contact);
+        if (row && row.last_at !== S.active.data.conv.last_at) pollChat();
+      }
+    } catch (e) {
+      if (e.status === 401) { api.signOut(); return showLogin('Your access was revoked or expired'); }
+      if (seq === S.listSeq) $('#viewCount').title = `offline: ${e.message}`;
+    }
+  }
+  async function loadMore() {
+    if (!S.more || S.loadingMore || !S.chats.length) return;
+    S.loadingMore = true;
+    const seq = S.listSeq;
+    try {
+      const b = await api.call('inbox', listArgs({ before: S.chats[S.chats.length - 1].last_at, limit: 60, counts: false }));
+      if (seq !== S.listSeq) return;
+      const have = new Set(S.chats.map((x) => x.contact));
+      S.chats.push(...(b.chats || []).filter((x) => !have.has(x.contact)));
+      S.more = (b.chats || []).length >= 60;
+      renderList();
+    } catch (e) { toast(e.message, 'error'); } finally { S.loadingMore = false; }
+  }
+  let listTimer = null;
+  function loopList() {
+    clearTimeout(listTimer);
+    listTimer = setTimeout(async () => { await refreshList(); loopList(); }, document.hidden ? C.pollHiddenMs : C.pollMs);
+  }
+
+  function preview(c) {
+    const out = c.last_dir === 'Outgoing';
+    const text = cleanPreview(c.last_text);
+    return h('span', { class: 'row-prev' },
+      out ? h('span', { class: 'you' }, c.last_by && S.me && c.last_by !== S.me.name ? `${String(c.last_by).split(' ')[0]}: ` : 'You: ') : null,
+      text || h('em', null, 'message'));
+  }
+  function cleanPreview(t) {
+    return String(t || '')
+      .replace(/^👍 \*Reaction Received\*: (\S+)[\s\S]*/u, 'Reacted $1')
+      .replace(/^↩️ \*Reply\*[\s\S]*?📝 \*Reply\*:\s*([\s\S]*?)\s*🔗[\s\S]*$/u, '↩ $1')
+      .replace(/\*([^*\n]+)\*/g, '$1').replace(/\s+/g, ' ');
+  }
+  function row(c) {
+    const on = S.active && S.active.contact === c.contact;
+    const sb = sysBadge(c.sys);
+    return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}`, dataset: { contact: c.contact }, onclick: () => openChat(c.contact) },
+      avatar(c),
+      h('div', { class: 'row-main' },
+        h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)), h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
+        h('div', { class: 'row-mid' }, preview(c), c.unread ? h('span', { class: 'badge-n' }, c.unread_n > 99 ? '99+' : c.unread_n || '') : null),
+        sb || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb, (c.labels || []).map((id) => labelChip(id))) : null));
+  }
+  function renderList() {
+    $('#viewTitle').textContent = viewName();
+    const n = viewCount();
+    $('#viewCount').textContent = n == null ? '' : n;
+    $('#viewCount').hidden = n == null;
+    document.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.ch === S.channel));
+    const list = $('#list');
+    const top = list.scrollTop;
+    if (!S.chats.length) {
+      list.replaceChildren(h('li', { class: 'list-empty' }, S.q ? 'Nothing matches your search.' : S.view.startsWith('sys_') || S.view.startsWith('v') ? 'All caught up. 🎉' : 'No chats here.'));
+      return;
+    }
+    list.replaceChildren(...S.chats.map(row), S.more ? h('li', { class: 'list-more' }, 'Scroll for more…') : null);
+    list.scrollTop = top;
+  }
+
+  // ------------------------------------------------------------------ alerts
+
+  let audioCtx = null;
+  function alertIfLate() {
+    const late = sys().support_late || 0;
+    if (S.notify && late > S.lastLate) {
+      try {
+        audioCtx = audioCtx || new AudioContext();
+        const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+        o.frequency.value = 880; g.gain.value = 0.06; o.connect(g); g.connect(audioCtx.destination);
+        o.start(); o.stop(audioCtx.currentTime + 0.18);
+      } catch (e) { /* no sound */ }
+      if (window.Notification && Notification.permission === 'granted' && document.hidden) {
+        new Notification('Teshrij Desk', { body: `${late} support customer${late > 1 ? 's' : ''} waiting more than ${slaMin()} min`, icon: 'img/logo.png', tag: 'desk-late' });
+      }
+    }
+    S.lastLate = late;
+  }
+
+  // ------------------------------------------------------------------ chat
+
+  async function openChat(contact) {
+    if (!/^([0-9]{6,20}|ig_[0-9]{5,30})$/.test(contact)) return;
+    if (S.active && S.active.contact === contact) { showChatPane(); return; }
+    voiceDiscard();
+    S.detailsNarrow = false;
+    S.active = { contact, data: null, pending: [], customer: null, draft: (store('desk_drafts') || {})[contact] || '' };
+    history.replaceState(null, '', `#c=${contact}`);
+    document.querySelectorAll('.row').forEach((r) => r.classList.toggle('on', r.dataset.contact === contact));
+    renderChatSkeleton(S.chats.find((x) => x.contact === contact));
+    showChatPane();
+    await pollChat(true);
+    if (S.active && S.active.contact === contact && S.active.data && S.active.data.conv.unread) markRead(contact);
+    loadCustomer(contact);
+  }
+  function showChatPane() { $('#app').classList.add('chat-open'); }
+  function closeChat() {
+    voiceDiscard();
+    S.active = null;
+    history.replaceState(null, '', location.pathname + location.search);
+    $('#app').classList.remove('chat-open');
+    const chat = $('#chat');
+    chat.className = 'chat-pane empty';
+    chat.replaceChildren(...emptyChat());
+    $('#details').hidden = true;
+    document.querySelectorAll('.row.on').forEach((r) => r.classList.remove('on'));
+  }
+  function emptyChat() {
+    return [h('div', { class: 'chat-empty' },
+      h('div', { class: 'chat-empty-ic' }, icon('chat')),
+      h('h3', null, 'Pick a chat'),
+      h('p', { class: 'muted' }, h('b', null, 'System labels'), ' (sales / support, set automatically) and ', h('b', null, 'your labels'), ' (set by hand) sit above every chat. Support chats stay open until you resolve them with a closing message.'),
+      h('p', { class: 'muted kbd-hint' }, h('kbd', null, '↑'), h('kbd', null, '↓'), ' move · ', h('kbd', null, 'Alt'), '+', h('kbd', null, '1…9'), ' label · ', h('kbd', null, '/'), ' quick replies · ', h('kbd', null, 'Esc'), ' close'))];
+  }
+
+  async function markRead(contact, unread = false) {
+    try {
+      await api.call('read', { contact, unread });
+      const r = S.chats.find((x) => x.contact === contact);
+      if (r) { r.unread = unread; r.unread_n = unread ? 1 : 0; }
+      if (!unread && S.active && S.active.data && S.active.contact === contact) S.active.data.conv.unread = false;
+      refreshList();
+    } catch (e) { /* next poll retries */ }
+  }
+
+  let chatTimer = null;
+  function loopChat() {
+    clearTimeout(chatTimer);
+    chatTimer = setTimeout(async () => { if (S.active && !document.hidden) await pollChat(); loopChat(); }, C.threadPollMs);
+  }
+  let chatBusy = false;
+  const sig = (d) => JSON.stringify([d.messages.length, d.messages.at(-1)?.id, d.messages.at(-1)?.status, d.events.length, d.sends,
+    d.conv.labels, d.conv.window_ends, d.thread, d.gate && [d.gate.can_resolve, d.gate.suggested, d.gate.reasons]]);
+  async function pollChat(first = false) {
+    const a = S.active;
+    if (!a || chatBusy) return;
+    chatBusy = true;
+    try {
+      const d = await api.call('chat', { contact: a.contact, limit: Math.max(80, a.loaded || 0) });
+      if (S.active !== a) return;
+      const prev = a.data;
+      const changed = !prev || sig(d) !== sig(prev);
+      a.data = d;
+      a.loaded = d.messages.length;
+      const row0 = S.chats.find((x) => x.contact === a.contact);
+      if (row0) { row0.sys = d.thread; row0.labels = d.conv.labels; }
+      if (first) renderChat(true);
+      else if (changed) {
+        const newIn = prev && d.messages.length && d.messages.at(-1).id !== prev.messages.at(-1)?.id && d.messages.at(-1).dir === 'Incoming';
+        renderHead(); renderSysbar(); renderLabelbar(); renderMessages(false); renderComposerState(); renderDetails();
+        if (newIn && !document.hidden) markRead(a.contact);
+      }
+    } catch (e) {
+      if (e.status === 404 && first) { toast('Chat not found', 'error'); closeChat(); }
+    } finally { chatBusy = false; }
+  }
+
+  function renderChatSkeleton(c) {
+    const chat = $('#chat');
+    chat.className = 'chat-pane';
+    chat.replaceChildren(
+      h('header', { class: 'chat-head', id: 'chatHead' }),
+      h('div', { class: 'sysbar', id: 'sysbar', 'aria-label': 'System label' }),
+      h('div', { class: 'labelbar', id: 'labelbar', role: 'toolbar', 'aria-label': 'Your labels' }),
+      h('div', { class: 'msgs', id: 'msgs' }),
+      h('div', { class: 'composer-wrap', id: 'composerWrap' }));
+    if (c) { S.active.data = null; renderHead(c); renderLabelbar(c); }
+    renderComposer();
+  }
+  function renderChat(scroll) {
+    renderHead(); renderSysbar(); renderLabelbar(); renderMessages(scroll); renderComposerState(); renderDetails();
+  }
+
+  function windowInfo(c) {
+    const ends = c.window_ends ? Date.parse(c.window_ends) : NaN;
+    const left = Number.isFinite(ends) ? ends - now() : -1;
+    return { open: left > 30000, left };
+  }
+  function renderHead(c0) {
+    const c = c0 || S.active.data.conv;
+    const w = windowInfo(c);
+    let win;
+    if (!c.last_in_at) win = h('span', { class: 'win closed', title: 'The customer has never written' }, icon('lock'), h('span', { class: 'wtxt' }, 'No window'));
+    else if (!w.open) win = h('span', { class: 'win closed', title: isIg(c) ? 'Instagram allows replies up to 7 days after the last customer message' : 'WhatsApp allows free replies up to 24h after the last customer message' }, icon('lock'), h('span', { class: 'wtxt' }, 'Window closed'));
+    else win = h('span', { class: `win${w.left < 4 * 3600000 ? ' warn' : ''}`, title: 'Time left to reply' }, icon('clock'), h('span', { class: 'wtxt' }, `${dur(w.left)} left`));
+    $('#chatHead').replaceChildren(
+      h('button', { class: 'icon-btn back-btn', 'aria-label': 'Back to chats', onclick: closeChat }, icon('back')),
+      avatar(c),
+      h('div', { class: 'chat-who' },
+        h('div', { class: 'chat-name' }, displayName(c)),
+        h('div', { class: 'chat-sub' }, h('span', null, subtitle(c)), !isIg(c) && c.line ? h('span', null, `· line ${c.line}`) : null)),
+      win,
+      h('div', { class: 'chat-actions' },
+        h('button', { class: 'icon-btn', title: 'Mark as unread', 'aria-label': 'Mark as unread', onclick: () => { const ct = S.active.contact; markRead(ct, true); closeChat(); toast('Marked as unread'); } }, icon('mail')),
+        h('button', { class: `icon-btn${detailsOn() ? ' on' : ''}`, title: 'Contact details', 'aria-label': 'Contact details', onclick: toggleDetails }, icon('panel'))));
+  }
+
+  // ---- system label bar (episode)
+
+  function renderSysbar() {
+    const bar = $('#sysbar');
+    if (!bar || !S.active || !S.active.data) return;
+    const d = S.active.data;
+    const t = d.thread;
+    if (!t || (t.status === 'closed' && t.kind !== 'support')) {
+      bar.className = 'sysbar quiet';
+      bar.replaceChildren(h('span', { class: 'sys-title' }, 'System'), h('span', { class: 'muted' }, t ? 'Earlier episode closed; a new customer message starts a new one.' : 'No episode in the last days.'));
+      return;
+    }
+    const src = t.kind_source === 'staff' ? `set by ${t.kind_by || 'staff'}` : t.kind_source === 'ai' ? `AI ${Math.round((t.kind_confidence || 0) * 100)}%` : t.kind_source === 'rule' ? 'rule' : '';
+    const kindSeg = h('div', { class: 'seg-kind', role: 'group', 'aria-label': 'Sales or support' }, ['sales', 'support', 'ignore'].map((k) =>
+      h('button', { class: `k-${k}${t.kind === k ? ' on' : ''}`, title: k === 'ignore' ? 'Nothing to do (spam, wrong number, only a sticker)' : `This episode is ${k}`, onclick: () => setKind(t, k) },
+        k === 'sales' ? icon('dollar', 'xs') : k === 'support' ? icon('life', 'xs') : null, k[0].toUpperCase() + k.slice(1))));
+    const prod = h('select', { class: 'prod', title: 'Product', onchange: (e) => setKind(t, ['sales', 'support', 'ignore'].includes(t.kind) ? t.kind : null, e.target.value) },
+      h('option', { value: '' }, 'Product…'), Object.entries(PRODUCTS).map(([k, l]) => h('option', { value: k, selected: t.product === k }, l)));
+    const left = [h('span', { class: 'sys-title', title: 'Set automatically for this conversation episode; you can correct it' }, 'System'), kindSeg, prod,
+      src ? h('span', { class: `src${t.kind === 'unsure' ? ' unsure' : ''}`, title: t.kind_reason || '' }, src) : null];
+    const right = [];
+    bar.className = `sysbar k-${t.kind === 'pending' || t.kind === 'unsure' ? 'label' : t.kind}`;
+
+    if (t.kind === 'pending' || t.kind === 'unsure') {
+      right.push(h('span', { class: 'hint-strong' }, t.kind === 'pending' ? 'Labelling…' : `Not sure${t.kind_reason ? ': ' + t.kind_reason.slice(0, 90) : ''}`));
+    } else if (t.kind === 'sales') {
+      right.push(h('span', { class: `stage-now stage-${t.stage}` }, STAGES[t.stage] || t.stage), h('span', { class: 'muted' }, salesHint(t)),
+        h('div', { class: 'stage-set' }, ['got_price', 'waiting_payment', 'needs_followup', 'bought', 'lost'].map((s) => h('button', {
+          class: `chip-btn${t.stage === s ? ' on' : ''}${t.stage_manual === s ? ' manual' : ''}`, title: t.stage_manual === s ? 'Set by hand · click again for automatic' : t.stage === s ? 'Set automatically' : 'Set by hand',
+          onclick: () => setStage(t, t.stage_manual === s ? null : s),
+        }, STAGES[s]))));
+    } else if (t.kind === 'support') {
+      const g = d.gate || {};
+      if (t.status === 'resolved') {
+        const c = S.closers.find((x) => x.key === t.resolution);
+        right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Resolved by ${t.resolved_by || '?'}`),
+          h('span', { class: 'muted' }, `${c ? c.title : t.resolution === 'no_reply' ? 'customer stopped replying' : ''} · ${ago(t.status_at)}`),
+          h('button', { class: 'btn sm', onclick: () => reopen(t) }, 'Reopen'));
+      } else if (t.status === 'closed') {
+        right.push(h('span', { class: 'muted' }, 'Closed (history).'));
+      } else {
+        const reasons = (g.reasons || []).map((r) => GATE_TEXT[r] || r);
+        right.push(t.waiting
+          ? h('span', { class: waitMs(t) > slaMin() * 60e3 ? 'bad-strong' : 'warn-strong' }, `Customer waiting ${dur(waitMs(t))}`)
+          : h('span', { class: 'muted' }, t.last_in_ack ? 'Customer said thanks' : 'Waiting on customer'),
+        t.reopened_count ? h('span', { class: 'muted' }, `· reopened ${t.reopened_count}×`) : null,
+        !g.can_resolve && reasons.length ? h('span', { class: 'why', title: reasons.join('\n') }, reasons[0]) : null,
+        g.can_close_no_reply ? h('button', { class: 'btn sm', onclick: () => closeNoReply(t), title: 'The window is closed and we spoke last: close without a message' }, 'Close · no reply') : null,
+        h('button', { class: 'btn sm resolve', disabled: !g.can_resolve, title: g.can_resolve ? 'Send a closing message and resolve' : reasons.join('\n'), onclick: openResolve }, icon('check', 'xs'), 'Resolve'));
+      }
+    } else if (t.kind === 'ignore') {
+      right.push(h('span', { class: 'muted' }, t.kind_reason || 'Nothing to do.'));
+    }
+    bar.replaceChildren(h('div', { class: 'sys-left' }, left), h('div', { class: 'sys-right' }, right));
+  }
+  function salesHint(t) {
+    if (t.stage === 'bought') return t.bought_product ? `${PRODUCTS[t.bought_product] || t.bought_product}${t.bought_at ? ' · ' + ago(t.bought_at) : ''}` : '';
+    if (t.stage === 'unanswered') return t.waiting_since ? `waiting ${dur(waitMs(t))}` : '';
+    if (t.followup_due) return `quiet ${dur(now() - Date.parse(t.last_msg_at))} · follow up`;
+    return '';
+  }
+  async function setKind(t, kind, product) {
+    if (!kind) { toast('Pick Sales, Support or Ignore first'); return; }
+    if (t.kind === 'support' && kind !== 'support' && t.status === 'open' && !confirm('Move this open support episode out of Support?')) return;
+    try {
+      await api.call('set_kind', { thread_id: t.id, kind, product: product ?? t.product ?? null });
+      toast(`System label: ${kind}${product ? ' · ' + (PRODUCTS[product] || product) : ''}`);
+      await pollChat(); refreshList();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  async function setStage(t, stage) {
+    try { await api.call('set_stage', { thread_id: t.id, stage }); await pollChat(); refreshList(); } catch (e) { toast(e.message, 'error'); }
+  }
+  async function reopen(t) {
+    try { await api.call('reopen', { thread_id: t.id }); toast('Reopened'); await pollChat(); refreshList(); } catch (e) { toast(e.message, 'error'); }
+  }
+  async function closeNoReply(t) {
+    if (!confirm('Close this support episode without sending anything? (The reply window is closed.)')) return;
+    try {
+      const r = await api.call('close_no_reply', { thread_id: t.id });
+      if (r && r.ok === false) throw new Error(r.error);
+      toast('Closed'); await pollChat(); refreshList();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---- resolve with a closing message
+
+  function openResolve() {
+    const d = S.active && S.active.data;
+    if (!d || !d.thread || !d.gate) return;
+    const g = d.gate;
+    let chosen = g.suggested || null;
+    const go = h('button', { class: 'btn primary', disabled: true }, icon('send', 'sm'), 'Send & resolve');
+    const update = () => { go.disabled = !(g.can_resolve && chosen && (g.closers || []).some((c) => c.key === chosen && c.allowed)); };
+    const list = (g.closers || []).map((c) => {
+      const input = h('input', { type: 'radio', name: 'closer', value: c.key, disabled: !c.allowed || !g.can_resolve, checked: c.key === chosen });
+      input.addEventListener('change', () => { chosen = c.key; update(); });
+      return h('label', { class: `closer${c.allowed ? '' : ' off'}`, title: c.allowed ? (c.when || '') : (c.why || '') }, input,
+        h('div', { class: 'closer-main' },
+          h('div', { class: 'closer-title' }, c.title, c.key === g.suggested ? h('span', { class: 'tag ok' }, 'suggested') : null,
+            c.expects_reply ? h('span', { class: 'tag', title: 'The customer will probably answer; a problem reopens the chat' }, 'asks') : null),
+          h('div', { class: 'closer-body' }, c.body),
+          h('div', { class: 'closer-when' }, c.allowed ? c.when : c.why)));
+    });
+    go.addEventListener('click', () => { const c = (g.closers || []).find((x) => x.key === chosen); closeModal(); if (c) startResolve(d.thread, c); });
+    update();
+    openModal(h('div', { class: 'sheet' },
+      h('div', { class: 'sheet-head' }, h('h3', null, 'Resolve this support chat'), h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+      h('div', { class: 'sheet-body' },
+        h('p', { class: 'hint' }, 'The message you pick is sent to the customer and the episode is closed. If they write again within 48h with anything other than a thanks, it reopens by itself.'),
+        !g.can_resolve ? h('div', { class: 'block-box' }, h('b', null, 'Not yet: '), (g.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')) : null,
+        h('div', { class: 'closers' }, list)),
+      h('div', { class: 'sheet-foot' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Cancel'), go)), true);
+  }
+  let undoTimer = null;
+  function startResolve(t, c) {
+    const request_id = uuid();
+    const box = h('div', { class: 'undo' },
+      h('div', { class: 'undo-bar' }, h('span', null, `Sending “${c.title}” and resolving…`), h('button', { class: 'btn sm', onclick: () => { clearTimeout(undoTimer); box.remove(); toast('Cancelled, nothing was sent'); } }, 'Undo')),
+      h('div', { class: 'undo-progress' }, h('i', { style: `animation-duration:${C.undoMs}ms` })));
+    document.querySelectorAll('.undo').forEach((x) => x.remove());
+    document.body.append(box);
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(async () => {
+      box.querySelector('button').disabled = true;
+      try {
+        await api.call('resolve', { thread_id: t.id, closer: c.key, request_id });
+        toast(`Resolved · “${c.title}” sent`, 'ok');
       } catch (e) {
-        if (epoch !== state.authEpoch || renderToken !== media.renderToken) return;
-        node.style.display = 'none';
-        showMediaError(job.holder, job.type === 'image' ? 'Image unavailable' : 'Voice note unavailable');
+        toast(`Not resolved: ${e.message}`, 'error');
+      } finally {
+        box.remove();
+        if (S.active) pollChat();
+        refreshList();
+      }
+    }, C.undoMs);
+  }
+
+  // ---- manual labels
+
+  function renderLabelbar(c0) {
+    const c = c0 || S.active.data.conv;
+    const on = new Set(c.labels || []);
+    const kids = [h('span', { class: 'lb-title', title: 'Your own labels, set by hand' }, 'Labels')];
+    let lastGrp;
+    S.labels.forEach((l, i) => {
+      if (i && (l.grp || '') !== lastGrp) kids.push(h('span', { class: 'lt-sep' }));
+      lastGrp = l.grp || '';
+      kids.push(h('button', {
+        class: `lt${on.has(l.id) ? ' on' : ''}`, style: `--c:${l.color}`, 'aria-pressed': on.has(l.id) ? 'true' : 'false',
+        title: `${on.has(l.id) ? 'Remove' : 'Set'} ${l.name}${i < 9 ? ` (Alt+${i + 1})` : ''}${l.grp ? ` · replaces the other “${l.grp}” labels` : ''}`,
+        onclick: () => toggleLabel(l.id),
+      }, l.name));
+    });
+    if (!S.labels.length && S.me && S.me.role === 'admin') kids.push(h('button', { class: 'btn ghost', onclick: openManage }, icon('plus', 'sm'), 'Create labels'));
+    $('#labelbar').replaceChildren(...kids);
+  }
+  async function toggleLabel(id) {
+    const a = S.active;
+    if (!a || !a.data) return;
+    const l = S.labelById.get(id);
+    const conv = a.data.conv;
+    const was = new Set(conv.labels);
+    const turnOn = !was.has(id);
+    let next = conv.labels.filter((x) => x !== id && !(turnOn && l.grp && (S.labelById.get(x) || {}).grp === l.grp));
+    if (turnOn) next.push(id);
+    next = S.labels.map((x) => x.id).filter((x) => next.includes(x));
+    conv.labels = next;
+    const r = S.chats.find((x) => x.contact === a.contact);
+    if (r) r.labels = next;
+    renderLabelbar(); renderList();
+    try {
+      const fresh = await api.call('label', { contact: a.contact, label_id: id, on: turnOn });
+      if (S.active === a && a.data) { a.data.conv = { ...a.data.conv, ...fresh }; renderLabelbar(); }
+      pollChat(); refreshList();
+    } catch (e) {
+      toast(`Label not saved: ${e.message}`, 'error');
+      conv.labels = [...was];
+      if (r) r.labels = [...was];
+      renderLabelbar(); renderList();
+    }
+  }
+
+  // ---- messages
+
+  const REACTION_RE = /^👍 \*Reaction Received\*: *(\S+)/u;
+  const BSB_REPLY_RE = /^↩️ \*Reply\*\s*💬 \*Original Message\*:\s*([\s\S]*?)\s*📝 \*Reply\*:\s*([\s\S]*?)\s*🔗 \*Original Message ID\*:\s*\S+\s*$/u;
+  const isReaction = (m) => /reaction/i.test(m.media_type || '') || REACTION_RE.test(m.text || '');
+  const reactionEmoji = (m) => ((m.text || '').match(REACTION_RE) || [])[1] || ((m.text || '').length <= 4 ? m.text : '👍');
+
+  function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 120; }
+  function renderMessages(scroll) {
+    const box = $('#msgs');
+    if (!box || !S.active || !S.active.data) return;
+    const d = S.active.data;
+    const stick = scroll || nearBottom(box);
+    const prevH = box.scrollHeight, prevTop = box.scrollTop;
+    // reactions go onto the message they react to (when it is loaded)
+    const byMid = new Map(d.messages.filter((m) => m.message_id).map((m) => [m.message_id, m]));
+    const reactions = new Map();
+    const attached = new Set();
+    for (const m of d.messages) {
+      if (isReaction(m) && m.ref && byMid.has(m.ref)) {
+        const target = byMid.get(m.ref).id;
+        if (!reactions.has(target)) reactions.set(target, []);
+        reactions.get(target).push({ emoji: reactionEmoji(m), out: m.dir === 'Outgoing' });
+        attached.add(m.id);
       }
     }
+    const items = [];
+    for (const m of d.messages) if (!attached.has(m.id)) items.push({ ts: Date.parse(m.ts), kind: 'm', m });
+    for (const e of d.events) items.push({ ts: Date.parse(e.at), kind: 'e', e });
+    const sentIds = new Set();
+    for (const s of d.sends) { sentIds.add(s.request_id); items.push({ ts: Date.parse(s.at), kind: 's', s }); }
+    for (const p of S.active.pending) if (!sentIds.has(p.request_id)) items.push({ ts: p.at, kind: 'p', p });
+    items.sort((x, y) => x.ts - y.ts);
+    const threads = new Map((d.threads || []).map((t) => [t.id, t]));
 
-    function queueProtectedMedia(node) {
-      if (media.observer) media.observer.observe(node.__mediaJob.holder);
-      else loadProtectedMedia(node);
-    }
-
-    function buildMediaElement(msg, kind) {
-      const resolved = resolveMedia(msg.chat_id, kind, msg.media_url);
-      if (!resolved) return null;
-      const isImage = kind === 'image';
-      const holder = createEl('div', isImage ? 'chat-media-image-wrap' : 'voice-note-card');
-      let node;
-      let link = null;
-
-      if (isImage) {
-        link = document.createElement('a');
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        node = createEl('img', 'chat-media-img');
-        node.alt = 'Image';
-        node.referrerPolicy = 'no-referrer';
-        link.appendChild(node);
-        holder.appendChild(link);
-      } else {
-        const header = createEl('div', 'voice-note-header');
-        const title = document.createElement('span');
-        title.append(icon('fa-solid fa-microphone-lines'), ' Voice Note');
-        header.appendChild(title);
-        node = createEl('audio', 'voice-note-audio');
-        node.controls = true;
-        node.preload = 'none';
-        holder.append(header, node);
-      }
-
-      if (resolved.kind === 'direct') {
-        if (isImage) {
-          node.loading = 'lazy';
-          link.href = resolved.url;
+    const out = [];
+    if (d.more) out.push(h('button', { class: 'btn load-older', onclick: loadOlder }, 'Load earlier messages'));
+    let lastDay = '', lastDir = '', lastTs = 0, lastThread = null;
+    for (const it of items) {
+      const dt = new Date(it.ts);
+      const dk = dayKey(dt);
+      if (dk !== lastDay) { out.push(h('div', { class: 'day' }, dayLabel(dt))); lastDay = dk; lastDir = ''; }
+      if (it.kind === 'm' && it.m.thread_id && it.m.thread_id !== lastThread) {
+        const t = threads.get(it.m.thread_id);
+        if (t) {
+          out.push(h('div', { class: `episode k-${t.kind}` }, h('span', null,
+            `${t.kind === 'pending' || t.kind === 'unsure' ? 'Unlabelled' : t.kind[0].toUpperCase() + t.kind.slice(1)} episode${t.product ? ' · ' + (PRODUCTS[t.product] || t.product) : ''} · started ${fmtTime.format(new Date(t.opened_at))}`)));
+          lastDir = '';
         }
-        node.addEventListener('error', () => {
-          node.style.display = 'none';
-          showMediaError(holder, isImage ? 'Image unavailable' : 'Voice note unavailable');
-        }, { once: true });
-        node.src = resolved.url;
+        lastThread = it.m.thread_id;
+      }
+      if (it.kind === 'e') { const e = eventLine(it.e); if (e) { out.push(e); lastDir = ''; } continue; }
+      const dir = it.kind === 'm' ? (it.m.dir === 'Outgoing' ? 'out' : 'in') : 'out';
+      const first = dir !== lastDir || it.ts - lastTs > 10 * 60000;
+      lastDir = dir; lastTs = it.ts;
+      if (it.kind === 'm') out.push(bubble(it.m, first, reactions.get(it.m.id)));
+      else if (it.kind === 's') out.push(sendBubble(it.s, first));
+      else out.push(pendingBubble(it.p, first));
+    }
+    box.replaceChildren(...out);
+    if (stick) box.scrollTop = box.scrollHeight;
+    else if (S.active.keepScroll) { box.scrollTop = box.scrollHeight - prevH + prevTop; S.active.keepScroll = false; }
+    else box.scrollTop = prevTop;
+  }
+  async function loadOlder() {
+    const a = S.active;
+    if (!a || !a.data) return;
+    try {
+      const d = await api.call('chat', { contact: a.contact, limit: 120, before: a.data.messages[0].ts });
+      if (S.active !== a) return;
+      a.data.messages = [...d.messages, ...a.data.messages];
+      a.data.events = mergeEvents(d.events, a.data.events);
+      a.data.more = d.more;
+      a.loaded = a.data.messages.length;
+      a.keepScroll = true;
+      renderMessages(false);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  function mergeEvents(a, b) {
+    const seen = new Set();
+    return [...a, ...b].filter((e) => { const k = e.at + e.kind + e.label; if (seen.has(k)) return false; seen.add(k); return true; });
+  }
+  function jumpTo(id) {
+    const el = document.querySelector(`.msg[data-id="${id}"]`);
+    if (!el) { toast('That message is further up: load earlier messages'); return; }
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1400);
+  }
+
+  function eventLine(e) {
+    const t = h('span', { class: 't' }, fmtTime.format(new Date(e.at)));
+    const dd = e.detail || {};
+    const who = e.actor === 'ai' ? 'AI' : e.actor === 'rule' ? 'Rule' : e.actor === 'system' ? 'System' : e.actor;
+    switch (e.kind) {
+      case 'relabel':
+        return h('div', { class: 'ev' }, 'Customer wrote · ', h('b', null, e.label), dd.to ? [' → ', h('b', null, dd.to)] : ' removed', ' ', t);
+      case 'label_add': {
+        const was = dd.replaced && dd.replaced.length ? dd.replaced.join(', ') : null;
+        if (was) return h('div', { class: 'ev' }, h('b', null, e.actor), ' · ', was, ' → ', h('b', null, e.label), ' ', t);
+        return h('div', { class: 'ev' }, h('b', null, e.actor), ' added ', h('b', null, e.label), ' ', t);
+      }
+      case 'label_remove':
+        return h('div', { class: 'ev' }, h('b', null, e.actor), ' removed ', h('b', null, e.label), ' ', t);
+      case 'sys_label':
+        return h('div', { class: 'ev sys-ev' }, icon('zap', 'xs'), ' ', h('b', null, who), ` set the system label ${dd.to}${dd.product ? ' · ' + (PRODUCTS[dd.product] || dd.product) : ''}${dd.confidence && e.actor === 'ai' ? ` (${Math.round(dd.confidence * 100)}%)` : ''}`, ' ', t);
+      case 'stage':
+        return h('div', { class: 'ev sys-ev' }, h('b', null, who), dd.to ? ` set the stage to ${STAGES[dd.to] || dd.to}` : ' put the stage back to automatic', ' ', t);
+      case 'resolved':
+        return h('div', { class: 'ev ok-ev' }, icon('check', 'xs'), ' Resolved by ', h('b', null, who), dd.title ? ` · ${dd.title}` : '', ' ', t);
+      case 'reopened':
+        return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ Reopened: the customer wrote again' : ['↺ Reopened by ', h('b', null, who)], ' ', t);
+      default:
+        return null;
+    }
+  }
+
+  function bubble(m, first, reacts) {
+    const out = m.dir === 'Outgoing';
+    const media = String(m.media_type || '').toLowerCase();
+    let text = m.text || '';
+    const cls = `msg ${out ? 'out' : 'in'}${first ? ' first' : ''}`;
+    if (isReaction(m)) {
+      return h('div', { class: `msg ${out ? 'out' : 'in'} reaction`, dataset: { id: m.id } }, `${out ? 'You' : 'Customer'} reacted ${reactionEmoji(m)}`,
+        m.quoted ? h('button', { class: 'link', onclick: () => jumpTo(m.quoted.id) }, ` to “${String(m.quoted.text || '').slice(0, 40)}”`) : null);
+    }
+    // replies: the quoted message (from the database, or from BSB's text block)
+    let quote = null;
+    const bsb = text.match(BSB_REPLY_RE);
+    if (bsb) text = bsb[2];
+    if (m.quoted || bsb) {
+      const q = m.quoted;
+      let qText = q ? q.text : cleanPreview(bsb[1]);
+      if (/^\[Outgoing Message\]$/.test(String(qText).trim())) qText = 'a message sent from BSB';
+      quote = h('button', { class: `quote ${q && q.dir === 'Outgoing' ? 'q-out' : 'q-in'}`, title: q ? 'Go to that message' : '', onclick: q ? () => jumpTo(q.id) : null },
+        h('b', null, q ? (q.dir === 'Outgoing' ? 'You' : 'Customer') : 'Reply to'), h('span', null, String(qText || '').slice(0, 160)));
+    }
+    let body;
+    if (text === '[Outgoing Message]') body = h('em', { class: 'muted' }, 'Sent from BSB (text not available)');
+    else if (media === 'call') body = h('em', null, /missed/i.test(text) ? '📞 Missed call' : '📞 Call');
+    else {
+      const clean = text.replace(/^(🎤 \*Voice Message\*|🎵 \*Audio Message\*|📎 \*Media Received\*|📷 Image|🎉 \*Sticker Received\*|🎥 Video|🎵 Audio|📎 Attachment[^\n]*)\s*/u, '');
+      body = clean ? richText(clean) : null;
+    }
+    const mediaEl = mediaNode(m, media);
+    const ad = m.ad && (m.ad.headline || m.ad.link)
+      ? h(m.ad.link && /^https?:/.test(m.ad.link) ? 'a' : 'div', { class: 'ad', href: m.ad.link && /^https?:/.test(m.ad.link) ? m.ad.link : null, target: '_blank', rel: 'noopener noreferrer' },
+        h('small', null, 'From an ad'), m.ad.headline || m.ad.link, m.ad.description ? h('span', { class: 'muted' }, m.ad.description) : null)
+      : null;
+    const rx = reacts && reacts.length ? h('div', { class: 'reacts', title: reacts.map((r) => `${r.out ? 'You' : 'Customer'} ${r.emoji}`).join(', ') }, reacts.map((r) => r.emoji).join('')) : null;
+    return h('div', { class: `${cls}${rx ? ' has-react' : ''}`, dataset: { id: m.id } }, ad, quote, mediaEl,
+      body || (!mediaEl ? h('em', { class: 'muted' }, media || 'message') : null), meta(m), rx);
+  }
+  function meta(m) {
+    const out = m.dir === 'Outgoing';
+    const st = out ? ({ Read: '✓✓', Played: '✓✓', Delivered: '✓✓', Sent: '✓', Failed: '⚠ failed' }[m.status] || '') : '';
+    return h('span', { class: 'meta', title: fmtFull.format(new Date(m.ts)) },
+      out && m.by ? h('span', { class: 'by' }, m.by) : null,
+      fmtTime.format(new Date(m.ts)),
+      st ? h('span', { class: `st${m.status === 'Read' || m.status === 'Played' ? ' read' : ''}${m.status === 'Failed' ? ' failed' : ''}` }, st) : null);
+  }
+  function sendBubble(s, first) {
+    const failed = s.status === 'failed';
+    const md = s.media;
+    const mediaEl = md && md.url ? (md.type === 'image' ? h('img', { src: md.url, class: 'media-img', alt: 'photo', onclick: () => lightbox(md.url) })
+      : md.type === 'voice' ? h('audio', { src: md.url, controls: true, preload: 'none' })
+      : h('a', { class: 'doc', href: md.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), md.name || 'file')) : null;
+    return h('div', { class: `msg out pending${failed ? ' failed' : ''}${first ? ' first' : ''}` }, mediaEl, s.body ? richText(s.body) : null,
+      h('span', { class: 'meta' }, h('span', { class: 'by' }, s.actor), fmtTime.format(new Date(s.at)),
+        failed ? h('span', { class: 'bad' }, ` not sent: ${s.error || 'error'}`) : s.status === 'sending' ? ' sending…' : h('span', { class: 'st', title: 'Sent; waiting for BSB to confirm' }, '✓')));
+  }
+  function pendingBubble(p, first) {
+    return h('div', { class: `msg out pending ${p.status}${first ? ' first' : ''}` }, p.preview || null, p.text ? richText(p.text) : null,
+      h('span', { class: 'meta' }, p.status === 'failed'
+        ? [h('span', { class: 'bad' }, `not sent: ${p.error || 'error'} `), h('button', { class: 'link', onclick: () => retry(p) }, 'retry'), ' · ', h('button', { class: 'link', onclick: () => dropPending(p) }, 'discard')]
+        : 'sending…'));
+  }
+  function richText(text) {
+    const el = h('div', { class: 'text' });
+    for (const part of String(text).split(/(https?:\/\/[^\s<>"']+)/g)) {
+      if (/^https?:\/\//.test(part)) {
+        el.append(h('a', { href: part, target: '_blank', rel: 'noopener noreferrer nofollow' }, part.length > 60 ? part.slice(0, 57) + '…' : part));
       } else {
-        node.style.display = 'none';
-        const status = createEl('div', 'media-status');
-        status.append(icon('fa-solid fa-spinner fa-spin'), isImage ? ' Loading image...' : ' Loading voice note...');
-        holder.appendChild(status);
-        node.__mediaJob = { url: resolved.url, type: resolved.type, holder, link, started: false, renderToken: media.renderToken };
-        holder.__mediaNode = node;
-        queueProtectedMedia(node);
+        for (const b of part.split(/(\*[^*\n]{1,200}\*)/g)) el.append(/^\*[^*\n]+\*$/.test(b) ? h('strong', null, b.slice(1, -1)) : document.createTextNode(b));
       }
-      return holder;
     }
-
-    // Drop the media of the current render (downloads still in flight are ignored when they land)
-    function reset() {
-      releaseMediaResources();
-      media.renderToken++;
+    return el;
+  }
+  function mediaNode(m, media) {
+    if (!/(image|audio|video|sticker|voice|ptt|reel|document|file)/.test(media)) return null;
+    const src = api.mediaSource(m);
+    const isImg = /image|sticker/.test(media);
+    const isVid = /video|reel/.test(media);
+    const isDoc = /document|file/.test(media);
+    if (!src) {
+      return h('div', { class: 'media-missing', title: 'Not copied into our storage yet; the media job copies it within a few minutes' },
+        isImg ? '🖼 Photo' : isVid ? '🎬 Video' : isDoc ? '📄 Document' : '🎤 Voice note', h('span', { class: 'muted' }, ' · copying…'));
     }
-
-    function notice(text, iconClasses) {
-      const note = document.createElement('div');
-      note.style.cssText = 'text-align: center; color: var(--text-dim); padding: 40px;';
-      if (iconClasses) note.append(icon(iconClasses), ' ');
-      note.append(text);
-      container.replaceChildren(note);
+    const badge = src.ours ? null : h('span', { class: 'media-src', title: 'Shown from the BSB / Instagram link until our copy is ready' }, 'BSB link');
+    if (isImg) {
+      const img = h('img', { src: src.url, loading: 'lazy', alt: 'photo', class: `media-img${/sticker/.test(media) ? ' sticker' : ''}`, referrerpolicy: 'no-referrer', onclick: () => lightbox(src.url) });
+      img.addEventListener('error', () => img.replaceWith(h('div', { class: 'media-missing' }, '🖼 Photo unavailable')), { once: true });
+      return h('div', { class: 'media' }, img, badge);
     }
-
-    // Built with DOM nodes + textContent only: customer text and media URLs are never parsed as HTML
-    function render(messages) {
-      reset();
-      container.replaceChildren();
-
-      // Protected media is downloaded only when its bubble comes near the visible area
-      if ('IntersectionObserver' in window) {
-        media.observer = new IntersectionObserver((entries, observer) => {
-          entries.forEach(entry => {
-            if (!entry.isIntersecting) return;
-            observer.unobserve(entry.target);
-            if (entry.target.__mediaNode) loadProtectedMedia(entry.target.__mediaNode);
-          });
-        }, { root: container, rootMargin: '300px 0px' });
-      }
-
-      const frag = document.createDocumentFragment();
-      messages.forEach(msg => {
-        const row = buildRow(msg);
-        if (row) frag.appendChild(row);
-      });
-      container.appendChild(frag);
-
-      container.scrollTop = container.scrollHeight;
-    }
-
-    // Add messages under the ones already shown (keeps loaded media; no full re-render)
-    function append(messages) {
-      const frag = document.createDocumentFragment();
-      messages.forEach(msg => {
-        const row = buildRow(msg);
-        if (row) frag.appendChild(row);
-      });
-      container.appendChild(frag);
-    }
-
-    function buildRow(msg) {
-      if (!msg || typeof msg !== 'object') return null;
-      const isIncoming = String(msg.direction).toLowerCase() === 'incoming';
-      const text = typeof msg.message === 'string' ? msg.message : (msg.message === null || msg.message === undefined ? '' : String(msg.message));
-      const mediaType = typeof msg.media_type === 'string' ? msg.media_type.toLowerCase() : '';
-      const mediaUrl = typeof msg.media_url === 'string' ? msg.media_url : '';
-      const mediaPath = mediaUrl.split(/[?#]/)[0].toLowerCase();
-
-      const isAudio = mediaType.includes('audio') || text.includes('🎤') || text.toLowerCase().includes('voice message');
-      const isImage = mediaType.includes('image') || mediaPath.endsWith('.jpg') || mediaPath.endsWith('.jpeg') || mediaPath.endsWith('.png');
-
-      let mediaEl = null;
-      if (msg.chat_id && (isAudio || isImage)) {
-        mediaEl = buildMediaElement(msg, isAudio ? 'audio' : 'image');
-      }
-
-      const notSynced = !isIncoming && text === '[Outgoing Message]';
-      let textEl = null;
-      if (notSynced) textEl = createEl('div', 'msg-text msg-not-synced', 'Message text not synced from BSB yet');
-      else if (text) textEl = createEl('div', 'msg-text', text);
-
-      return buildMessageRow(
-        isIncoming,
-        [mediaEl, textEl],
-        formatMessageTime(msg.timestamp),
-        isIncoming ? '' : 'fa-solid fa-check-double msg-status-icon msg-status-read'
-      );
-    }
-
-    // A just-sent message, shown before the next sync brings the stored row
-    function appendOutgoing(text) {
-      const row = buildMessageRow(
-        false,
-        [createEl('div', 'msg-text', text)],
-        'Just now',
-        'fa-solid fa-check msg-status-icon'
-      );
-      container.appendChild(row);
-      container.scrollTop = container.scrollHeight;
-      return row;
-    }
-
-    // Outgoing voice note sent from this panel: a local blob: URL of the recording, owned by this
-    // renderer and revoked with the other media URLs when the chat is reset/re-rendered
-    function appendOutgoingVoice(url) {
-      media.objectUrls.push(url);
-      const holder = createEl('div', 'voice-note-card');
-      const header = createEl('div', 'voice-note-header');
-      const title = document.createElement('span');
-      title.append(icon('fa-solid fa-microphone-lines'), ' Voice Note');
-      header.appendChild(title);
-      const audio = createEl('audio', 'voice-note-audio');
-      audio.controls = true;
-      audio.preload = 'none';
-      audio.src = url;
-      holder.append(header, audio);
-      container.appendChild(buildMessageRow(false, [holder], 'Just now', 'fa-solid fa-check msg-status-icon'));
-      container.scrollTop = container.scrollHeight;
-    }
-
-    return { render, append, notice, reset, appendOutgoing, appendOutgoingVoice };
+    if (isVid) return h('div', { class: 'media' }, h('video', { src: src.url, controls: true, preload: 'metadata', class: 'media-video' }), badge);
+    if (isDoc) return h('a', { class: 'doc', href: src.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), (m.text || '').replace(/^📎\s*/, '').slice(0, 60) || 'Document');
+    return h('div', { class: 'media voice' }, h('audio', { src: src.url, controls: true, preload: 'none' }), badge);
+  }
+  function lightbox(src) {
+    const el = h('div', { class: 'lightbox', onclick: () => el.remove() }, h('img', { src, alt: '' }));
+    document.body.append(el);
   }
 
-  // =========================================================================
-  // Recent sends: contact -> { at, name, has_tracking, ad_id, text }. Only the phone, name and time
-  // are kept in sessionStorage (so a reload keeps them); the sent text stays in memory only.
-  // =========================================================================
-  const recentSends = new Map();
+  // ---- composer
 
-  function loadRecentSends() {
-    recentSends.clear();
-    try {
-      const raw = JSON.parse(sessionStorage.getItem(SENT_STORAGE_KEY) || '[]');
-      if (!Array.isArray(raw)) return;
-      raw.forEach(r => {
-        if (r && typeof r.contact === 'string' && Number.isFinite(r.at)) {
-          recentSends.set(r.contact, { at: r.at, name: typeof r.name === 'string' ? r.name : '', has_tracking: !!r.has_tracking, ad_id: typeof r.ad_id === 'string' ? r.ad_id : null, text: '' });
-        }
-      });
-    } catch (e) {}
-  }
-
-  function saveRecentSends() {
-    try {
-      const rows = [];
-      recentSends.forEach((v, contact) => rows.push({ contact, at: v.at, name: v.name, has_tracking: v.has_tracking, ad_id: v.ad_id }));
-      if (rows.length) sessionStorage.setItem(SENT_STORAGE_KEY, JSON.stringify(rows));
-      else sessionStorage.removeItem(SENT_STORAGE_KEY);
-    } catch (e) {}
-  }
-
-  function clearRecentSends() {
-    recentSends.clear();
-    try { sessionStorage.removeItem(SENT_STORAGE_KEY); } catch (e) {}
-  }
-
-  function rememberSend(contact, text) {
-    const conv = state.conversations.find(c => c.contact === contact) || state.activeConversationData || {};
-    recentSends.set(contact, {
-      at: Date.now(),
-      name: String(conv.profile_name || ''),
-      has_tracking: !!conv.has_tracking,
-      ad_id: conv.ad_id ? String(conv.ad_id) : null,
-      text: String(text || '')
+  function renderComposer() {
+    const ta = h('textarea', { id: 'reply', rows: 1, placeholder: 'Write a reply…  (/ for quick replies)', value: S.active.draft || '' });
+    ta.addEventListener('input', () => { autosize(ta); updateSend(); saveDraft(ta.value); if (ta.value === '/') { ta.value = ''; openQuick(); } });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReply(); }
     });
-    saveRecentSends();
-  }
-
-  // Server rows plus the chats messaged in the last 2h (those replace their server row, at the end)
-  function withRecentSends(list) {
-    const now = Date.now();
-    let pruned = false;
-    recentSends.forEach((v, contact) => {
-      if (now - v.at >= SENT_KEEP_MS) { recentSends.delete(contact); pruned = true; }
+    ta.addEventListener('paste', (e) => {
+      const f = [...(e.clipboardData || {}).files || []].find((x) => /^image\//.test(x.type));
+      if (f) { e.preventDefault(); sendFile(f); }
     });
-    if (pruned) saveRecentSends();
-    if (!recentSends.size) return list;
-    const sent = [];
-    recentSends.forEach((v, contact) => sent.push({
-      contact,
-      profile_name: v.name,
-      last_message: v.text || 'Follow-up sent',
-      last_direction: 'outgoing',
-      last_timestamp: new Date(v.at).toISOString(),
-      has_tracking: v.has_tracking,
-      ad_id: v.ad_id,
-      triage_fresh: true,
-      triage_status: 'SENT',
-      triage_verdict: null,
-      triage_reason: '',
-      sent_recently: true
-    }));
-    sent.sort((a, b) => (a.last_timestamp < b.last_timestamp ? 1 : -1));
-    return list.filter(c => !recentSends.has(c.contact)).concat(sent);
+    const file = h('input', { type: 'file', id: 'fileIn', hidden: true, accept: 'image/jpeg,image/png,image/webp,application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.txt' });
+    file.addEventListener('change', () => { if (file.files[0]) sendFile(file.files[0]); file.value = ''; });
+    $('#composerWrap').replaceChildren(h('div', { class: 'composer', id: 'composer' },
+      h('div', { class: 'voicebar', id: 'voicebar', hidden: true }),
+      h('div', { class: 'composer-box' },
+        h('button', { class: 'icon-btn', title: 'Quick replies (/)', 'aria-label': 'Quick replies', onclick: openQuick }, icon('zap')),
+        h('button', { class: 'icon-btn', id: 'attachBtn', title: 'Send a photo or a file (WhatsApp)', 'aria-label': 'Attach', onclick: () => file.click() }, icon('clip')),
+        file, ta,
+        h('button', { class: 'icon-btn', id: 'micBtn', title: 'Record a voice note (WhatsApp)', 'aria-label': 'Record a voice note', onclick: voiceStart }, icon('mic')),
+        h('button', { class: 'send-btn', id: 'sendBtn', title: 'Send (Enter)', 'aria-label': 'Send', onclick: sendReply }, icon('send'))),
+      h('div', { class: 'composer-foot' }, h('span', { id: 'composerNote' }), h('span', { id: 'charCount' }))));
+    autosize(ta);
+    renderComposerState();
+  }
+  function renderComposerState() {
+    const comp = $('#composer');
+    if (!comp || !S.active) return;
+    const c = S.active.data ? S.active.data.conv : S.chats.find((x) => x.contact === S.active.contact);
+    let closed = $('#composerClosed');
+    const w = c ? windowInfo(c) : { open: true };
+    if (c && !w.open) {
+      comp.querySelector('.composer-box').hidden = true;
+      comp.querySelector('.composer-foot').hidden = true;
+      if (!closed) {
+        closed = h('div', { class: 'composer-closed', id: 'composerClosed' }, icon('lock'),
+          h('span', null, isIg(c) ? 'Instagram only allows replies within 7 days of the customer’s last message.' : 'The 24h WhatsApp window is closed. Only an approved template can be sent now (from BSB).'));
+        comp.prepend(closed);
+      }
+      return;
+    }
+    if (closed) closed.remove();
+    comp.querySelector('.composer-box').hidden = false;
+    comp.querySelector('.composer-foot').hidden = false;
+    const ig = c && isIg(c);
+    $('#attachBtn').hidden = !!ig;
+    $('#micBtn').hidden = !!ig;
+    const note = $('#composerNote');
+    if (ig && w.left < 6 * 86400000) note.textContent = 'Over 24h: Instagram sends this with the human-agent tag';
+    else note.textContent = 'Enter to send · Shift+Enter new line · paste a photo to send it';
+    updateSend();
+  }
+  function maxLen() { const c = S.active && (S.active.data ? S.active.data.conv : null); return c && isIg(c) ? 1000 : 4096; }
+  function updateSend() {
+    const ta = $('#reply');
+    if (!ta) return;
+    const n = ta.value.trim().length;
+    const max = maxLen();
+    const cc = $('#charCount');
+    cc.textContent = n > max * 0.8 ? `${n}/${max}` : '';
+    cc.className = n > max ? 'over' : '';
+    $('#sendBtn').disabled = !n || n > max;
+  }
+  function autosize(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(180, ta.scrollHeight) + 'px'; }
+  let draftTimer;
+  function saveDraft(v) {
+    if (!S.active) return;
+    S.active.draft = v;
+    const contact = S.active.contact;
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => {
+      const all = store('desk_drafts') || {};
+      if (v.trim()) all[contact] = v; else delete all[contact];
+      store('desk_drafts', all);
+    }, 300);
   }
 
-  // A conversation is hidden only by a fresh HIDE verdict (fresh = no new message since it was checked)
-  function isHidden(c) {
-    return c.triage_fresh && c.triage_verdict === 'HIDE';
+  async function sendReply() {
+    const ta = $('#reply');
+    if (!ta || !S.active || !S.active.data) return;
+    const text = ta.value.trim();
+    if (!text || text.length > maxLen()) return;
+    const p = { request_id: uuid(), text, status: 'sending', at: now() };
+    S.active.pending.push(p);
+    ta.value = ''; autosize(ta); saveDraft(''); updateSend();
+    renderMessages(true);
+    deliver(p, S.active);
   }
-
-  function isUnanswered(c) {
-    return c.triage_fresh ? c.triage_status === 'NEEDS_REPLY' : String(c.last_direction).toLowerCase() === 'incoming';
-  }
-
-  // =========================================================================
-  // Panels: "Follow-up" (this file, the default) and views registered by other scripts
-  // =========================================================================
-  // def: { onSignIn(), onSignOut(), onShow(), onHide(), refresh() }, all optional. The view's
-  // markup is the <section id="view-{id}"> in index.html, its tab the button with data-tab="{id}".
-  function registerView(id, def) {
-    const key = String(id || '');
-    if (!/^[a-z]{1,20}$/.test(key) || key === 'followup' || views[key] || !def || typeof def !== 'object') return false;
-    views[key] = def;
-    return true;
-  }
-
-  function callView(id, hook) {
-    const view = views[id];
-    if (!view || typeof view[hook] !== 'function') return undefined;
+  async function deliver(p, a) {
     try {
-      return view[hook]();
+      if (p.media) await api.call('send_media', { contact: a.contact, request_id: p.request_id, ...p.media });
+      else await api.call('send', { contact: a.contact, text: p.text, request_id: p.request_id });
+      a.pending = a.pending.filter((x) => x !== p);
+      if (S.active === a) await pollChat();
+      refreshList();
     } catch (e) {
-      console.warn(`[view ${id}.${hook}]`, safeErrorText(e));
-      return undefined;
+      p.status = 'failed'; p.error = e.message;
+      if (S.active === a) renderMessages(false);
+      toast(`Not sent: ${e.message}`, 'error');
     }
   }
+  function retry(p) { p.status = 'sending'; p.request_id = uuid(); p.at = now(); renderMessages(true); deliver(p, S.active); }
+  function dropPending(p) { S.active.pending = S.active.pending.filter((x) => x !== p); renderMessages(false); }
 
-  function switchTab(tab) {
-    const next = views[tab] ? tab : 'followup';
-    const prev = state.activeTab;
-    state.activeTab = next;
-    el.tabButtons.forEach(btn => {
-      const on = btn.getAttribute('data-tab') === next;
-      btn.classList.toggle('active', on);
-      btn.setAttribute('aria-selected', on ? 'true' : 'false');
-    });
-    if (el.viewChats) el.viewChats.classList.toggle('active', next === 'followup');
-    Object.keys(views).forEach(id => {
-      const section = document.getElementById(`view-${id}`);
-      if (section) section.classList.toggle('active', id === next);
-    });
-    if (el.triageStatus) el.triageStatus.style.display = next === 'followup' ? '' : 'none';
-    if (prev !== next) {
-      callView(prev, 'onHide');
-      callView(next, 'onShow');
-    }
+  // ---- photos, files, voice notes (WhatsApp)
+
+  const MEDIA_MAX = 15 * 1024 * 1024;
+  function toB64(blob) {
+    return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).replace(/^data:[^,]*,/, '')); r.onerror = rej; r.readAsDataURL(blob); });
+  }
+  async function sendFile(f) {
+    if (!S.active || !S.active.data) return;
+    if (isIg(S.active.data.conv)) return toast('Photos and files can only be sent on WhatsApp', 'error');
+    if (f.size > MEDIA_MAX) return toast('Files must be under 15 MB', 'error');
+    const isImg = /^image\/(jpeg|png|webp)$/.test(f.type);
+    if (!confirm(`Send ${isImg ? 'this photo' : `“${f.name}”`} to ${displayName(S.active.data.conv)}?`)) return;
+    const url = URL.createObjectURL(f);
+    const p = { request_id: uuid(), text: '', status: 'sending', at: now(),
+      preview: isImg ? h('img', { src: url, class: 'media-img', alt: '' }) : h('span', { class: 'doc' }, icon('file', 'sm'), f.name),
+      media: { kind: isImg ? 'image' : 'document', mime: f.type || 'application/octet-stream', filename: f.name, base64: await toB64(f) } };
+    S.active.pending.push(p);
+    renderMessages(true);
+    deliver(p, S.active);
   }
 
-  // =========================================================================
-  // Authentication
-  // =========================================================================
-  async function checkAuth() {
-    if (!window.supabaseClient) return;
-    // Keep state.session current after token refreshes, and follow sign-outs (other tab, expiry)
-    window.supabaseClient.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_OUT') {
-        if (state.session) setUnauthenticated();
-      } else if (session && session.access_token && state.session) {
-        state.session = session;
-      }
-    });
-    try {
-      const { data: { session } } = await window.supabaseClient.auth.getSession();
-      if (session && session.access_token) {
-        setAuthenticated(session);
-      } else {
-        setUnauthenticated();
-      }
-    } catch (err) {
-      setUnauthenticated();
-    }
-  }
-
-  function setAuthenticated(session) {
-    const wasSignedOut = !state.session;
-    if (wasSignedOut) {
-      state.authEpoch++;
-      loadRecentSends();
-    }
-    state.session = session;
-    if (el.userEmailDisplay) el.userEmailDisplay.textContent = session.user?.email || "Admin";
-    if (el.passwordInput) el.passwordInput.value = '';
-    el.loginView.style.display = 'none';
-    el.appView.style.display = 'flex';
-    refreshInbox();
-    if (!state.refreshTimer) state.refreshTimer = setInterval(refreshInbox, REFRESH_MS);
-    if (wasSignedOut) {
-      Object.keys(views).forEach(id => callView(id, 'onSignIn'));
-      switchTab('followup'); // always open on Follow-up
-    }
-  }
-
-  // Wipes everything that belongs to the signed-in admin: timers, data in memory and on screen
-  function setUnauthenticated() {
-    state.authEpoch++;
-    state.session = null;
-    if (state.refreshTimer) {
-      clearInterval(state.refreshTimer);
-      state.refreshTimer = null;
-    }
-    if (state.triageTimer) {
-      clearTimeout(state.triageTimer);
-      state.triageTimer = null;
-    }
-    chatView.reset();
-    state.conversations = [];
-    clearRecentSends();
-    state.filteredConversations = [];
-    state.activeContact = null;
-    state.activeConversationData = null;
-    state.searchQuery = '';
-    state.isLoadingConversations = false;
-    state.isTriaging = false;
-    state.lastTriage = null;
-    if (el.convList) el.convList.replaceChildren();
-    if (el.chatMessagesContainer) el.chatMessagesContainer.replaceChildren();
-    if (el.chatTriageBar) el.chatTriageBar.replaceChildren();
-    if (el.chatAdBanner) el.chatAdBanner.replaceChildren();
-    if (el.chatTextarea) el.chatTextarea.value = '';
-    if (el.searchInput) el.searchInput.value = '';
-    if (el.sendStatusLine) el.sendStatusLine.textContent = '';
-    discardVoiceNote(true);
-    if (el.chatPhone) el.chatPhone.textContent = '';
-    if (el.chatProfileName) el.chatProfileName.textContent = '';
-    if (el.chatWaLink) el.chatWaLink.removeAttribute('href');
-    if (el.userEmailDisplay) el.userEmailDisplay.textContent = 'Admin';
-    if (el.passwordInput) el.passwordInput.value = '';
-    if (el.chatActiveView) el.chatActiveView.style.display = 'none';
-    if (el.chatEmptyState) el.chatEmptyState.style.display = '';
-    el.loginView.style.display = 'flex';
-    el.appView.style.display = 'none';
-    if (el.loginError) el.loginError.textContent = '';
-    // Other tabs wipe their own state and DOM; the next sign-in opens Follow-up
-    Object.keys(views).forEach(id => callView(id, 'onSignOut'));
-    switchTab('followup');
-  }
-
-  async function handleLogin(e) {
-    e.preventDefault();
-    const email = el.emailInput.value.trim();
-    const password = el.passwordInput.value;
-    if (!email || !password) {
-      el.loginError.textContent = "Please enter email and password.";
-      return;
-    }
-
-    el.loginSubmitBtn.disabled = true;
-    el.loginSubmitBtn.replaceChildren(icon('fa-solid fa-spinner fa-spin'), ' Authenticating...');
-    el.loginError.textContent = '';
-
-    try {
-      const { data, error } = await window.supabaseClient.auth.signInWithPassword({ email, password });
-      if (error) {
-        // Fixed wording: do not echo the auth server's raw answer
-        const status = Number(error.status) || 0;
-        el.loginError.textContent = status === 429
-          ? "Too many attempts. Please wait a moment and try again."
-          : (status >= 500 || status === 0)
-            ? "Sign-in service unavailable. Please try again."
-            : "Invalid email or password.";
-      } else if (data && data.session) {
-        setAuthenticated(data.session);
-      }
-    } catch (err) {
-      el.loginError.textContent = "Network error during authentication.";
-    } finally {
-      el.passwordInput.value = '';
-      el.loginSubmitBtn.disabled = false;
-      el.loginSubmitBtn.replaceChildren(icon('fa-solid fa-arrow-right-to-bracket'), ' Sign In');
-    }
-  }
-
-  async function handleLogout() {
-    try {
-      await window.supabaseClient.auth.signOut();
-    } catch (err) {}
-    setUnauthenticated();
-  }
-
-  // =========================================================================
-  // Inbox + AI triage
-  // =========================================================================
-  async function loadConversations() {
-    if (state.isLoadingConversations) return;
-    state.isLoadingConversations = true;
-    const epoch = state.authEpoch;
-
-    try {
-      const res = await window.supabaseClient.rpc('get_followup_inbox', {
-        hours_lookback: HOURS_LOOKBACK_CONVS,
-        min_hours_old: MIN_HOURS_OLD
-      });
-      if (epoch !== state.authEpoch) return; // logged out meanwhile
-      if (!res.error && Array.isArray(res.data)) {
-        state.conversations = withRecentSends(res.data.filter(c => c && typeof c === 'object'));
-        filterAndRenderConversations();
-        if (state.activeContact) {
-          const fresh = state.conversations.find(c => c.contact === state.activeContact);
-          if (fresh) {
-            state.activeConversationData = fresh;
-            renderTriageBar(fresh);
-          }
-        }
-      } else if (res.error) {
-        console.warn('[get_followup_inbox]', safeErrorText(res.error));
-      }
-    } catch (e) {
-      console.warn('[loadConversations]', safeErrorText(e));
-    } finally {
-      if (epoch === state.authEpoch) state.isLoadingConversations = false;
-    }
-  }
-
-  // Ask the triage function to check conversations that are new or changed since their last check
-  async function runTriage() {
-    if (state.isTriaging) return;
-    const pending = state.conversations.filter(c => !c.triage_fresh).length;
-    if (!pending) {
-      updateTriageStatus();
-      return;
-    }
-    state.isTriaging = true;
-    const epoch = state.authEpoch;
-    setTriageStatus(`Checking ${pending} chat${pending > 1 ? 's' : ''}...`, 'fa-solid fa-circle-notch fa-spin');
-    try {
-      const { data: { session } } = await window.supabaseClient.auth.getSession();
-      if (!session || !session.access_token) throw new Error('Not signed in');
-      const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/triage`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          apikey: window.SUPABASE_ANON_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: '{}'
-      });
-      const data = (await resp.json().catch(() => null)) || {};
-      if (epoch !== state.authEpoch) return; // logged out meanwhile
-      if (!resp.ok || !data.success) throw new Error(`HTTP ${resp.status}`);
-      state.lastTriage = new Date();
-      await loadConversations();
-      if (epoch !== state.authEpoch) return;
-      // Large backlogs are processed in several passes
-      if (data.remaining > 0) {
-        if (state.triageTimer) clearTimeout(state.triageTimer);
-        state.triageTimer = setTimeout(() => {
-          state.triageTimer = null;
-          if (epoch !== state.authEpoch) return;
-          state.isTriaging = false;
-          runTriage();
-        }, 500);
-      }
-    } catch (e) {
-      if (epoch !== state.authEpoch) return;
-      console.warn('[triage]', safeErrorText(e));
-      setTriageStatus('AI check unavailable, showing all chats', 'fa-solid fa-triangle-exclamation');
-      state.isTriaging = false;
-      return;
-    }
-    state.isTriaging = false;
-    updateTriageStatus();
-  }
-
-  async function refreshInbox() {
-    await loadConversations();
-    await runTriage();
-  }
-
-  function setTriageStatus(text, iconClasses) {
-    if (!el.triageStatusText) return;
-    el.triageStatusText.replaceChildren();
-    if (iconClasses) el.triageStatusText.append(icon(iconClasses), ' ');
-    el.triageStatusText.append(String(text));
-  }
-
-  function updateTriageStatus() {
-    const hidden = state.conversations.filter(isHidden).length;
-    const pending = state.conversations.filter(c => !c.triage_fresh).length;
-    const when = state.lastTriage ? ` · checked ${state.lastTriage.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
-    setTriageStatus(pending
-      ? `${hidden} hidden · ${pending} waiting for check`
-      : `${hidden} finished chat${hidden === 1 ? '' : 's'} hidden${when}`);
-  }
-
-  function filterAndRenderConversations() {
-    const all = state.conversations;
-    const visible = all.filter(c => !isHidden(c));
-    let list;
-    if (state.activeFilter === 'hidden') list = all.filter(isHidden);
-    else if (state.activeFilter === 'unanswered') list = visible.filter(isUnanswered);
-    else list = visible;
-
-    if (state.searchQuery) {
-      const q = String(state.searchQuery).slice(0, 200).toLowerCase();
-      list = list.filter(c => String(c.contact).includes(q) || String(c.profile_name || '').toLowerCase().includes(q) || String(c.last_message || '').toLowerCase().includes(q));
-    }
-
-    state.filteredConversations = list;
-    const todo = visible.filter(c => !c.sent_recently).length; // sent chats are shown but need nothing
-    if (el.pillCountTodo) el.pillCountTodo.textContent = todo;
-    if (el.pillCountUnanswered) el.pillCountUnanswered.textContent = visible.filter(isUnanswered).length;
-    if (el.pillCountHidden) el.pillCountHidden.textContent = all.length - visible.length;
-    if (el.convCountBadge) el.convCountBadge.textContent = todo;
-    if (el.total24hCount) el.total24hCount.textContent = `${all.length} chats in window`;
-    renderConversationList();
-    if (!state.isTriaging) updateTriageStatus();
-  }
-
-  function updateActiveConversationHighlight(contact) {
-    if (!el.convList) return;
-    el.convList.querySelectorAll('.conv-item').forEach(item => {
-      item.classList.toggle('active', item.dataset.contact === String(contact));
+  // Voice notes: OGG/Opus mono (what WhatsApp needs), recorded with opus-recorder.
+  const OPUS = 'https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/';
+  const voice = { phase: 'idle', rec: null, stream: null, ctx: null, blob: null, url: null, started: 0, tick: null, max: null };
+  function loadRecorder() {
+    if (window.Recorder) return Promise.resolve();
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = OPUS + 'recorder.min.js'; s.crossOrigin = 'anonymous'; s.onload = res; s.onerror = () => rej(new Error('recorder could not load'));
+      document.head.append(s);
     });
   }
-
-  function statusLabel(status) {
-    return Object.prototype.hasOwnProperty.call(STATUS_LABELS, status) ? STATUS_LABELS[status] : String(status || '');
+  function encoderPath() {
+    const u = OPUS + 'encoderWorker.min.js';
+    if (typeof BaseAudioContext !== 'undefined' && 'audioWorklet' in BaseAudioContext.prototype) return u;
+    return URL.createObjectURL(new Blob([`importScripts(${JSON.stringify(u)});`], { type: 'application/javascript' }));
   }
-
-  function triagePill(c) {
-    if (c.sent_recently) {
-      const sent = createEl('span', 'triage-pill pill-sent');
-      sent.append(icon('fa-solid fa-check'), ' Sent');
-      return sent;
-    }
-    if (!c.triage_fresh) {
-      const checking = createEl('span', 'triage-pill pill-checking');
-      checking.append(icon('fa-solid fa-circle-notch fa-spin'), ' Checking');
-      return checking;
-    }
-    const cls = c.triage_verdict === 'HIDE' ? 'pill-hidden' : c.triage_status === 'NEEDS_REPLY' ? 'pill-unanswered' : 'pill-open';
-    return createEl('span', `triage-pill ${cls}`, statusLabel(c.triage_status));
-  }
-
-  // Built with DOM nodes + textContent only: nothing from the database is ever parsed as HTML
-  function renderConversationList(preserveScroll = true) {
-    if (!el.convList) return;
-    const prevScroll = preserveScroll ? el.convList.scrollTop : 0;
-    el.convList.replaceChildren();
-
-    if (state.filteredConversations.length === 0) {
-      const msg = state.activeFilter === 'hidden' ? 'No hidden chats.' : 'Nothing to follow up right now.';
-      const empty = createEl('div', '', msg);
-      empty.style.cssText = 'text-align: center; color: var(--text-dim); padding: 30px;';
-      el.convList.appendChild(empty);
-      return;
-    }
-
-    const frag = document.createDocumentFragment();
-    state.filteredConversations.forEach(c => {
-      const item = createEl('div', `conv-item${state.activeContact === c.contact ? ' active' : ''}${c.sent_recently ? ' conv-sent' : ''}`);
-      item.dataset.contact = String(c.contact);
-      item.addEventListener('click', () => selectConversation(c));
-
-      const isIncoming = String(c.last_direction).toLowerCase() === 'incoming';
-      const preview = c.last_message === '[Outgoing Message]' ? 'You replied' : (c.last_message || '[Media]');
-      const initialSource = String(c.profile_name || c.contact || '?').trim() || '?';
-      const initial = (Array.from(initialSource)[0] || '?').toUpperCase();
-
-      const avatar = createEl('div', `conv-avatar${isIncoming ? ' incoming-indicator' : ''}`, initial);
-
-      const info = createEl('div', 'conv-info');
-      const headerLine = createEl('div', 'conv-header-line');
-      headerLine.append(
-        createEl('span', 'conv-name', formatPhoneDisplay(c.contact)),
-        createEl('span', 'conv-time', formatRelativeTime(c.last_timestamp))
-      );
-
-      const subline = createEl('div', 'conv-subline');
-      const previewEl = createEl('span', 'conv-preview');
-      previewEl.append(
-        icon(isIncoming ? 'fa-solid fa-arrow-down-left dir-icon dir-incoming' : 'fa-solid fa-arrow-up-right dir-icon dir-outgoing'),
-        ' ' + String(preview)
-      );
-      const badges = createEl('div', 'conv-badges');
-      if (c.has_tracking) {
-        const adPill = createEl('span', 'ad-pill');
-        adPill.append(icon('fa-brands fa-meta'), ' Ads');
-        badges.appendChild(adPill);
-      }
-      badges.appendChild(triagePill(c));
-      subline.append(previewEl, badges);
-
-      info.append(headerLine, subline);
-      if (c.triage_fresh && c.triage_reason) info.appendChild(createEl('div', 'conv-reason', c.triage_reason));
-
-      item.append(avatar, info);
-      frag.appendChild(item);
-    });
-    el.convList.appendChild(frag);
-
-    if (preserveScroll && prevScroll > 0) {
-      el.convList.scrollTop = prevScroll;
-    }
-  }
-
-  function renderTriageBar(c) {
-    if (!el.chatTriageBar) return;
-    const hidden = isHidden(c);
-    el.btnMarkDone.style.display = hidden ? 'none' : 'flex';
-    el.btnShowAgain.style.display = hidden ? 'flex' : 'none';
-    el.chatTriageBar.replaceChildren();
-    if (c.sent_recently) {
-      el.btnMarkDone.style.display = 'none';
-      const at = new Date(c.last_timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      el.chatTriageBar.className = 'triage-bar bar-sent';
-      el.chatTriageBar.append(icon('fa-solid fa-check'), ' ', createEl('strong', '', `Follow-up sent at ${at}`), ' · stays in the list for 2h');
-      return;
-    }
-    if (!c.triage_fresh) {
-      el.chatTriageBar.className = 'triage-bar bar-checking';
-      el.chatTriageBar.append(icon('fa-solid fa-circle-notch fa-spin'), ' Not checked yet since the last message');
-      return;
-    }
-    const by = c.triage_method === 'manual' ? ' (by an agent)' : '';
-    el.chatTriageBar.className = `triage-bar ${hidden ? 'bar-hidden' : c.triage_status === 'NEEDS_REPLY' ? 'bar-unanswered' : 'bar-open'}`;
-    el.chatTriageBar.append(
-      icon(`fa-solid ${hidden ? 'fa-eye-slash' : 'fa-circle-info'}`),
-      ' ',
-      createEl('strong', '', statusLabel(c.triage_status) + by),
-      ' · ' + String(c.triage_reason || '')
-    );
-  }
-
-  // Manual override, valid until the next message in this chat
-  async function setManualVerdict(verdict) {
-    const c = state.activeConversationData;
-    if (!c || !c.signature) return;
-    const btn = verdict === 'HIDE' ? el.btnMarkDone : el.btnShowAgain;
-    btn.disabled = true;
-    try {
-      const row = {
-        contact: c.contact,
-        signature: c.signature,
-        verdict,
-        status: verdict === 'HIDE' ? 'MANUAL_DONE' : 'MANUAL_SHOW',
-        reason: verdict === 'HIDE' ? 'An agent marked this chat as done' : 'An agent brought this chat back',
-        method: 'manual',
-        votes: null,
-        tokens: 0,
-        updated_by: state.session?.user?.email || 'agent',
-        updated_at: new Date().toISOString()
-      };
-      const { error } = await window.supabaseClient.from('chat_triage').upsert(row, { onConflict: 'contact' });
-      if (error) throw error;
-      Object.assign(c, { triage_verdict: verdict, triage_status: row.status, triage_reason: row.reason, triage_method: 'manual', triage_fresh: true });
-      filterAndRenderConversations();
-      renderTriageBar(c);
-      return true;
-    } catch (e) {
-      alert(`Could not save: ${safeErrorText(e, 'please try again')}`);
-      return false;
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
-  // Keyboard: C = next chat, V = mark done and go to the next chat
-  function nextConversationAfter(contact) {
-    const list = state.filteredConversations;
-    const idx = list.findIndex(c => c.contact === contact);
-    if (idx === -1) return list[0] || null;
-    return list[idx + 1] || null;
-  }
-
-  function openConversation(c) {
-    if (!c) return;
-    selectConversation(c);
-    const item = el.convList && el.convList.querySelector(`.conv-item[data-contact="${CSS.escape(String(c.contact))}"]`);
-    if (item) item.scrollIntoView({ block: 'nearest' });
-  }
-
-  async function markDoneAndNext() {
-    const c = state.activeConversationData;
-    if (!c) return openConversation(state.filteredConversations[0]);
-    const next = nextConversationAfter(c.contact);
-    if (!c.sent_recently && !isHidden(c) && !(await setManualVerdict('HIDE'))) return;
-    if (next) openConversation(next);
-  }
-
-  function handleShortcut(e) {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !state.session) return;
-    if (state.activeTab !== 'followup') return; // the keys belong to the visible tab only
-    const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-    const key = String(e.key || '').toLowerCase();
-    if (key === 'c') {
-      e.preventDefault();
-      openConversation(nextConversationAfter(state.activeContact));
-    } else if (key === 'v') {
-      e.preventDefault();
-      markDoneAndNext();
-    }
-  }
-
-  async function selectConversation(c) {
-    // A recording belongs to the chat it was made in: never carry it over to another contact
-    if (voice.phase !== 'idle' && voice.contact !== c.contact) discardVoiceNote(true);
-    state.activeContact = c.contact;
-    state.activeConversationData = c;
-
-    el.chatEmptyState.style.display = 'none';
-    el.chatActiveView.style.display = 'flex';
-
-    el.chatPhone.textContent = formatPhoneDisplay(c.contact);
-    el.chatProfileName.textContent = c.profile_name || 'BSB Contact';
-    // normalizePhone() returns digits only, so nothing else can end up in the link
-    el.chatWaLink.href = `https://web.whatsapp.com/send?phone=${encodeURIComponent(normalizePhone(c.contact))}`;
-    renderTriageBar(c);
-
-    if (el.chatAdBanner) {
-      el.chatAdBanner.replaceChildren();
-      if (c.has_tracking) {
-        el.chatAdBanner.style.display = 'flex';
-        el.chatAdBanner.append(icon('fa-brands fa-meta'), ` Meta Ad Lead (ID: ${c.ad_id || 'Active'})`);
-      } else {
-        el.chatAdBanner.style.display = 'none';
-      }
-    }
-
-    updateActiveConversationHighlight(c.contact); // In-place highlight without touching scroll position
-
-    chatView.reset();
-    chatView.notice('Loading conversation...', 'fa-solid fa-spinner fa-spin');
-    const epoch = state.authEpoch;
-    try {
-      const { data, error } = await window.supabaseClient
-        .from('bsb_messages')
-        .select('*')
-        .eq('contact', c.contact)
-        .order('timestamp', { ascending: false })
-        .limit(100);
-      if (epoch !== state.authEpoch || state.activeContact !== c.contact) return;
-      if (error) throw error;
-      chatView.render((Array.isArray(data) ? data : []).reverse());
-    } catch (e) {
-      if (epoch === state.authEpoch && state.activeContact === c.contact) chatView.notice('Failed to load messages.');
-    }
-  }
-
-  async function sendDirectChatMessage() {
-    if (voice.phase !== 'idle' || el.btnSend.dataset.busy === '1') return; // voice note in progress / already sending
-    if (!state.activeContact || !el.chatTextarea.value.trim()) return;
-    const text = el.chatTextarea.value.trim();
-    const contact = state.activeContact;
-    const dest = normalizePhone(contact);
-    const epoch = state.authEpoch;
-    if (!dest) {
-      el.sendStatusLine.textContent = "Error: this contact has no valid phone number.";
-      return;
-    }
-    if (text.length > 4096) {
-      el.sendStatusLine.textContent = "Error: message is too long (max 4096 characters).";
-      return;
-    }
-
-    el.btnSend.disabled = true;
-    el.btnSend.dataset.busy = '1';
-    if (el.btnVoice) el.btnVoice.disabled = true;
-    el.sendStatusLine.textContent = "Sending via BestSMSBulk...";
-
-    try {
-      // BSB credentials live server-side: the bsb_send edge function forwards the message
-      const { data: { session } } = await window.supabaseClient.auth.getSession();
-      if (!session || !session.access_token) throw new Error('You are signed out. Please sign in again.');
-      const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/bsb_send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
-          apikey: window.SUPABASE_ANON_KEY
-        },
-        body: JSON.stringify({
-          destination: dest,
-          message: text
-        })
-      });
-      const data = (await resp.json().catch(() => null)) || {};
-      const edgeOk = resp.status === 200 && data && typeof data.upstream_status === 'number';
-      // resJson is BestSMSBulk's own answer (or the edge function's error when it never reached BSB)
-      const resJson = edgeOk
-        ? ((data.result && typeof data.result === 'object') ? data.result : { raw: 'Non-JSON' })
-        : { status: 'error', message: (data && (data.error || data.message)) || `HTTP ${resp.status}` };
-      const isSuccess = edgeOk && data.upstream_status === 200 && resJson.status !== 'error' && resJson.success !== false;
-
-      // Record every send in send_queue: keeps the 1h dispatcher filter working and gives the
-      // AI check the text of follow-ups sent from this panel (BSB webhooks don't include it)
-      if (window.supabaseClient) {
-        try {
-          await window.supabaseClient.from('send_queue').insert({
-            contact: dest,
-            message: text,
-            status: isSuccess ? 'SENT' : 'FAILED',
-            sent_at: isSuccess ? new Date().toISOString() : null,
-            api_response: JSON.stringify(resJson),
-            error_message: isSuccess ? null : JSON.stringify(resJson)
-          });
-        } catch (dbErr) {
-          console.warn('[SEND_QUEUE INSERT ERROR]', safeErrorText(dbErr));
-        }
-      }
-
-      if (epoch !== state.authEpoch) return; // logged out meanwhile
-
-      if (isSuccess) {
-        el.chatTextarea.value = '';
-        el.sendStatusLine.textContent = "✓ Message sent successfully!";
-
-        // Only add the bubble if the same chat is still open
-        if (state.activeContact === contact) chatView.appendOutgoing(text);
-
-        // The chat stays in the list, greyed as "Sent", for 2h (the inbox query skips it meanwhile)
-        rememberSend(contact, text);
-        state.conversations = withRecentSends(state.conversations);
-        filterAndRenderConversations();
-        if (state.activeContact === contact) {
-          const sentRow = state.conversations.find(c => c.contact === contact);
-          if (sentRow) { state.activeConversationData = sentRow; renderTriageBar(sentRow); }
-        }
-      } else {
-        // Short reason only; the full upstream answer is kept in send_queue, not shown on screen
-        el.sendStatusLine.textContent = `Error: ${safeErrorText(resJson.message || resJson.error, 'message was not sent')}`;
-      }
-    } catch (e) {
-      if (epoch !== state.authEpoch) return;
-      el.sendStatusLine.textContent = `Network error: ${safeErrorText(e, 'please try again')}`;
-    } finally {
-      el.btnSend.dataset.busy = '';
-      renderVoiceUi();
-    }
-  }
-
-  // =========================================================================
-  // Voice notes: record OGG/Opus mono (what WhatsApp needs) with opus-recorder,
-  // then send it as base64 through the bsb_send_media edge function
-  // =========================================================================
-  const OPUS_RECORDER_BASE = 'https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/';
-  const VOICE_MAX_MS = 5 * 60 * 1000;
-  const VOICE_MIN_MS = 1000;
-  const VOICE_MAX_BYTES = 16 * 1024 * 1024;
-
-  // phase: idle -> recording -> (stopping) -> ready -> sending -> idle (or back to ready on failure)
-  const voice = {
-    phase: 'idle', contact: null, epoch: 0, recorder: null, stream: null, audioCtx: null,
-    blob: null, previewUrl: null, startedAt: 0, durationMs: 0, tickTimer: null, maxTimer: null,
-    workerUrl: null, sendFailed: false, maybeSent: false
-  };
-
-  function formatVoiceTime(ms) {
-    const sec = Math.floor(ms / 1000);
-    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-  }
-
-  // AudioWorklet modules may load cross-origin (jsDelivr sends CORS headers); a classic Worker
-  // may not, so older browsers get a same-origin blob: wrapper that importScripts() the CDN file
-  function voiceEncoderPath() {
-    const encoderUrl = OPUS_RECORDER_BASE + 'encoderWorker.min.js';
-    // Same test opus-recorder uses to pick its AudioWorklet path
-    const hasWorklet = typeof BaseAudioContext !== 'undefined' && 'audioWorklet' in BaseAudioContext.prototype;
-    if (hasWorklet) return encoderUrl;
-    if (!voice.workerUrl) {
-      voice.workerUrl = URL.createObjectURL(new Blob([`importScripts(${JSON.stringify(encoderUrl)});`], { type: 'application/javascript' }));
-    }
-    return voice.workerUrl;
-  }
-
-  // Detaches the current mic stream/AudioContext/timers from voice state and returns them
-  function takeVoiceInput() {
-    const res = { tickTimer: voice.tickTimer, maxTimer: voice.maxTimer, stream: voice.stream, audioCtx: voice.audioCtx };
-    voice.tickTimer = null; voice.maxTimer = null; voice.stream = null; voice.audioCtx = null;
-    return res;
-  }
-
-  function releaseVoiceResources(res) {
-    if (res.tickTimer) clearInterval(res.tickTimer);
-    if (res.maxTimer) clearTimeout(res.maxTimer);
-    if (res.stream) res.stream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
-    if (res.audioCtx) { try { res.audioCtx.close().catch(() => {}); } catch (e) {} }
-  }
-
-  function releaseVoiceInput() {
-    releaseVoiceResources(takeVoiceInput());
-  }
-
-  function renderVoiceUi() {
+  function voiceUi() {
+    const bar = $('#voicebar');
+    if (!bar) return;
     const p = voice.phase;
-    if (el.voiceBar) el.voiceBar.style.display = p === 'idle' ? 'none' : 'flex';
-    if (el.voiceBar) el.voiceBar.classList.toggle('recording', p === 'recording');
-    if (el.btnVoice) el.btnVoice.disabled = p !== 'idle';
-    if (el.btnSend) el.btnSend.disabled = p !== 'idle' || el.btnSend.dataset.busy === '1';
-    if (el.btnVoiceCancel) el.btnVoiceCancel.disabled = p === 'sending' || p === 'stopping';
-    if (el.btnVoiceSend) el.btnVoiceSend.disabled = p === 'sending' || p === 'stopping';
-    if (el.btnVoiceSendLabel) {
-      el.btnVoiceSendLabel.textContent = p === 'recording' ? 'Stop & Send'
-        : p === 'sending' ? 'Sending...'
-        : p === 'stopping' ? 'Finishing...'
-        : (voice.blob && voice.sendFailed ? 'Retry send' : 'Send');
-    }
-    if (el.voicePreview) {
-      const showPreview = (p === 'ready' || p === 'sending') && !!voice.previewUrl;
-      el.voicePreview.style.display = showPreview ? '' : 'none';
-      if (showPreview && el.voicePreview.getAttribute('src') !== voice.previewUrl) el.voicePreview.src = voice.previewUrl;
-      if (!showPreview && el.voicePreview.hasAttribute('src')) {
-        el.voicePreview.pause();
-        el.voicePreview.removeAttribute('src');
-        el.voicePreview.load();
-      }
-    }
-    if (el.voiceTimer) el.voiceTimer.textContent = formatVoiceTime(p === 'recording' ? Date.now() - voice.startedAt : voice.durationMs);
+    bar.hidden = p === 'idle';
+    $('#composer .composer-box').classList.toggle('dim', p !== 'idle');
+    if (p === 'idle') return bar.replaceChildren();
+    const secs = Math.floor(((p === 'recording' ? Date.now() : voice.stopped) - voice.started) / 1000);
+    bar.replaceChildren(
+      h('span', { class: `rec-dot${p === 'recording' ? ' on' : ''}` }),
+      h('span', { class: 'rec-time' }, `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`),
+      p === 'ready' && voice.url ? h('audio', { src: voice.url, controls: true }) : h('span', { class: 'muted' }, p === 'recording' ? 'Recording…' : 'Finishing…'),
+      h('button', { class: 'btn sm ghost', onclick: voiceDiscard }, 'Discard'),
+      p === 'recording' ? h('button', { class: 'btn sm', onclick: voiceStop }, icon('stop', 'sm'), 'Stop')
+        : h('button', { class: 'btn sm primary', disabled: p !== 'ready', onclick: voiceSend }, icon('send', 'sm'), 'Send'));
   }
-
-  // force=true also drops a recording that is being sent (logout / chat switch); the request
-  // itself can't be aborted, but its result is ignored through the epoch/contact checks
-  function discardVoiceNote(force) {
-    if (voice.phase === 'sending' && !force) return;
-    const rec = voice.recorder;
-    voice.recorder = null;
-    if (rec) { try { rec.ondataavailable = null; Promise.resolve(rec.close()).catch(() => {}); } catch (e) {} }
-    releaseVoiceInput();
-    if (voice.previewUrl) { try { URL.revokeObjectURL(voice.previewUrl); } catch (e) {} }
-    voice.previewUrl = null;
-    voice.blob = null;
-    voice.sendFailed = false;
-    voice.maybeSent = false;
-    voice.contact = null;
-    voice.durationMs = 0;
-    voice.phase = 'idle';
-    voice.epoch++;
-    renderVoiceUi();
-  }
-
-  async function startVoiceRecording() {
-    if (voice.phase !== 'idle' || !state.activeContact) return;
-    if (!normalizePhone(state.activeContact)) {
-      el.sendStatusLine.textContent = 'Error: this contact has no valid phone number.';
-      return;
-    }
-    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      el.sendStatusLine.textContent = 'Error: microphone is unavailable here (the page must be opened over https).';
-      return;
-    }
-    if (typeof window.Recorder !== 'function' || !window.Recorder.isRecordingSupported()) {
-      el.sendStatusLine.textContent = 'Error: voice recorder could not be loaded in this browser. Reload the page and try again.';
-      return;
-    }
-
-    voice.phase = 'stopping'; // "busy" while the permission prompt is open
-    voice.contact = state.activeContact;
-    const myEpoch = ++voice.epoch;
-    const authEpoch = state.authEpoch;
-    renderVoiceUi();
-    el.sendStatusLine.textContent = 'Waiting for microphone permission...';
-
+  async function voiceStart() {
+    if (voice.phase !== 'idle' || !S.active || !S.active.data) return;
+    if (isIg(S.active.data.conv)) return toast('Voice notes can only be sent on WhatsApp', 'error');
+    if (!window.isSecureContext || !navigator.mediaDevices) return toast('The microphone needs https', 'error');
+    voice.phase = 'starting'; voice.started = Date.now(); voiceUi();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-      // Cancelled, logged out or switched chat while the prompt was open: release the mic right away
-      if (myEpoch !== voice.epoch || authEpoch !== state.authEpoch || state.activeContact !== voice.contact) {
-        stream.getTracks().forEach(t => t.stop());
-        return;
-      }
+      await loadRecorder();
+      if (!window.Recorder.isRecordingSupported()) throw new Error('voice recording is not supported in this browser');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      if (voice.phase !== 'starting') { stream.getTracks().forEach((t) => t.stop()); return; }
       voice.stream = stream;
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      voice.audioCtx = new Ctx();
-      const sourceNode = voice.audioCtx.createMediaStreamSource(stream);
-
-      const recorder = new window.Recorder({
-        sourceNode,
-        encoderPath: voiceEncoderPath(),
-        numberOfChannels: 1,
-        encoderSampleRate: 48000,
-        encoderBitRate: 32000,
-        encoderApplication: 2048, // VOIP
-        streamPages: false,
-        monitorGain: 0
-      });
-      voice.recorder = recorder;
-
-      recorder.ondataavailable = (typedArray) => {
-        if (myEpoch !== voice.epoch) return;
-        voice.blob = new Blob([typedArray], { type: 'audio/ogg' });
-        if (voice.previewUrl) URL.revokeObjectURL(voice.previewUrl);
-        voice.previewUrl = URL.createObjectURL(voice.blob);
+      voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const rec = new window.Recorder({ sourceNode: voice.ctx.createMediaStreamSource(stream), encoderPath: encoderPath(), numberOfChannels: 1,
+        encoderSampleRate: 48000, encoderBitRate: 32000, encoderApplication: 2048, streamPages: false, monitorGain: 0 });
+      rec.ondataavailable = (arr) => {
+        voice.blob = new Blob([arr], { type: 'audio/ogg' });
+        voice.url = URL.createObjectURL(voice.blob);
+        voice.phase = 'ready'; voiceUi();
       };
-
-      await recorder.start();
-      if (myEpoch !== voice.epoch) return;
-      voice.startedAt = Date.now();
-      voice.phase = 'recording';
-      el.sendStatusLine.textContent = 'Recording voice note...';
-      voice.tickTimer = setInterval(renderVoiceUi, 250);
-      voice.maxTimer = setTimeout(() => {
-        if (myEpoch !== voice.epoch || voice.phase !== 'recording') return;
-        stopVoiceRecording(false).then(() => {
-          if (myEpoch === voice.epoch && voice.phase === 'ready') {
-            el.sendStatusLine.textContent = 'Reached the 5 minute limit. Listen back, then press Send.';
-          }
-        });
-      }, VOICE_MAX_MS);
-      renderVoiceUi();
+      voice.rec = rec;
+      await rec.start();
+      voice.phase = 'recording'; voice.started = Date.now();
+      voice.tick = setInterval(voiceUi, 250);
+      voice.max = setTimeout(voiceStop, 5 * 60 * 1000);
+      voiceUi();
     } catch (e) {
-      if (myEpoch !== voice.epoch) return;
-      const name = e && e.name;
-      const msg = name === 'NotAllowedError' || name === 'SecurityError'
-        ? 'Error: microphone permission was denied. Allow it in the browser address bar and try again.'
-        : name === 'NotFoundError' || name === 'OverconstrainedError'
-          ? 'Error: no microphone was found.'
-          : `Error: could not start recording (${safeErrorText(e, 'unknown error')})`;
-      discardVoiceNote(true);
-      if (authEpoch === state.authEpoch) el.sendStatusLine.textContent = msg;
+      voiceDiscard();
+      toast(e.name === 'NotAllowedError' ? 'Microphone permission was refused' : `Cannot record: ${e.message}`, 'error');
     }
   }
-
-  // Stops the mic and waits for the encoder to hand over the finished OGG file
-  async function stopVoiceRecording(thenSend) {
+  function voiceRelease() {
+    clearInterval(voice.tick); clearTimeout(voice.max);
+    if (voice.stream) voice.stream.getTracks().forEach((t) => t.stop());
+    if (voice.ctx) voice.ctx.close().catch(() => {});
+    voice.stream = null; voice.ctx = null; voice.tick = null; voice.max = null;
+  }
+  async function voiceStop() {
     if (voice.phase !== 'recording') return;
-    const myEpoch = voice.epoch;
-    const rec = voice.recorder;
-    voice.durationMs = Date.now() - voice.startedAt;
-    voice.phase = 'stopping';
-    // Take this recording's own resources now: if the chat is switched and a new recording starts
-    // while we wait, the release below must not touch the new stream/context/timers
-    const input = takeVoiceInput();
-    if (input.tickTimer) clearInterval(input.tickTimer);
-    if (input.maxTimer) clearTimeout(input.maxTimer);
-    renderVoiceUi();
-    try {
-      await rec.stop(); // resolves after ondataavailable has fired
-    } catch (e) {
-      console.warn('[VOICE STOP ERROR]', safeErrorText(e));
-    } finally {
-      releaseVoiceResources(input);
-      try { Promise.resolve(rec.close()).catch(() => {}); } catch (e) {}
-    }
-    if (myEpoch !== voice.epoch) return;
-    voice.recorder = null;
-
-    if (!voice.blob || voice.blob.size === 0) {
-      discardVoiceNote(true);
-      el.sendStatusLine.textContent = 'Error: the recording came out empty. Please try again.';
-      return;
-    }
-    if (voice.durationMs < VOICE_MIN_MS) {
-      discardVoiceNote(true);
-      el.sendStatusLine.textContent = 'Voice note too short (minimum 1 second). Hold on a bit longer.';
-      return;
-    }
-    voice.phase = 'ready';
-    renderVoiceUi();
-    if (thenSend) await sendVoiceNote();
+    voice.phase = 'stopping'; voice.stopped = Date.now();
+    voiceRelease(); voiceUi();
+    if (voice.stopped - voice.started < 1000) { voiceDiscard(); return toast('Too short'); }
+    try { await voice.rec.stop(); } catch (e) { voiceDiscard(); toast('Recording failed', 'error'); }
+  }
+  function voiceDiscard() {
+    voiceRelease();
+    if (voice.rec) { try { voice.rec.ondataavailable = null; voice.rec.close(); } catch (e) { /* gone */ } }
+    voice.rec = null; voice.blob = null; voice.phase = 'idle';
+    voiceUi();
+  }
+  async function voiceSend() {
+    if (voice.phase !== 'ready' || !voice.blob || !S.active) return;
+    const blob = voice.blob, url = voice.url;
+    voice.url = null;
+    voiceDiscard();
+    const p = { request_id: uuid(), text: '', status: 'sending', at: now(), preview: h('audio', { src: url, controls: true }),
+      media: { kind: 'voice', mime: 'audio/ogg', filename: 'voice.ogg', base64: await toB64(blob) } };
+    S.active.pending.push(p);
+    renderMessages(true);
+    deliver(p, S.active);
   }
 
-  function onVoiceSendClick() {
-    if (voice.phase === 'recording') stopVoiceRecording(true);
-    else if (voice.phase === 'ready') sendVoiceNote();
-  }
+  // ---- quick replies (support_canned)
 
-  function blobToBase64(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
-      reader.onerror = () => reject(new Error('Could not read the recording'));
-      reader.readAsDataURL(blob);
+  function openQuick() {
+    if (!S.active || $('#qr')) return;
+    const input = h('input', { type: 'search', placeholder: 'Search quick replies…' });
+    const ul = h('ul');
+    let sel = 0, items = [];
+    const draw = () => {
+      const q = input.value.trim().toLowerCase();
+      items = S.canned.filter((c) => !q || `${c.key} ${c.service || ''} ${c.text}`.toLowerCase().includes(q)).slice(0, 60);
+      sel = Math.min(sel, Math.max(0, items.length - 1));
+      ul.replaceChildren(...(items.length ? items.map((c, i) => h('li', { class: i === sel ? 'on' : '', onmousedown: (e) => { e.preventDefault(); pick(c); } },
+        h('b', null, [c.service, c.key].filter(Boolean).join(' · ')), h('span', null, c.text))) : [h('li', null, h('span', { class: 'muted' }, 'No quick replies match.'))]));
+      const on = ul.children[sel]; if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
+    };
+    const close = () => { box.remove(); const ta = $('#reply'); if (ta) ta.focus(); };
+    const pick = (c) => {
+      const ta = $('#reply');
+      if (ta) { ta.value = ta.value ? ta.value.replace(/\s*$/, '\n') + c.text : c.text; autosize(ta); updateSend(); saveDraft(ta.value); }
+      close();
+    };
+    input.addEventListener('input', () => { sel = 0; draw(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { sel = Math.min(items.length - 1, sel + 1); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); }
+      else if (e.key === 'Enter') { if (items[sel]) pick(items[sel]); e.preventDefault(); }
+      else if (e.key === 'Escape') { close(); e.stopPropagation(); }
     });
+    input.addEventListener('blur', () => setTimeout(() => { if (box.isConnected) box.remove(); }, 120));
+    const box = h('div', { class: 'qr', id: 'qr' }, input, ul);
+    $('#composerWrap').append(box);
+    draw();
+    input.focus();
   }
 
-  async function sendVoiceNote() {
-    if (voice.phase !== 'ready' || !voice.blob) return;
-    const contact = voice.contact;
-    const dest = normalizePhone(contact);
-    const epoch = state.authEpoch;
-    const myEpoch = voice.epoch;
-    const blob = voice.blob;
-    const seconds = Math.round(voice.durationMs / 1000);
-    if (!dest) {
-      el.sendStatusLine.textContent = 'Error: this contact has no valid phone number.';
-      return;
-    }
-    if (blob.size > VOICE_MAX_BYTES) {
-      el.sendStatusLine.textContent = 'Error: voice note is larger than 16 MB. Please record a shorter one.';
-      return;
-    }
-    // The last attempt timed out upstream and may have gone through: make the admin confirm a resend
-    if (voice.maybeSent && !window.confirm('The previous attempt may already have delivered this voice note. Check the chat first. Send it again anyway?')) return;
-    if (myEpoch !== voice.epoch || voice.phase !== 'ready') return;
+  // ------------------------------------------------------------------ details
 
-    voice.phase = 'sending';
-    renderVoiceUi();
-    el.sendStatusLine.textContent = 'Sending voice note via BestSMSBulk...';
-
-    let resJson = null;
-    let isSuccess = false;
+  const wide = () => innerWidth > 1180;
+  const detailsOn = () => (wide() ? S.details : S.detailsNarrow);
+  function toggleDetails() {
+    if (wide()) { S.details = !S.details; store('desk_details', S.details); } else S.detailsNarrow = !S.detailsNarrow;
+    renderHead();
+    renderDetails();
+  }
+  async function loadCustomer(contact) {
+    if (/^ig_/.test(contact)) return;
     try {
-      const { data: { session } } = await window.supabaseClient.auth.getSession();
-      if (!session || !session.access_token) throw new Error('You are signed out. Please sign in again.');
+      const ctx = await api.call('customer', { contact });
+      if (S.active && S.active.contact === contact) { S.active.customer = ctx; renderDetails(); }
+    } catch (e) { /* optional panel */ }
+  }
+  const SERVICES = { chatgpt: 'ChatGPT', chatgpt_private: 'ChatGPT private', anghami: 'Anghami', spotify: 'Spotify', canva: 'Canva', capcut: 'CapCut', gemini: 'Gemini', netflix_legacy: 'Netflix' };
+  function renderDetails() {
+    const pane = $('#details');
+    if (!S.active || !S.active.data || !detailsOn()) { pane.hidden = true; return; }
+    pane.hidden = false;
+    const d = S.active.data;
+    const c = d.conv;
+    const link = isIg(c) ? (c.handle ? `https://instagram.com/${encodeURIComponent(c.handle)}` : null) : `https://wa.me/${c.contact}`;
+    const head = h('div', { class: 'd-head' },
+      h('button', { class: 'icon-btn d-close', 'aria-label': 'Close details', onclick: toggleDetails }, icon('x')),
+      avatar(c, 'lg'), h('h3', null, displayName(c)), h('div', { class: 'muted' }, subtitle(c)),
+      h('div', { class: 'd-links' },
+        !isIg(c) ? h('button', { class: 'btn', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(c.contact); toast('Number copied'); } }, icon('copy', 'sm'), 'Copy') : null,
+        link ? h('a', { class: 'btn', href: link, target: '_blank', rel: 'noopener noreferrer' }, icon('ext', 'sm'), isIg(c) ? 'Profile' : 'WhatsApp') : null));
+    const secs = [head];
 
-      // The recording goes to BSB as base64 (their recommended path for voice notes): no public file
-      const mediaBase64 = await blobToBase64(blob);
-      if (epoch !== state.authEpoch || myEpoch !== voice.epoch) return;
+    const t = d.thread;
+    if (t) {
+      secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'System label'), h('div', null, sysBadge(t, true)),
+        t.kind_reason ? h('p', { class: 'hint', style: 'margin-top:6px' }, `${t.kind_source === 'staff' ? 'Set by ' + (t.kind_by || 'staff') : t.kind_source === 'ai' ? 'AI' : 'Rule'}: ${t.kind_reason}`) : null));
+    }
+    const setBy = new Map();
+    for (const e of d.events) if (e.kind === 'label_add' || (e.kind === 'relabel' && e.detail && e.detail.to)) setBy.set(e.kind === 'relabel' ? e.detail.to : e.label, e);
+    secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Your labels'),
+      c.labels.length ? h('div', { class: 'd-labels' }, c.labels.map((id) => {
+        const l = S.labelById.get(id); const e = l && setBy.get(l.name);
+        return h('div', { class: 'd-label' }, labelChip(id, false), e ? h('span', { class: 'muted' }, `${e.kind === 'relabel' ? 'auto' : e.actor} · ${ago(e.at)}`) : null);
+      })) : h('p', { class: 'hint' }, 'None. Use the Labels bar above the chat.')));
 
-      const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/bsb_send_media`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
-          apikey: window.SUPABASE_ANON_KEY
-        },
-        body: JSON.stringify({ destination: dest, media_base64: mediaBase64 })
-      });
-      const data = (await resp.json().catch(() => null)) || {};
-      const edgeOk = resp.status === 200 && data && typeof data.upstream_status === 'number';
-      const maybeSent = !edgeOk && data.maybe_sent === true;
-      resJson = edgeOk
-        ? ((data.result && typeof data.result === 'object') ? data.result : { raw: 'Non-JSON' })
-        : { status: 'error', message: (data && (data.error || data.message)) || `HTTP ${resp.status}`, ...(maybeSent ? { maybe_sent: true } : {}) };
-      isSuccess = edgeOk && data.upstream_status === 200 && resJson.status !== 'error' && resJson.success !== false;
+    const ctx = S.active.customer;
+    if (ctx && !ctx.none) {
+      const subs = [];
+      for (const [k, name] of Object.entries(SERVICES)) {
+        for (const s of ctx[k] || []) subs.push({ name, active: s.active, expiry: s.expiry, extra: s.username || s.product_name || '', bad: s.account_status && s.account_status !== 'active' ? s.account_status : null });
+      }
+      subs.sort((a, b) => (b.active - a.active) || (Date.parse(b.expiry || 0) - Date.parse(a.expiry || 0)));
+      secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Subscriptions'),
+        subs.length ? h('div', { class: 'd-subs' }, subs.slice(0, 8).map((s) => h('div', { class: 'd-sub' },
+          h('span', null, h('b', null, s.name), s.extra ? h('span', { class: 'muted' }, ` · ${s.extra}`) : null, s.bad ? h('span', { class: 'bad' }, ` · account ${s.bad}`) : null),
+          h('span', { class: s.active ? 'ok' : 'old' }, s.expiry ? `${s.active ? 'until' : 'ended'} ${fmtDate.format(new Date(String(s.expiry).replace(' ', 'T') + (/[zZ+]/.test(String(s.expiry).slice(10)) ? '' : 'Z')))}` : (s.active ? 'active' : 'ended')))))
+          : h('p', { class: 'hint' }, 'No subscriptions on this number.'),
+        ctx.renewals_pending ? h('p', { class: 'hint', style: 'margin-top:8px' }, `${ctx.renewals_pending} unpaid renewal${ctx.renewals_pending > 1 ? 's' : ''}`) : null));
+    } else if (isIg(c)) {
+      secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Subscriptions'), h('p', { class: 'hint' }, 'Instagram chats have no phone number: ask for their WhatsApp number to see subscriptions.')));
+    }
+    if ((d.threads || []).length) {
+      secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Episodes'), h('div', { class: 'd-act' }, d.threads.map((x) => h('div', null,
+        h('span', null, h('span', { class: `dotk k-${x.kind}` }), `${x.kind === 'pending' || x.kind === 'unsure' ? 'unlabelled' : x.kind}${x.product ? ' · ' + (PRODUCTS[x.product] || x.product) : ''}${x.status === 'resolved' ? ` · resolved${x.resolved_by ? ' by ' + x.resolved_by : ''}` : x.status === 'open' ? ' · open' : ''}`),
+        h('span', { class: 't' }, fmtDate.format(new Date(x.opened_at))))))));
+    }
+    const evs = d.events.slice(-10).reverse();
+    secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Activity'),
+      evs.length ? h('div', { class: 'd-act' }, evs.map((e) => { const l = eventLine(e); return l ? h('div', null, h('span', null, l.textContent.replace(/\s\d\d:\d\d$/, '')), h('span', { class: 't' }, ago(e.at))) : null; }))
+        : h('p', { class: 'hint' }, 'Nothing yet.')));
+    pane.replaceChildren(...secs);
+  }
 
-      // Same send_queue record as text sends (1h dispatcher filter + history for the AI check)
+  // ------------------------------------------------------------------ manage labels & views (admin)
+
+  const PALETTE = ['#e11d48', '#f97316', '#d97706', '#ca8a04', '#16a34a', '#0d9488', '#0891b2', '#2563eb', '#4f46e5', '#7c3aed', '#c026d3', '#db2777', '#64748b', '#334155'];
+  function openManage() {
+    const body = h('div', { class: 'sheet-body' });
+    const draw = () => {
+      const rows = S.labels.map((l) => labelRow(l));
+      const newRow = labelRow({ id: null, name: '', color: PALETTE[(S.labels.length * 3) % PALETTE.length], grp: '', on_new_msg: 'keep', switch_to: null });
+      body.replaceChildren(
+        h('h5', null, 'Your labels'),
+        h('p', { class: 'hint' }, 'These are set by hand. (Sales / support are system labels, set automatically, and are not managed here.) Labels in the same group replace each other (h-complete ↔ h-uncomplete). “When the customer writes” runs on every new customer message after the label was set.'),
+        h('div', { class: 'col-heads' }, h('span', null, ''), h('span', null, 'Name'), h('span', null, 'Group'), h('span', null, 'When the customer writes'), h('span', null, '')),
+        ...rows, newRow,
+        h('h5', null, 'Views'),
+        h('p', { class: 'hint' }, 'A view shows every chat that has one of its labels, plus unread chats if you tick it.'),
+        ...S.views.map((v) => viewRow(v)),
+        viewRow({ id: null, name: '', label_ids: [], include_unread: false }));
+    };
+    async function save(op, payload, okMsg) {
       try {
-        await window.supabaseClient.from('send_queue').insert({
-          contact: dest,
-          message: `[voice note] ${seconds}s`,
-          status: isSuccess ? 'SENT' : 'FAILED',
-          sent_at: isSuccess ? new Date().toISOString() : null,
-          api_response: JSON.stringify(resJson),
-          error_message: isSuccess ? null : JSON.stringify(resJson)
-        });
-      } catch (dbErr) {
-        console.warn('[SEND_QUEUE INSERT ERROR]', safeErrorText(dbErr));
-      }
-
-      if (epoch !== state.authEpoch) return; // logged out meanwhile
-      if (isSuccess) {
-        if (state.activeContact === contact) chatView.appendOutgoingVoice(URL.createObjectURL(blob));
-        if (myEpoch === voice.epoch) discardVoiceNote(true);
-        el.sendStatusLine.textContent = '✓ Voice note sent successfully!';
-        rememberSend(contact, `[voice note] ${seconds}s`);
-        state.conversations = withRecentSends(state.conversations);
-        filterAndRenderConversations();
-        if (state.activeContact === contact) {
-          const sentRow = state.conversations.find(c => c.contact === contact);
-          if (sentRow) { state.activeConversationData = sentRow; renderTriageBar(sentRow); }
-        }
-      } else if (maybeSent) {
-        if (myEpoch === voice.epoch) voice.maybeSent = true;
-        el.sendStatusLine.textContent = 'Voice note may have been sent — check the chat before retrying';
-      } else {
-        el.sendStatusLine.textContent = `Error: ${safeErrorText(resJson.message || resJson.error, 'voice note was not sent')} (recording kept, press Retry)`;
-      }
-    } catch (e) {
-      if (epoch !== state.authEpoch) return;
-      if (myEpoch === voice.epoch) el.sendStatusLine.textContent = `Error: ${safeErrorText(e, 'please try again')} (recording kept, press Retry)`;
-    } finally {
-      // Failure: keep the recording so the admin can retry
-      if (myEpoch === voice.epoch && voice.phase === 'sending') {
-        voice.phase = 'ready';
-        voice.sendFailed = true;
-        renderVoiceUi();
-      }
+        const meta = await api.call(op, payload);
+        setMeta(meta);
+        draw(); renderNav();
+        if (S.active && S.active.data) renderLabelbar();
+        refreshList();
+        if (okMsg) toast(okMsg);
+        return true;
+      } catch (e) { toast(e.message, 'error'); return false; }
     }
+    function labelRow(l) {
+      const isNew = !l.id;
+      const st = { color: l.color };
+      const name = h('input', { type: 'text', value: l.name, placeholder: isNew ? 'New label, e.g. $-paid' : '', maxlength: 40 });
+      const grp = h('input', { type: 'text', value: l.grp || '', placeholder: 'none', maxlength: 20, title: 'Labels with the same group replace each other' });
+      const rule = h('select', null,
+        h('option', { value: 'keep', selected: l.on_new_msg === 'keep' }, 'Keep the label'),
+        h('option', { value: 'remove', selected: l.on_new_msg === 'remove' }, 'Remove it'),
+        h('option', { value: 'switch', selected: l.on_new_msg === 'switch' }, 'Switch to…'));
+      const to = h('select', { hidden: l.on_new_msg !== 'switch' }, S.labels.filter((x) => x.id !== l.id).map((x) => h('option', { value: x.id, selected: x.id === l.switch_to }, x.name)));
+      const sw = h('button', { type: 'button', class: 'swatch-btn', style: `background:${st.color}`, title: 'Color', onclick: (e) => pickColor(e.currentTarget, (c) => { st.color = c; sw.style.background = c; if (!isNew) commit(); }) });
+      const payload = () => ({ id: l.id, name: name.value, color: st.color, grp: grp.value, on_new_msg: rule.value, switch_to: rule.value === 'switch' ? Number(to.value) : null });
+      const commit = () => { if (name.value.trim()) save('save_label', payload(), isNew ? 'Label added' : null); };
+      name.addEventListener('input', () => { if (isNew && !grp.dataset.touched) { const m = name.value.match(/^\s*([^-\s]{1,6})-/); grp.value = m ? m[1] : ''; } });
+      grp.addEventListener('input', () => { grp.dataset.touched = '1'; });
+      if (!isNew) { name.addEventListener('change', commit); grp.addEventListener('change', commit); to.addEventListener('change', commit); }
+      rule.addEventListener('change', () => { to.hidden = rule.value !== 'switch'; if (!isNew && (rule.value !== 'switch' || to.value)) commit(); });
+      name.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); });
+      return h('div', { class: 'lab-row' }, sw, name, grp, h('div', { class: 'rule' }, rule, to),
+        isNew ? h('button', { class: 'icon-btn del', title: 'Add label', 'aria-label': 'Add label', onclick: commit }, icon('plus'))
+          : h('button', { class: 'icon-btn del', title: 'Delete label', 'aria-label': 'Delete label', onclick: () => {
+            const n = (S.counts.labels || {})[l.id] || 0;
+            if (confirm(`Delete “${l.name}”?${n ? ` It is on ${n} chat${n > 1 ? 's' : ''}; they lose it.` : ''}`)) save('save_label', { id: l.id, delete: true }, 'Label deleted');
+          } }, icon('trash')));
+    }
+    function viewRow(v) {
+      const isNew = !v.id;
+      const ids = new Set(v.label_ids);
+      const name = h('input', { type: 'text', value: v.name, placeholder: isNew ? 'New view name' : '', maxlength: 30 });
+      const unread = h('input', { type: 'checkbox', checked: v.include_unread });
+      const payload = () => ({ id: v.id, name: name.value, label_ids: [...ids], include_unread: unread.checked });
+      const commit = () => { if (name.value.trim()) save('save_view', payload(), isNew ? 'View added' : null); };
+      const pick = h('div', { class: 'pick' }, S.labels.map((l) => {
+        const b = h('button', { type: 'button', class: `lt${ids.has(l.id) ? ' on' : ''}`, style: `--c:${l.color}`, onclick: () => {
+          if (ids.has(l.id)) ids.delete(l.id); else ids.add(l.id);
+          b.classList.toggle('on', ids.has(l.id));
+          if (!isNew) commit();
+        } }, l.name);
+        return b;
+      }));
+      if (!isNew) { name.addEventListener('change', commit); unread.addEventListener('change', commit); }
+      return h('div', { class: 'view-row' },
+        h('div', { class: 'view-row-top' }, name, h('label', { class: 'toggle' }, unread, '+ all unread'),
+          isNew ? h('button', { class: 'btn', onclick: commit }, icon('plus', 'sm'), 'Add')
+            : h('button', { class: 'icon-btn', title: 'Delete view', 'aria-label': 'Delete view', onclick: () => { if (confirm(`Delete the view “${v.name}”?`)) save('save_view', { id: v.id, delete: true }, 'View deleted'); } }, icon('trash'))),
+        pick);
+    }
+    draw();
+    openModal(h('div', { class: 'sheet' },
+      h('div', { class: 'sheet-head' }, h('h3', null, 'Labels & views'), h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+      body,
+      h('div', { class: 'sheet-foot' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Done'))), true);
+  }
+  function pickColor(anchor, done) {
+    document.querySelectorAll('.pop').forEach((p) => p.remove());
+    const r = anchor.getBoundingClientRect();
+    const pop = h('div', { class: 'pop', style: `left:${Math.min(r.left, innerWidth - 200)}px;top:${r.bottom + 6}px` },
+      h('div', { class: 'palette' }, PALETTE.map((c) => h('button', { type: 'button', style: `background:${c}`, 'aria-label': c, onclick: () => { done(c); pop.remove(); } }))));
+    document.body.append(pop);
+    setTimeout(() => document.addEventListener('mousedown', function off(e) { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', off); } }), 0);
   }
 
-  // =========================================================================
-  // Event wiring
-  // =========================================================================
-  function initEventListeners() {
-    if (el.loginForm) el.loginForm.addEventListener('submit', handleLogin);
-    if (el.logoutBtn) el.logoutBtn.addEventListener('click', handleLogout);
-    if (el.syncBtn) el.syncBtn.addEventListener('click', async () => {
-      el.syncBtn.classList.add('spinning');
-      if (state.activeTab === 'followup') await refreshInbox();
-      else await callView(state.activeTab, 'refresh');
-      el.syncBtn.classList.remove('spinning');
+  // ------------------------------------------------------------------ modal
+
+  let modalClosable = true;
+  function openModal(content, closable = true) {
+    modalClosable = closable;
+    const m = $('#modal');
+    m.replaceChildren(content);
+    m.hidden = false;
+    m.onclick = (e) => { if (e.target === m && modalClosable) closeModal(); };
+    const f = content.querySelector('input:not([type=radio]),button');
+    if (f) setTimeout(() => f.focus(), 30);
+  }
+  function closeModal() { $('#modal').hidden = true; $('#modal').replaceChildren(); document.querySelectorAll('.pop').forEach((p) => p.remove()); }
+
+  // ------------------------------------------------------------------ wiring
+
+  function bindUi() {
+    $('#manageBtn').replaceChildren(icon('sliders', 'sm'));
+    $('#manageBtn').onclick = openManage;
+    $('#menuBtn').replaceChildren(icon('menu'));
+    $('#menuBtn').onclick = () => { $('#app').classList.add('side-open'); $('#scrim').hidden = false; };
+    $('#scrim').onclick = () => { $('#app').classList.remove('side-open'); $('#scrim').hidden = true; };
+    $('.search-ic').replaceChildren(icon('search', 'sm'));
+    $('#staffBtn').onclick = openAccount;
+    $('#bellBtn').onclick = async () => {
+      S.notify = !S.notify;
+      if (S.notify && window.Notification && Notification.permission === 'default') await Notification.requestPermission().catch(() => {});
+      store('desk_notify', S.notify); renderStaff();
+      toast(S.notify ? 'Alerts on' : 'Alerts off');
+    };
+    $('#themeBtn').onclick = () => {
+      const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      const next = cur === 'dark' ? 'light' : 'dark';
+      store('desk_theme', next);
+      applyTheme(next);
+    };
+    applyTheme(store('desk_theme'));
+    renderStaff();
+    document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
+      S.channel = b.dataset.ch; store('desk_channel', S.channel); S.chats = []; renderList(); refreshList(true);
+    }));
+    let qTimer;
+    $('#search').addEventListener('input', (e) => {
+      clearTimeout(qTimer);
+      qTimer = setTimeout(() => { S.q = e.target.value.trim(); refreshList(true); }, 250);
     });
-    el.tabButtons.forEach(btn => {
-      const tab = btn.getAttribute('data-tab');
-      if (tab !== 'followup' && !views[tab]) {
-        btn.style.display = 'none'; // its script did not load
+    $('#list').addEventListener('scroll', (e) => { const el = e.target; if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) loadMore(); });
+    $('#chat').replaceChildren(...emptyChat());
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        refreshList(); loopList();
+        if (S.active && S.active.data && S.active.data.conv.unread) markRead(S.active.contact);
+      }
+    });
+    setInterval(() => { if (S.active && S.active.data) renderSysbar(); }, 30000); // waiting timers
+    document.addEventListener('keydown', (e) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
+      if (e.key === 'Escape') {
+        if (!$('#modal').hidden) { if (modalClosable) closeModal(); return; }
+        if (document.querySelector('.lightbox')) { document.querySelector('.lightbox').remove(); return; }
+        if (S.active && !typing) closeChat();
         return;
       }
-      btn.addEventListener('click', () => switchTab(tab));
-    });
-
-    const btnIngestBackup = document.getElementById('btn-ingest-backup');
-    const followupBackupInput = document.getElementById('followup-backup-input');
-    if (btnIngestBackup && followupBackupInput) {
-      btnIngestBackup.addEventListener('click', () => {
-        followupBackupInput.value = '';
-        followupBackupInput.click();
-      });
-
-      followupBackupInput.addEventListener('change', async (e) => {
-        const file = e.target.files && e.target.files[0];
-        if (!file) return;
-
-        // Only a plain, reasonably sized .csv export is accepted
-        const fileName = String(file.name || '');
-        const displayName = fileName.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120);
-        const fileType = String(file.type || '').toLowerCase();
-        const typeOk = ['', 'text/csv', 'application/csv', 'text/plain', 'application/vnd.ms-excel'].includes(fileType);
-        if (!/\.csv$/i.test(fileName) || !typeOk) {
-          alert('Please choose a .csv file exported from BestSMSBulk.');
-          followupBackupInput.value = '';
-          return;
-        }
-        if (file.size === 0 || file.size > MAX_BACKUP_BYTES) {
-          alert(file.size === 0
-            ? 'This file is empty.'
-            : `This file is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). The limit is ${MAX_BACKUP_BYTES / 1024 / 1024} MB.`);
-          followupBackupInput.value = '';
-          return;
-        }
-
-        const confirmed = confirm(
-          `Ingest BSB chat export "${displayName}" (${(file.size / 1024 / 1024).toFixed(2)} MB) into bsb_messages?\n\nAll messages will be safely merged and deduplicated by chat_id.`
-        );
-        if (!confirmed) {
-          followupBackupInput.value = '';
-          return;
-        }
-
-        const labelSpan = btnIngestBackup.querySelector('span');
-        const labelIcon = btnIngestBackup.querySelector('i');
-        const originalLabel = labelSpan ? labelSpan.textContent : '';
-        const originalIconClass = labelIcon ? labelIcon.className : '';
-        btnIngestBackup.disabled = true;
-        if (labelIcon) labelIcon.className = 'fa-solid fa-spinner fa-spin';
-        if (labelSpan) labelSpan.textContent = 'Ingesting...';
-
-        try {
-          const { data: { session } } = await window.supabaseClient.auth.getSession();
-          if (!session || !session.access_token) throw new Error('You are signed out. Please sign in again.');
-
-          const formData = new FormData();
-          formData.append('file', file);
-
-          const resp = await fetch(`${window.SUPABASE_URL}/functions/v1/ingest_backup`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-              apikey: window.SUPABASE_ANON_KEY
-            },
-            body: formData
-          });
-
-          const data = (await resp.json().catch(() => null)) || {};
-          if (!resp.ok || data.error) {
-            throw new Error(safeErrorText(data.error, `Failed to ingest backup file (HTTP ${resp.status})`));
-          }
-
-          const inserted = Number(data.inserted) || 0;
-          const updated = Number(data.updated) || 0;
-          alert(typeof data.message === 'string' && data.message
-            ? safeErrorText(data.message)
-            : `Ingested successfully! ${inserted} new, ${updated} updated.`);
-          refreshInbox();
-        } catch (err) {
-          console.error('[ingest_backup error]', safeErrorText(err));
-          alert(`Error ingesting backup: ${safeErrorText(err, 'please try again')}`);
-        } finally {
-          btnIngestBackup.disabled = false;
-          if (labelIcon) labelIcon.className = originalIconClass;
-          if (labelSpan) labelSpan.textContent = originalLabel;
-          followupBackupInput.value = '';
-        }
-      });
-    }
-
-    if (el.btnMarkDone) el.btnMarkDone.addEventListener('click', () => setManualVerdict('HIDE'));
-    if (el.btnShowAgain) el.btnShowAgain.addEventListener('click', () => setManualVerdict('SHOW'));
-    document.addEventListener('keydown', handleShortcut);
-
-    if (el.btnSend) el.btnSend.addEventListener('click', sendDirectChatMessage);
-    if (el.btnVoice) el.btnVoice.addEventListener('click', startVoiceRecording);
-    if (el.btnVoiceSend) el.btnVoiceSend.addEventListener('click', onVoiceSendClick);
-    if (el.btnVoiceCancel) el.btnVoiceCancel.addEventListener('click', () => {
-      discardVoiceNote(false);
-      if (voice.phase === 'idle') el.sendStatusLine.textContent = 'Voice note discarded.';
-    });
-    window.addEventListener('pagehide', () => discardVoiceNote(true));
-    if (el.chatTextarea) {
-      el.chatTextarea.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          sendDirectChatMessage();
-        }
-      });
-    }
-    if (el.searchInput) {
-      el.searchInput.addEventListener('input', (e) => {
-        state.searchQuery = e.target.value;
-        filterAndRenderConversations();
-      });
-    }
-    el.filterPills.forEach(pill => {
-      pill.addEventListener('click', () => {
-        el.filterPills.forEach(p => p.classList.remove('active'));
-        pill.classList.add('active');
-        state.activeFilter = pill.getAttribute('data-filter') || 'todo';
-        filterAndRenderConversations();
-      });
-    });
-    el.quickTemplates.forEach(t => {
-      t.addEventListener('click', () => {
-        if (el.chatTextarea) {
-          el.chatTextarea.value = t.getAttribute('data-text') || '';
-          el.chatTextarea.focus();
-        }
-      });
+      if (!$('#modal').hidden) return;
+      if (e.altKey && /^[1-9]$/.test(e.key) && S.active) {
+        const l = S.labels[Number(e.key) - 1];
+        if (l) { e.preventDefault(); toggleLabel(l.id); }
+        return;
+      }
+      if (typing) return;
+      if (e.key === '/' && S.active) { e.preventDefault(); openQuick(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'j' || e.key === 'k') {
+        if (!S.chats.length) return;
+        e.preventDefault();
+        const i = S.active ? S.chats.findIndex((x) => x.contact === S.active.contact) : -1;
+        const next = S.chats[Math.max(0, Math.min(S.chats.length - 1, i + (e.key === 'ArrowDown' || e.key === 'j' ? 1 : -1)))];
+        if (next) { openChat(next.contact); const el = document.querySelector(`.row[data-contact="${next.contact}"]`); if (el) el.scrollIntoView({ block: 'nearest' }); }
+      }
+      if (e.key === 'r' && S.active) { e.preventDefault(); const ta = $('#reply'); if (ta) ta.focus(); }
     });
   }
 
-  // The only thing this file exposes: inert helpers and hooks for the other tabs (js/support.js).
-  // No session, token or panel state is reachable through it.
-  if (!window.__FRAMED__) {
-    window.PanelCore = Object.freeze({
-      createEl,
-      icon,
-      safeErrorText,
-      normalizePhone,
-      formatPhoneDisplay,
-      formatRelativeTime,
-      createChatRenderer,
-      registerView,
-      authEpoch: () => state.authEpoch,
-      activeTab: () => state.activeTab
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', () => {
-    if (window.__FRAMED__) return; // refuse to run inside a foreign frame (see js/config.js)
-    initDOMElements();
-    initEventListeners();
-    checkAuth();
-  });
-
+  start();
 })();
