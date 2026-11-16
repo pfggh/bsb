@@ -358,6 +358,7 @@
         h('div', { class: 'menu-list' },
           isAdmin ? h('button', { class: 'btn block', onclick: openTeam }, icon('team', 'sm'), 'Team & access tokens') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openManage(); } }, icon('sliders', 'sm'), 'Labels & views') : null,
+          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openQuickManage(); } }, icon('zap', 'sm'), 'Quick replies') : null,
           h('button', { class: 'btn block', onclick: () => { if (confirm('Sign out of the desk on this device?')) { api.signOut(); location.reload(); } } }, icon('logout', 'sm'), 'Sign out')))));
   }
   async function openTeam() {
@@ -1511,8 +1512,9 @@
     deliver(p, S.active);
   }
 
-  // ---- quick replies (support_canned)
+  // ---- quick replies (the staff's own, desk.quick_replies)
 
+  const isAdmin = () => !!(S.me && S.me.role === 'admin');
   function openQuick() {
     if (!S.active || $('#qr')) return;
     const input = h('input', { type: 'search', placeholder: 'Search quick replies…' });
@@ -1520,30 +1522,75 @@
     let sel = 0, items = [];
     const draw = () => {
       const q = input.value.trim().toLowerCase();
-      items = S.canned.filter((c) => !q || `${c.key} ${c.service || ''} ${c.text}`.toLowerCase().includes(q)).slice(0, 60);
+      items = S.canned.filter((c) => !q || `${c.title} ${c.body}`.toLowerCase().includes(q)).slice(0, 80);
       sel = Math.min(sel, Math.max(0, items.length - 1));
+      if (!S.canned.length) {
+        ul.replaceChildren(h('li', { class: 'qr-empty' }, h('span', { class: 'muted' }, 'No quick replies yet.'),
+          isAdmin() ? h('button', { class: 'btn sm primary', onmousedown: (e) => { e.preventDefault(); close(); openQuickManage(); } }, icon('plus', 'sm'), 'Add your own') : h('span', { class: 'muted' }, ' Ask an admin to add some.')));
+        return;
+      }
       ul.replaceChildren(...(items.length ? items.map((c, i) => h('li', { class: i === sel ? 'on' : '', onmousedown: (e) => { e.preventDefault(); pick(c); } },
-        h('b', null, [c.service, c.key].filter(Boolean).join(' · ')), h('span', null, c.text))) : [h('li', null, h('span', { class: 'muted' }, 'No quick replies match.'))]));
+        h('b', null, c.title), h('span', null, c.body))) : [h('li', null, h('span', { class: 'muted' }, 'No quick replies match.'))]));
       const on = ul.children[sel]; if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
     };
     const close = () => { box.remove(); const ta = $('#reply'); if (ta) ta.focus(); };
     const pick = (c) => {
       const ta = $('#reply');
-      if (ta) { ta.value = ta.value ? ta.value.replace(/\s*$/, '\n') + c.text : c.text; autosize(ta); updateSend(); saveDraft(ta.value); }
+      if (ta) { ta.value = ta.value ? ta.value.replace(/\s*$/, '\n') + c.body : c.body; autosize(ta); updateSend(); saveDraft(ta.value); }
       close();
     };
     input.addEventListener('input', () => { sel = 0; draw(); });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown') { sel = Math.min(items.length - 1, sel + 1); draw(); e.preventDefault(); }
       else if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); }
-      else if (e.key === 'Enter') { if (items[sel]) pick(items[sel]); e.preventDefault(); }
+      else if (e.key === 'Enter' || e.key === 'Tab') { if (items[sel]) pick(items[sel]); e.preventDefault(); }
       else if (e.key === 'Escape') { close(); e.stopPropagation(); }
     });
-    input.addEventListener('blur', () => setTimeout(() => { if (box.isConnected) box.remove(); }, 120));
-    const box = h('div', { class: 'qr', id: 'qr' }, input, ul);
+    input.addEventListener('blur', () => setTimeout(() => { if (box.isConnected) box.remove(); }, 150));
+    const foot = isAdmin() && S.canned.length ? h('div', { class: 'qr-foot' }, h('button', { class: 'link', onmousedown: (e) => { e.preventDefault(); close(); openQuickManage(); } }, 'Edit quick replies')) : null;
+    const box = h('div', { class: 'qr', id: 'qr' }, input, ul, foot);
     $('#composerWrap').append(box);
     draw();
     input.focus();
+  }
+
+  // Editor: add, change and delete quick replies (admins).
+  function openQuickManage() {
+    if (!isAdmin()) return toast('Only an admin can edit quick replies');
+    const body = h('div', { class: 'sheet-body' });
+    const save = async (payload, msg) => {
+      try { S.canned = await api.call('quick_reply_save', payload); draw(); if (msg) toast(msg, 'ok'); return true; }
+      catch (e) { toast(e.message, 'error'); return false; }
+    };
+    const row = (q) => {
+      const isNew = !q.id;
+      const title = h('input', { type: 'text', value: q.title || '', maxlength: 60, placeholder: isNew ? 'Title, e.g. ChatGPT price' : '' });
+      const text = h('textarea', { rows: 3, maxlength: 4096, placeholder: isNew ? 'The message that gets inserted' : '' });
+      text.value = q.body || '';
+      const commit = () => {
+        if (!title.value.trim() || !text.value.trim()) return toast('Write a title and a message', 'error');
+        save({ id: q.id || null, title: title.value, body: text.value }, isNew ? 'Quick reply added' : 'Saved');
+      };
+      const changed = () => title.value !== (q.title || '') || text.value !== (q.body || '');
+      const btn = h('button', { class: `btn sm ${isNew ? 'primary' : ''}`, onclick: commit }, isNew ? [icon('plus', 'sm'), 'Add'] : 'Save');
+      if (!isNew) {
+        btn.disabled = true;
+        const upd = () => { btn.disabled = !changed(); };
+        title.addEventListener('input', upd); text.addEventListener('input', upd);
+      }
+      return h('div', { class: `qr-row${isNew ? ' new' : ''}` }, h('div', { class: 'qr-fields' }, title, text),
+        h('div', { class: 'qr-actions' }, btn,
+          isNew ? null : h('button', { class: 'icon-btn', title: 'Delete', 'aria-label': 'Delete quick reply', onclick: () => { if (confirm(`Delete “${q.title}”?`)) save({ id: q.id, delete: true }, 'Deleted'); } }, icon('trash'))));
+    };
+    const draw = () => body.replaceChildren(
+      h('p', { class: 'hint' }, 'Staff insert these with Q or by typing / in the message box. Only admins can change them.'),
+      row({}),
+      S.canned.length ? h('h5', null, `Your quick replies (${S.canned.length})`) : h('p', { class: 'hint' }, 'None yet: add the first one above.'),
+      ...S.canned.map(row));
+    draw();
+    openModal(h('div', { class: 'sheet' },
+      h('div', { class: 'sheet-head' }, h('h3', null, 'Quick replies'), h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+      body, h('div', { class: 'sheet-foot' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Done'))), true);
   }
 
   // ------------------------------------------------------------------ details
