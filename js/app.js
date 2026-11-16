@@ -127,6 +127,21 @@
     if (d.startsWith('961') && d.length >= 10) return `+961 ${d.slice(3, d.length - 6)} ${d.slice(-6, -3)} ${d.slice(-3)}`;
     return `+${d}`;
   }
+  // Lebanese numbers as staff type them: 96171083892 -> 71083892, 9613123456 -> 03123456.
+  function localNumber(contact) {
+    const d = String(contact || '').replace(/\D/g, '');
+    if (!d.startsWith('961')) return d;
+    const rest = d.slice(3);
+    return rest.length === 7 && rest[0] === '3' ? '0' + rest : rest;
+  }
+  function copyNumber() {
+    const c = S.active && S.active.data ? S.active.data.conv : null;
+    if (!c || isIg(c)) return toast('Instagram chats have no phone number');
+    const n = localNumber(c.contact);
+    const done = () => toast(`Copied ${n}`, 'ok');
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(n).then(done, () => toast('Could not copy', 'error'));
+    else { const ta = h('textarea', { style: 'position:fixed;opacity:0' }); ta.value = n; document.body.append(ta); ta.select(); try { document.execCommand('copy'); done(); } catch (e) { toast('Could not copy', 'error'); } ta.remove(); }
+  }
   const isIg = (c) => c && (c.channel === 'ig' || /^ig_/.test(c.contact || ''));
   const realName = (n) => n && /[\p{L}\p{N}]/u.test(n) ? n : null;
   const displayName = (c) => realName(c.name) || (isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram user') : phoneLabel(c.contact));
@@ -198,7 +213,7 @@
   // Two views only: Unresolved (open support + everything unread, so sales only while unread) and All.
   // Labels and channels below them filter like in BSB. The number is the keyboard shortcut.
   const MAIN_VIEWS = [
-    ['unresolved', 'inbox', 'Unresolved', () => S.counts.uncomplete, true, 'Open support chats and everything unread. Press V to resolve a chat.'],
+    ['unresolved', 'inbox', 'Unresolved', () => S.counts.uncomplete, true, 'Unsolved support chats and everything unread. Press V to solve a chat.'],
     ['all', 'all', 'All chats', () => null, false, 'Every conversation'],
   ];
   const ALL_VIEWS = MAIN_VIEWS;
@@ -239,30 +254,24 @@
     not_support: 'Only support episodes are resolved.',
     not_open: 'This episode is already closed.',
     never_replied: 'Nobody has replied to the customer yet.',
-    customer_waiting: "The customer's last message is unanswered: reply first.",
+    customer_waiting: "The customer is waiting for an answer: reply first.",
     window_closed: 'The reply window is closed, so no closing message can be sent.',
     customer_quiet: 'The customer has not written in the last 4h (1h at night): V resolves without a message.',
   };
   function waitMs(t) { return t && t.waiting && t.waiting_since ? now() - Date.parse(t.waiting_since) : 0; }
+  // System tag: Support (Unsolved / Solved) or Sales. Nothing else.
   function sysBadge(t, big = false) {
     if (!t) return null;
     const cls = big ? 'sys big' : 'sys';
-    if (t.kind === 'pending') return h('span', { class: `${cls} k-label`, title: 'The system is labelling this episode' }, icon('help', 'xs'), 'labelling…');
+    if (t.kind === 'pending') return h('span', { class: `${cls} k-label`, title: 'The system is labelling this chat' }, icon('help', 'xs'), 'labelling…');
     if (t.kind === 'unsure') return h('span', { class: `${cls} k-label`, title: t.kind_reason || '' }, icon('help', 'xs'), 'Needs label');
     if (t.kind === 'ignore') return h('span', { class: `${cls} k-ignore`, title: t.kind_reason || '' }, 'Ignored');
-    const prod = t.product ? ` · ${PRODUCTS[t.product] || t.product}` : '';
     if (t.kind === 'support') {
-      if (t.status === 'resolved') return h('span', { class: `${cls} k-done`, title: `Resolved by ${t.resolved_by || '?'}` }, icon('check', 'xs'), `Resolved${prod}`);
-      if (t.status === 'closed') return h('span', { class: `${cls} k-ignore` }, `Support closed${prod}`);
-      const w = waitMs(t);
-      return h('span', { class: `${cls} k-support${t.waiting ? (w > slaMin() * 60e3 ? ' late' : ' wait') : ''}`, title: t.kind_reason || '' },
-        icon('life', 'xs'), `Support${prod}`, t.waiting ? ` · waiting ${dur(w)}` : t.last_in_ack ? ' · said thanks' : '');
+      return t.status === 'open'
+        ? h('span', { class: `${cls} k-support`, title: 'Support · unsolved: press V to solve' }, icon('life', 'xs'), 'Support · Unsolved')
+        : h('span', { class: `${cls} k-done`, title: t.resolved_by ? `Solved by ${t.resolved_by}` : 'Solved' }, icon('check', 'xs'), 'Support · Solved');
     }
-    if (t.kind === 'sales') {
-      return h('span', { class: `${cls} k-sales stage-${t.stage}`, title: t.kind_reason || '' }, icon('dollar', 'xs'),
-        `${STAGES[t.stage] || 'Sales'}${prod}`, t.stage === 'unanswered' && t.waiting_since ? ` · ${dur(waitMs(t))}` : '',
-        t.followup_due ? ' · follow up' : '');
-    }
+    if (t.kind === 'sales') return h('span', { class: `${cls} k-sales` }, icon('dollar', 'xs'), 'Sales');
     return null;
   }
 
@@ -525,12 +534,20 @@
       avatar(c),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
-          !S.line && c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), shortLine(c.line)) : null,
+          c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), rowLine(c.line)) : null,
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
         h('div', { class: 'row-mid' }, preview(c), c.unread ? h('span', { class: 'badge-n' }, c.unread_n > 99 ? '99+' : c.unread_n || '') : null),
         sb || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb, (c.labels || []).map((id) => labelChip(id))) : null));
   }
+  function rowLine(l) { const n = lineName(l); return n.replace(/^Instagram /, ''); }
   function shortLine(l) { const n = (S.channelNames || {})[l]; return n ? n.slice(0, 12) : /^\d{8,}$/.test(l) ? '…' + l.slice(-3) : l.replace(/^Channel /, ''); }
+  function channelSelect() {
+    const lines = Object.entries(S.counts.lines || {}).sort((x, y) => (y[1].recent - x[1].recent));
+    const sel = h('select', { class: 'chan-select', 'aria-label': 'Channel', onchange: (e) => setLine(e.target.value) },
+      h('option', { value: '', selected: !S.line }, 'All channels'),
+      lines.map(([line, v]) => h('option', { value: line, selected: S.line === line }, `${lineName(line)}${v.uncomplete ? ` (${v.uncomplete})` : ''}`)));
+    return sel;
+  }
   function renderList() {
     $('#viewTitle').textContent = viewName();
     const n = viewCount();
@@ -538,10 +555,7 @@
     $('#viewCount').hidden = n == null;
     // BSB-style context: which channel and which view this list is
     $('#ctxBar').replaceChildren(
-      h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), h('b', null, S.line ? lineName(S.line) : 'All channels'),
-        S.line ? h('button', { class: 'ctx-x', title: 'Show every channel', 'aria-label': 'Show every channel', onclick: () => setLine('') }, '×') : null),
-      h('span', { class: 'ctx-sep' }, '·'),
-      h('span', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'View'), h('b', null, viewName())));
+      h('label', { class: 'ctx-part' }, h('span', { class: 'muted' }, 'Channel'), channelSelect()));
     const list = $('#list');
     const top = list.scrollTop;
     if (!S.chats.length) {
@@ -606,8 +620,8 @@
     return [h('div', { class: 'chat-empty' },
       h('div', { class: 'chat-empty-ic' }, icon('chat')),
       h('h3', null, 'Open a chat to start'),
-      h('p', { class: 'muted' }, 'Work down ', h('b', null, 'Unresolved'), ': open support chats and everything unread. Reply, then press ', h('kbd', null, 'V'), ' to resolve. If the customer wrote recently, the AI sends a fitting closing message.'),
-      h('div', { class: 'empty-keys' }, k('J', 'next chat'), k('K', 'previous'), k('V', 'resolve'), k('R', 'reply'), k('L', 'labels'), k('U', 'unread'), k('/', 'search'), k('?', 'all shortcuts')),
+      h('p', { class: 'muted' }, 'Work down ', h('b', null, 'Unresolved'), ': open support chats and everything unread. Reply, then press ', h('kbd', null, 'V'), ' to solve. If the customer wrote recently, the AI sends a fitting closing message.'),
+      h('div', { class: 'empty-keys' }, k('J', 'next chat'), k('K', 'previous'), k('V', 'solve'), k('R', 'reply'), k('L', 'labels'), k('U', 'unread'), k('/', 'search'), k('?', 'all shortcuts')),
       h('button', { class: 'btn', onclick: () => { if (S.chats[0]) openChat(S.chats[0].contact); } }, 'Open the first chat', h('kbd', null, 'J')))];
   }
 
@@ -687,6 +701,7 @@
       h('div', { class: 'chat-who' },
         h('div', { class: 'chat-name' }, displayName(c)),
         h('div', { class: 'chat-sub' }, h('span', null, subtitle(c)),
+          !isIg(c) ? h('button', { class: 'copy-num', title: `Copy ${localNumber(c.contact)} (N)`, 'aria-label': 'Copy number', onclick: copyNumber }, icon('copy', 'xs'), 'Copy', h('kbd', { class: 'mini' }, 'N')) : null,
           c.line ? h('span', { class: 'chan-badge', title: 'Channel this chat is on' }, lineIcon(c.line), lineName(c.line)) : null)),
       win,
       h('div', { class: 'chat-actions' },
@@ -697,12 +712,12 @@
   function completeButton() {
     const t = S.active && S.active.data ? S.active.data.thread : null;
     if (t && t.kind === 'support' && t.status === 'resolved') {
-      return h('button', { class: 'btn sm', title: 'Resolved. Reopen it?', onclick: () => reopen(t) }, icon('check', 'sm'), 'Reopen');
+      return h('button', { class: 'btn sm', title: 'Solved. Reopen it?', onclick: () => reopen(t) }, icon('check', 'sm'), 'Reopen');
     }
     const support = t && t.kind === 'support' && t.status === 'open';
     return h('button', { class: `btn sm ${support ? 'primary' : ''}`, id: 'completeBtn',
-      title: support ? 'Resolve (V). Sends an AI-picked closing message only if the customer wrote in the last 4h (1h at night). Shift+V resolves without a message.' : 'Mark done: it leaves Unresolved (V)',
-      onclick: completeChat }, icon('check', 'sm'), support ? 'Resolve' : 'Done', h('kbd', null, 'V'));
+      title: support ? 'Solve (V). Sends an AI-picked closing message only if the customer wrote in the last 4h (1h from 11pm to 7am).' : 'Mark done: it leaves Unresolved (V)',
+      onclick: completeChat }, icon('check', 'sm'), support ? 'Solve' : 'Done', h('kbd', null, 'V'));
   }
   function markUnreadAndLeave() {
     if (!S.active) return;
@@ -737,33 +752,29 @@
     if (t.kind === 'pending' || t.kind === 'unsure') {
       right.push(h('span', { class: 'hint-strong' }, t.kind === 'pending' ? 'Labelling…' : `Not sure${t.kind_reason ? ': ' + t.kind_reason.slice(0, 90) : ''}`));
     } else if (t.kind === 'sales') {
-      right.push(h('span', { class: `stage-now stage-${t.stage}` }, STAGES[t.stage] || t.stage), h('span', { class: 'muted' }, salesHint(t)),
-        h('div', { class: 'stage-set' }, ['got_price', 'waiting_payment', 'needs_followup', 'bought', 'lost'].map((s) => h('button', {
-          class: `chip-btn${t.stage === s ? ' on' : ''}${t.stage_manual === s ? ' manual' : ''}`, title: t.stage_manual === s ? 'Set by hand · click again for automatic' : t.stage === s ? 'Set automatically' : 'Set by hand',
-          onclick: () => setStage(t, t.stage_manual === s ? null : s),
-        }, STAGES[s]))));
+      right.push(h('span', { class: 'muted' }, 'Sales'));
     } else if (t.kind === 'support') {
       const g = d.gate || {};
-      if (t.status === 'resolved') {
+      if (t.status !== 'open') {
         const c = S.closers.find((x) => x.key === t.resolution);
-        right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Resolved by ${t.resolved_by || '?'}`),
-          h('span', { class: 'muted' }, `${c ? c.title : t.resolution === 'no_reply' ? 'customer stopped replying' : t.resolution === 'no_message' ? 'without a message' : ''} · ${ago(t.status_at)}`),
+        right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Solved${t.resolved_by ? ' by ' + t.resolved_by : ''}`),
+          h('span', { class: 'muted' }, `${c ? '“' + c.title + '” sent' : 'no message'} · ${ago(t.status_at)}`),
           h('button', { class: 'btn sm', onclick: () => reopen(t) }, 'Reopen'));
-      } else if (t.status === 'closed') {
-        right.push(h('span', { class: 'muted' }, 'Closed (history).'));
       } else {
-        const reasons = (g.reasons || []).map((r) => GATE_TEXT[r] || r);
-        right.push(t.waiting
-          ? h('span', { class: waitMs(t) > slaMin() * 60e3 ? 'bad-strong' : 'warn-strong' }, `Customer waiting ${dur(waitMs(t))}`)
-          : h('span', { class: 'muted' }, t.last_in_ack ? 'Customer said thanks' : 'Waiting on customer'),
-        t.reopened_count ? h('span', { class: 'muted' }, `· reopened ${t.reopened_count}×`) : null,
-        !g.can_resolve && reasons.length ? h('span', { class: 'why', title: reasons.join('\n') }, reasons[0]) : null,
-        g.can_resolve ? h('button', { class: 'link', title: 'Choose the closing message yourself instead of the AI', onclick: openResolve }, 'Pick message myself') : null);
+        right.push(h('span', { class: 'unsolved' }, 'Unsolved'), resolveHint(g),
+          g.can_send ? h('button', { class: 'link', title: 'Choose the closing message yourself instead of the AI', onclick: openResolve }, 'Pick message myself') : null);
       }
     } else if (t.kind === 'ignore') {
       right.push(h('span', { class: 'muted' }, t.kind_reason || 'Nothing to do.'));
     }
     bar.replaceChildren(h('div', { class: 'sys-left' }, left), h('div', { class: 'sys-right' }, right));
+  }
+  // What V will do on this support chat.
+  function resolveHint(g) {
+    if (g.can_send) return h('span', { class: 'v-hint ok' }, h('kbd', null, 'V'), ' solves and sends a closing message');
+    const since = !g.window_open && g.last_in_at ? 'reply window closed' : g.last_in_at ? `customer last wrote ${dur(now() - Date.parse(g.last_in_at))} ago` : 'the customer never wrote';
+    return h('span', { class: 'v-hint', title: `A closing message is only sent if the customer wrote in the last ${g.recent_hours || 4}h (1h from 11pm to 7am).` },
+      h('kbd', null, 'V'), ` solves without a message · ${since}`);
   }
   function salesHint(t) {
     if (t.stage === 'bought') return t.bought_product ? `${PRODUCTS[t.bought_product] || t.bought_product}${t.bought_at ? ' · ' + ago(t.bought_at) : ''}` : '';
@@ -876,11 +887,11 @@
     const name = displayName(a.data.conv);
     const btn = $('#completeBtn');
     planning = true;
-    if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), 'Resolving…'); }
+    if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), 'Solving…'); }
     let plan;
-    try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not resolved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderHead(); }
+    try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderHead(); }
     if (plan.action === 'blocked') {
-      toast(`Can't resolve ${name} with a message: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')} Reply first, or press Shift+V to resolve without a message.`, 'error');
+      toast(`Can't solve ${name}: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')}`, 'error');
       return;
     }
     const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
@@ -890,14 +901,14 @@
       goNext(contact);
       startPending({
         contact, ms: C.undoMs,
-        text: [h('b', null, `Resolving ${name}`), ' · sending “', c.body, '”'],
+        text: [h('b', null, `Solving ${name}`), ' · sending “', c.body, '”'],
         sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
         run: async () => {
           try {
             await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id });
             await labelComplete(contact);
-            toast(`${name}: resolved · “${c.title}” sent`, 'ok');
-          } catch (e) { toast(`${name} not resolved: ${e.message}`, 'error'); }
+            toast(`${name}: solved · “${c.title}” sent`, 'ok');
+          } catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
           after();
         },
       });
@@ -917,23 +928,14 @@
   function silentPending(contact, name, threadId, why) {
     goNext(contact);
     startPending({
-      contact, ms: 3000, text: [h('b', null, `Resolving ${name}`), ` · ${why}`],
+      contact, ms: 3000, text: [h('b', null, `Solving ${name}`), ` · ${why}`],
       run: async () => {
-        try { await api.call('resolve_silent', { thread_id: threadId }); await labelComplete(contact); toast(`${name}: resolved (no message)`, 'ok'); }
-        catch (e) { toast(`${name} not resolved: ${e.message}`, 'error'); }
+        try { await api.call('resolve_silent', { thread_id: threadId }); await labelComplete(contact); toast(`${name}: solved (no message)`, 'ok'); }
+        catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
         if (S.active && S.active.contact === contact) pollChat();
         refreshList();
       },
     });
-  }
-  // Shift+V: resolve without sending anything.
-  function resolveSilentKey() {
-    const a = S.active;
-    if (!a || !a.data) return;
-    const t = a.data.thread;
-    if (!t || t.kind !== 'support' || t.status !== 'open') return toast('Only open support chats are resolved. V marks other chats done.');
-    flushPending();
-    silentPending(a.contact, displayName(a.data.conv), t.id, 'no message (Shift+V)');
   }
   // Manual choice from the "Pick message myself" dialog uses the same undo bar.
   function startResolve(t, c) {
@@ -942,10 +944,10 @@
     const request_id = uuid();
     if (contact) goNext(contact);
     startPending({
-      contact, ms: C.undoMs, text: [h('b', null, `Resolving ${name}`), ' · sending “', c.body, '”'],
+      contact, ms: C.undoMs, text: [h('b', null, `Solving ${name}`), ' · sending “', c.body, '”'],
       run: async () => {
-        try { await api.call('resolve', { thread_id: t.id, closer: c.key, request_id }); if (contact) await labelComplete(contact); toast(`${name}: resolved · “${c.title}” sent`, 'ok'); }
-        catch (e) { toast(`${name} not resolved: ${e.message}`, 'error'); }
+        try { await api.call('resolve', { thread_id: t.id, closer: c.key, request_id }); if (contact) await labelComplete(contact); toast(`${name}: solved · “${c.title}” sent`, 'ok'); }
+        catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
         refreshList();
       },
     });
@@ -961,19 +963,19 @@
       ['/', 'F', 'Search', 'Ctrl+K'],
     ]],
     ['Act on the open chat', [
-      ['V', null, 'Resolve. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it resolves without a message. Other chats: mark done', 'Ctrl+Shift+E'],
-      ['Shift+V', null, 'Resolve without sending any message', ''],
+      ['V', null, 'Solve. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it is solved without a message. Other chats: mark done', 'Ctrl+Shift+E'],
       ['R', 'Enter', 'Reply: jump into the message box', 'Ctrl+M'],
       ['U', null, 'Mark unread and leave', 'Ctrl+Shift+U'],
       ['L', null, 'Labels: add or remove (then 1…9)', 'Ctrl+Shift+L'],
       ['Alt+1', '9', 'Toggle label 1…9 directly', ''],
-      ['S', null, 'System label: this is Sales', ''],
-      ['H', null, 'System label: this is Support (help)', ''],
+      ['S', null, 'This is Sales', ''],
+      ['H', null, 'This is Support (help)', ''],
       ['X', null, 'System label: ignore (spam, wrong number)', ''],
       ['Q', null, 'Quick replies (or type / in the message box)', ''],
+      ['N', null, 'Copy the customer’s number (71083892 format)', ''],
       ['C', null, 'Contact details panel', ''],
     ]],
-    ['While “Resolving…” shows', [
+    ['While “Solving…” shows', [
       ['Z', 'Esc', 'Undo: nothing is sent', ''],
       ['Enter', null, 'Send it now', ''],
     ]],
@@ -1833,7 +1835,7 @@
       case 'Enter': if (pending) { e.preventDefault(); flushPending(); return; } if (S.active) { e.preventDefault(); focusReply(); } return;
       case 'r': case 'R': if (S.active) { e.preventDefault(); focusReply(); } return;
       case 'v': if (S.active) { e.preventDefault(); completeChat(); } return;
-      case 'V': if (S.active) { e.preventDefault(); if (e.shiftKey) resolveSilentKey(); else completeChat(); } return;
+      case 'V': if (S.active) { e.preventDefault(); completeChat(); } return;
       case 'u': case 'U': if (S.active) { e.preventDefault(); markUnreadAndLeave(); } return;
       case 'l': case 'L': if (S.active) { e.preventDefault(); openLabelPicker(); } return;
       case 's': case 'S': if (S.active) { e.preventDefault(); setKindKey('sales'); } return;
@@ -1841,6 +1843,7 @@
       case 'x': case 'X': if (S.active) { e.preventDefault(); setKindKey('ignore'); } return;
       case 'q': case 'Q': if (S.active) { e.preventDefault(); openQuick(); } return;
       case 'c': case 'C': if (S.active) { e.preventDefault(); toggleDetails(); } return;
+      case 'n': case 'N': if (S.active) { e.preventDefault(); copyNumber(); } return;
       case '/': case 'f': case 'F': e.preventDefault(); focusSearch(); return;
       case '?': case 'i': case 'I': e.preventDefault(); openHelp(); return;
       default:
