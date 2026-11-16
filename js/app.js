@@ -997,6 +997,7 @@
   // What V will do on this support chat.
   function resolveHint(g) {
     if (g.can_send) return h('span', { class: 'v-hint ok' }, h('kbd', null, 'V'), ' solves and sends a closing message');
+    if (g.closer_sent) return h('span', { class: 'v-hint' }, h('kbd', null, 'V'), ' solves without a message · closing message already sent');
     const since = !g.window_open && g.last_in_at ? 'reply window closed' : g.last_in_at ? `customer last wrote ${dur(now() - Date.parse(g.last_in_at))} ago` : 'the customer never wrote';
     return h('span', { class: 'v-hint', title: `A closing message is only sent if the customer wrote in the last ${g.recent_hours || 4}h (1h from 11pm to 7am).` },
       h('kbd', null, 'V'), ` solves without a message · ${since}`);
@@ -1082,7 +1083,7 @@
     const box = h('div', { class: 'undo', role: 'status' },
       h('div', { class: 'undo-bar' },
         h('div', { class: 'undo-text' }, h('div', null, text), sub ? h('div', { class: 'undo-sub' }, sub) : null),
-        h('button', { class: 'btn sm', title: 'Undo (Z or Esc)', onclick: () => cancelPending() }, 'Undo', h('kbd', null, 'Z')),
+        h('button', { class: 'btn sm', title: 'Undo (Z)', onclick: () => cancelPending() }, 'Undo', h('kbd', null, 'Z')),
         h('button', { class: 'btn sm primary', title: 'Do it now (Enter)', onclick: flushPending }, 'Now', h('kbd', null, '↵'))),
       h('div', { class: 'undo-progress' }, h('i', { style: `animation-duration:${ms}ms` })));
     document.querySelectorAll('.undo').forEach((x) => x.remove());
@@ -1158,6 +1159,7 @@
       });
     } else if (plan.action === 'resolve_silent') {
       const quiet = plan.why === 'customer_quiet';
+      if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat'); return; }
       silentPending(contact, name, plan.thread_id, quiet
         ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
         : 'no message: the reply window is closed');
@@ -1220,7 +1222,7 @@
       ['C', null, 'Contact details panel', ''],
     ]],
     ['While “Solving…” shows', [
-      ['Z', 'Esc', 'Undo: nothing is sent', ''],
+      ['Z', null, 'Undo: nothing is sent', ''],
       ['Enter', null, 'Send it now', ''],
     ]],
     ['Message box', [
@@ -2232,7 +2234,7 @@
 
     // undo bar first
     if (pending && !typing && !modalOpen) {
-      if (k === 'z' || k === 'Z' || k === 'Escape') { e.preventDefault(); cancelPending(); return; }
+      if (k === 'z' || k === 'Z') { e.preventDefault(); cancelPending(); return; } // only Z undoes (Esc just closes)
       if (k === 'Enter' && !S.active) { e.preventDefault(); flushPending(); return; }
     }
     if (k === 'Escape') {
