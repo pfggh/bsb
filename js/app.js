@@ -769,7 +769,7 @@
   async function openChat(contact) {
     if (!/^([0-9]{6,20}|ig_[0-9]{5,30})$/.test(contact)) return;
     if (S.active && S.active.contact === contact) { showChatPane(); return; }
-    voiceLeave();
+    if (!voiceMayLeave()) return;
     S.detailsNarrow = false;
     const a = S.active = { contact, data: null, pending: [], customer: null, draft: (store('desk_drafts') || {})[contact] || '',
       nodes: new Map(), media: new Map(), sig: '', srvSig: null };
@@ -806,7 +806,7 @@
   }
   function showChatPane() { $('#app').classList.add('chat-open'); }
   function closeChat() {
-    voiceLeave();
+    if (!voiceMayLeave()) return;
     S.active = null;
     history.replaceState(null, '', location.pathname + location.search);
     $('#app').classList.remove('chat-open');
@@ -1488,6 +1488,13 @@
   }
   const EVENT_KINDS = new Set(['relabel', 'label_add', 'label_remove', 'sys_label', 'stage', 'resolved', 'reopened']);
 
+  // a voice note player that works in every browser (js/voice.js); plain <audio> if that did not load
+  function voicePlayer(url, latest, preload) {
+    if (window.DeskVoice) return window.DeskVoice.player(url, { latest, preload });
+    const audio = h('audio', { src: url, controls: true, preload: preload || 'none' });
+    return { el: audio, audio };
+  }
+
   // ---- media that survives polls
   // a.media: line key -> { el (what the bubble shows), media (img/audio/video), kind, url, latest }
   function keepMedia(key, kind, url, build) {
@@ -1647,8 +1654,9 @@
         ent.el = ent.media = h('img', { src: md.url, class: 'media-img', alt: 'photo', referrerpolicy: 'no-referrer', onclick: () => lightbox(ent.media.getAttribute('src')) });
         retryMedia(ent, null);
       } else if (md.type === 'voice') {
-        ent.el = ent.media = h('audio', { src: md.url, controls: true, preload: 'none' });
-        retryMedia(ent, null);
+        const pl = voicePlayer(md.url, () => ent.latest);
+        ent.el = pl.el; ent.media = pl.audio;
+        if (pl.audio) retryMedia(ent, null);
       } else ent.el = h('a', { class: 'doc', href: md.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), md.name || 'file');
     }) : null;
     return h('div', { class: `msg out pending${failed ? ' failed' : ''}${first ? ' first' : ''}` }, mediaEl, s.body ? richText(s.body) : null,
@@ -1701,9 +1709,10 @@
         ent.el = h('a', { class: 'doc', href: src.url, target: '_blank', rel: 'noopener noreferrer' }, icon('file', 'sm'), (m.text || '').replace(/^📎\s*/, '').slice(0, 60) || 'Document');
         ent.el.addEventListener('click', () => { if (ent.latest) ent.el.href = ent.latest; });
       } else {
-        ent.media = h('audio', { src: src.url, controls: true, preload: 'none' });
-        retryMedia(ent, null);
-        ent.el = h('div', { class: 'media voice' }, ent.media, badge);
+        const pl = voicePlayer(src.url, () => ent.latest);
+        ent.media = pl.audio;
+        if (pl.audio) retryMedia(ent, null);
+        ent.el = h('div', { class: 'media voice' }, pl.el, badge);
       }
     });
   }
@@ -1858,8 +1867,7 @@
     const r = voice.result;
     let middle;
     if (p === 'ready' && voice.url) {
-      middle = window.DeskVoice.canPreview() ? h('audio', { src: voice.url, controls: true, preload: 'metadata' })
-        : h('span', { class: 'muted' }, 'Ready to send (this browser cannot play it back)');
+      middle = voicePlayer(voice.url, null, 'metadata').el;
     } else if (p === 'recording') {
       middle = h('span', { class: 'rec-level', title: 'Microphone level' }, h('i', { id: 'recLevel' }));
     } else middle = h('span', { class: 'muted' }, p === 'starting' ? 'Starting the microphone…' : 'Finishing…');
@@ -1937,16 +1945,23 @@
     voiceUi();
   }
   function voiceDiscard() { voiceReset(); }
-  function voiceLeave() {
-    if (voice.phase !== 'idle') toast('Voice note discarded');
+  // Leaving the chat with a voice note in progress asks first (it is never lost silently).
+  function voiceMayLeave() {
+    if (voice.phase === 'idle') return true;
+    if (!confirm(voice.phase === 'ready' ? 'Discard the voice note you recorded (not sent yet)?' : 'Stop and discard the voice note you are recording?')) return false;
     voiceReset();
+    return true;
   }
+  window.addEventListener('beforeunload', (e) => {
+    if (voice.phase === 'idle') return;
+    e.preventDefault(); e.returnValue = ''; // the browser asks "Leave site?"
+  });
   async function voiceSend() {
     const r = voice.result, a = voice.chat, url = voice.url;
     if (voice.phase !== 'ready' || !r || !a || a !== S.active) return;
     if (Date.now() - voice.stopped < 400) return; // the press that stopped it must not also send it
     voiceReset(true);
-    const p = { request_id: uuid(), text: '', status: 'sending', at: now(), preview: h('audio', { src: url, controls: true }),
+    const p = { request_id: uuid(), text: '', status: 'sending', at: now(), preview: voicePlayer(url, null, 'metadata').el,
       media: { kind: 'voice', mime: 'audio/ogg', filename: 'voice.ogg', base64: await toB64(r.blob) } };
     a.pending.push(p);
     if (S.active === a) renderMessages(true);

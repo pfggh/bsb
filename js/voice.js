@@ -320,5 +320,90 @@
     try { const a = document.createElement('audio'); return !!(a.canPlayType && a.canPlayType('audio/ogg; codecs=opus')); } catch (e) { return false; }
   }
 
-  window.DeskVoice = { support, create, preload, canPreview, VoiceError };
+  // ---- playback that works everywhere
+  // Browsers that play Ogg/Opus get a plain <audio>. The others (older Safari / iOS) get a Play
+  // button: the file is decoded with ogg-opus-decoder (self-hosted, WebAssembly) into a WAV, which
+  // every browser plays, and the button turns into a normal player.
+  const DEC_SRC = new URL('../ogg-opus-decoder/ogg-opus-decoder.min.js', BASE).href;
+  let decLoading = null;
+  function loadDecoder() {
+    const lib = () => window['ogg-opus-decoder'] && window['ogg-opus-decoder'].OggOpusDecoder;
+    if (lib()) return Promise.resolve(lib());
+    if (!decLoading) {
+      decLoading = new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = DEC_SRC; s.async = true;
+        s.onload = () => (lib() ? res(lib()) : rej(new Error('decoder did not load')));
+        s.onerror = () => { s.remove(); rej(new Error('decoder could not load')); };
+        document.head.append(s);
+      }).catch((e) => { decLoading = null; throw e; });
+    }
+    return decLoading;
+  }
+  // mono 16-bit WAV at 24 kHz (half of Opus' 48 kHz: plenty for speech, half the memory)
+  function toWav(channels, rate) {
+    const ch = channels[0] || new Float32Array(0), other = channels[1];
+    const step = rate >= 44100 ? 2 : 1, outRate = rate / step;
+    const n = Math.floor(ch.length / step);
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, n * 2, true);
+    for (let i = 0, o = 44; i < n; i++, o += 2) {
+      let x = 0;
+      for (let k = 0; k < step; k++) { const j = i * step + k; x += other ? (ch[j] + other[j]) / 2 : ch[j]; }
+      x /= step;
+      v.setInt16(o, Math.max(-1, Math.min(1, x)) * 0x7fff, true);
+    }
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+  async function decodeToWav(url) {
+    const [Dec, data] = await Promise.all([loadDecoder(), fetch(url, { credentials: 'omit' }).then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.arrayBuffer();
+    })]);
+    const dec = new Dec();
+    try {
+      await dec.ready;
+      const out = await dec.decodeFile(new Uint8Array(data));
+      if (!out || !out.samplesDecoded) throw new Error('nothing decoded');
+      return toWav(out.channelData, out.sampleRate);
+    } finally { try { dec.free(); } catch (e) { /* gone */ } }
+  }
+  // player(url, { latest }) -> { el, audio }   audio = the <audio> element when there is one at once
+  // (callers keep it across re-renders); latest() gives the freshest link when the button is pressed.
+  function player(url, opts) {
+    const o = opts || {};
+    if (canPreview()) {
+      const audio = document.createElement('audio');
+      audio.controls = true; audio.preload = o.preload || 'none'; audio.src = url;
+      return { el: audio, audio };
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'vplayer';
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn sm vplay'; btn.textContent = '▶ Play voice note';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = 'Loading…';
+      try {
+        const wav = URL.createObjectURL(await decodeToWav((o.latest && o.latest()) || url));
+        const audio = document.createElement('audio');
+        audio.controls = true; audio.src = wav;
+        wrap.replaceChildren(audio);
+        audio.play().catch(() => {});
+      } catch (e) {
+        log('play', e && e.message);
+        btn.disabled = false; btn.textContent = '▶ Play voice note';
+        const a = document.createElement('a');
+        a.href = (o.latest && o.latest()) || url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = ' Download';
+        if (!wrap.querySelector('a')) wrap.append(a);
+      }
+    });
+    wrap.append(btn);
+    return { el: wrap, audio: null };
+  }
+
+  window.DeskVoice = { support, create, preload, canPreview, player, VoiceError };
 })();
