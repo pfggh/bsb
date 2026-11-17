@@ -151,13 +151,15 @@
         mr.onstart = res;
         try { mr.start(1000); } catch (e) { rej(e); }
       }), 4000, 'the recorder did not start');
-      const cancel = () => { try { mr.ondataavailable = null; mr.onstop = null; if (mr.state !== 'inactive') mr.stop(); } catch (e) { /* gone */ } };
+      let halted = null;
+      // halt(): stop recording and collect the data (cheap); stop(): halt + build the Ogg file
+      const halt = () => halted || (halted = mr.state === 'inactive' ? Promise.resolve()
+        : timeout(new Promise((res) => { mr.onstop = res; mr.stop(); }), 8000, 'the recorder did not finish'));
+      const cancel = () => { try { if (!halted) { mr.ondataavailable = null; mr.onstop = null; if (mr.state !== 'inactive') mr.stop(); } } catch (e) { /* gone */ } };
       return {
-        engine, cancel,
+        engine, cancel, halt,
         async stop() {
-          if (mr.state !== 'inactive') {
-            await timeout(new Promise((res) => { mr.onstop = res; mr.stop(); }), 8000, 'the recorder did not finish');
-          }
+          await halt();
           if (!chunks.length) throw error || new Error('the recorder returned nothing');
           const raw = new Uint8Array(await new Response(new Blob(chunks, { type })).arrayBuffer());
           return engine === 'mr-webm' ? window.DeskOgg.webmToOgg(raw) : raw;
@@ -277,17 +279,23 @@
         clearTimeout(maxTimer);
         const wallSec = (Date.now() - startedAt) / 1000;
         if (wallSec * 1000 < MIN_MS) { release(); throw fail('too-short'); }
-        const tried = await Promise.all([primary, backup].filter(Boolean).map((e) => e.stop().then(
+        const attempt = (e) => e.stop().then(
           (bytes) => ({ engine: e.engine, bytes, info: inspect(bytes) }),
-          (err) => ({ engine: e.engine, info: { ok: false, error: err && err.message } }))));
-        release();
-        const good = tried.filter((t) => t.info.ok && (t.info.durationSec == null || t.info.durationSec >= 0.4));
-        for (const t of tried) if (!t.info.ok) log(t.engine, 'output rejected:', t.info.error);
-        if (!good.length) throw fail('failed', tried.map((t) => `${t.engine}: ${t.info.error || 'too short'}`).join('; '));
-        // the primary file, unless it is clearly shorter than what was recorded (encoder starved)
-        let pick = good[0];
+          (err) => ({ engine: e.engine, info: { ok: false, error: err && err.message } }));
         const dur = (t) => (t.info.durationSec == null ? wallSec : t.info.durationSec);
-        if (good.length > 1 && dur(pick) < wallSec * 0.7 && dur(good[1]) > dur(pick)) pick = good[1];
+        const usable = (t) => t.info.ok && dur(t) >= 0.4;
+        // Both recorders stop at once and the microphone is released right away; the backup's
+        // file is only built when the primary one is broken or clearly short (encoder starved).
+        const backHalt = backup && backup.halt ? backup.halt().catch(() => {}) : null;
+        const tried = [await attempt(primary)];
+        if (backHalt) await backHalt;
+        release();
+        if (backup && (!usable(tried[0]) || dur(tried[0]) < wallSec * 0.7)) tried.push(await attempt(backup));
+        for (const t of tried) if (!t.info.ok) log(t.engine, 'output rejected:', t.info.error);
+        const good = tried.filter(usable);
+        if (!good.length) throw fail('failed', tried.map((t) => `${t.engine}: ${t.info.error || 'too short'}`).join('; '));
+        let pick = good[0];
+        if (good.length > 1 && dur(good[1]) > dur(pick)) pick = good[1];
         state('ready');
         return {
           blob: new Blob([pick.bytes], { type: 'audio/ogg' }), bytes: pick.bytes, mime: 'audio/ogg', engine: pick.engine,
