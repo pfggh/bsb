@@ -620,7 +620,7 @@
   }
   function cleanPreview(t) {
     return String(t || '')
-      .replace(/^\[Outgoing Message\]$/, 'sent from BSB')
+      .replace(/^\[Outgoing Message\]$/, 'sent from the BSB app')
       .replace(/^👍 \*Reaction Received\*: (\S+)[\s\S]*/u, 'Reacted $1')
       .replace(/^↩️ \*Reply\*[\s\S]*?📝 \*Reply\*:\s*([\s\S]*?)\s*🔗[\s\S]*$/u, '↩ $1')
       .replace(/\*([^*\n]+)\*/g, '$1').replace(/\s+/g, ' ');
@@ -1618,12 +1618,12 @@
     if (m.quoted || bsb) {
       const q = m.quoted;
       let qText = q ? q.text : cleanPreview(bsb[1]);
-      if (/^\[Outgoing Message\]$/.test(String(qText).trim())) qText = 'a message sent from BSB';
+      if (/^\[Outgoing Message\]$/.test(String(qText).trim())) qText = 'a message sent from the BSB app';
       quote = h('button', { class: `quote ${q && q.dir === 'Outgoing' ? 'q-out' : 'q-in'}`, title: q ? 'Go to that message' : '', onclick: q ? () => jumpTo(q.id) : null },
         h('b', null, q ? (q.dir === 'Outgoing' ? 'You' : 'Customer') : 'Reply to'), h('span', null, String(qText || '').slice(0, 160)));
     }
     let body;
-    if (text === '[Outgoing Message]') body = h('em', { class: 'muted' }, 'Sent from BSB (text not available)');
+    if (text === '[Outgoing Message]') body = h('em', { class: 'muted' }, 'Sent from the BSB app (text not available)');
     else if (media === 'call') body = h('em', null, /missed/i.test(text) ? '📞 Missed call' : '📞 Call');
     else {
       const clean = text.replace(/^(🎤 \*Voice Message\*|🎵 \*Audio Message\*|📎 \*Media Received\*|📷 Image|🎉 \*Sticker Received\*|🎥 Video|🎵 Audio|📎 Attachment[^\n]*)\s*/u, '');
