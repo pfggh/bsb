@@ -1840,7 +1840,10 @@
 
   // Voice notes: js/voice.js records them (always OGG/Opus mono, checked before sending).
   // A recording belongs to the chat it was started in; leaving that chat discards it.
-  const voice = { phase: 'idle', rec: null, chat: null, result: null, url: null, started: 0, stopped: 0, level: 0, tick: null, note: '' };
+  const voice = { phase: 'idle', rec: null, chat: null, result: null, url: null, started: 0, stopped: 0, level: 0, tick: null, note: '', built: null };
+  // The bar is rebuilt only when the phase changes; while recording a light tick updates just the
+  // time and the level. (Rebuilding it every tick replaced the Stop button under the cursor, so
+  // clicks got lost.)
   function voiceUi() {
     const bar = $('#voicebar');
     if (!bar) return;
@@ -1848,26 +1851,38 @@
     bar.hidden = p === 'idle';
     const box = $('#composer .composer-box');
     if (box) box.classList.toggle('dim', p !== 'idle');
-    if (p === 'idle') return bar.replaceChildren();
+    if (p === 'idle') { voice.built = null; return bar.replaceChildren(); }
+    const key = `${p}|${voice.note}|${voice.url || ''}`;
+    if (voice.built === key && bar.firstChild) return voiceTick();
+    voice.built = key;
     const r = voice.result;
-    const secs = Math.floor(r ? r.durationSec : ((p === 'recording' ? Date.now() : voice.stopped || Date.now()) - voice.started) / 1000);
-    const time = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
     let middle;
     if (p === 'ready' && voice.url) {
       middle = window.DeskVoice.canPreview() ? h('audio', { src: voice.url, controls: true, preload: 'metadata' })
         : h('span', { class: 'muted' }, 'Ready to send (this browser cannot play it back)');
     } else if (p === 'recording') {
-      middle = h('span', { class: 'rec-level', title: 'Microphone level' }, h('i', { style: `width:${Math.round(Math.min(1, voice.level * 1.6) * 100)}%` }));
+      middle = h('span', { class: 'rec-level', title: 'Microphone level' }, h('i', { id: 'recLevel' }));
     } else middle = h('span', { class: 'muted' }, p === 'starting' ? 'Starting the microphone…' : 'Finishing…');
     bar.replaceChildren(...[
       h('span', { class: `rec-dot${p === 'recording' ? ' on' : ''}` }),
-      h('span', { class: 'rec-time' }, time),
+      h('span', { class: 'rec-time', id: 'recTime' }),
       middle,
       voice.note ? h('span', { class: 'rec-note' }, voice.note) : null,
-      h('button', { class: 'btn sm ghost', onclick: voiceDiscard }, 'Discard'),
-      p === 'recording' ? h('button', { class: 'btn sm', onclick: voiceStop }, icon('stop', 'sm'), 'Stop')
-        : h('button', { class: 'btn sm primary', disabled: p !== 'ready', onclick: voiceSend }, icon('send', 'sm'), r && r.silent ? 'Send anyway' : 'Send'),
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: voiceDiscard }, 'Discard'),
+      p === 'recording'
+        // pointerdown: stops at the press itself, so a click can never be lost
+        ? h('button', { class: 'btn sm', id: 'recStop', type: 'button', onpointerdown: (e) => { e.preventDefault(); voiceStop(); }, onclick: voiceStop }, icon('stop', 'sm'), 'Stop')
+        : h('button', { class: 'btn sm primary', type: 'button', disabled: p !== 'ready', onclick: voiceSend }, icon('send', 'sm'), r && r.silent ? 'Send anyway' : 'Send'),
     ].filter(Boolean));
+    voiceTick();
+  }
+  function voiceTick() {
+    const p = voice.phase, r = voice.result;
+    const secs = Math.max(0, Math.floor(r ? r.durationSec : ((p === 'recording' ? Date.now() : voice.stopped || Date.now()) - voice.started) / 1000));
+    const t = document.getElementById('recTime');
+    if (t) t.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    const lv = document.getElementById('recLevel');
+    if (lv) lv.style.width = `${Math.round(Math.min(1, voice.level * 1.6) * 100)}%`;
   }
   // Must stay synchronous up to rec.start(): Safari only allows the microphone / audio engine
   // from inside the click.
@@ -1887,7 +1902,7 @@
       if (voice.rec !== rec) return;
       voice.phase = 'recording'; voice.started = Date.now();
       clearInterval(voice.tick);
-      voice.tick = setInterval(voiceUi, 150);
+      voice.tick = setInterval(voiceTick, 150);
       voiceUi();
     }, (e) => {
       if (voice.rec !== rec) return;
@@ -1929,6 +1944,7 @@
   async function voiceSend() {
     const r = voice.result, a = voice.chat, url = voice.url;
     if (voice.phase !== 'ready' || !r || !a || a !== S.active) return;
+    if (Date.now() - voice.stopped < 400) return; // the press that stopped it must not also send it
     voiceReset(true);
     const p = { request_id: uuid(), text: '', status: 'sending', at: now(), preview: h('audio', { src: url, controls: true }),
       media: { kind: 'voice', mime: 'audio/ogg', filename: 'voice.ogg', base64: await toB64(r.blob) } };
