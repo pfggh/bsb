@@ -737,3 +737,15 @@ kbd.mini { min-width: 14px; padding: 0 3px; font-size: 9.5px; line-height: 1.35;
 .qr-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .badge-n.dot { padding: 0; width: 20px; }
 .badge-n.late { background: var(--danger); }
+.unsolved-warn { border: 2px solid var(--danger); }
+.uw-head { display: flex; align-items: center; gap: 12px; padding: 18px 22px 6px; }
+.uw-head h3 { margin: 0; font-size: 20px; color: var(--danger); }
+.uw-icon { width: 40px; height: 40px; border-radius: 50%; background: var(--danger); color: #fff; display: grid; place-items: center; font-size: 24px; font-weight: 800; flex: none; }
+.uw-q { font-size: 15px; font-weight: 600; margin: 0; }
+.uw-why { margin: 6px 0 0; color: var(--text-2); }
+.uw-msg { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); font-size: 13.5px; display: grid; gap: 4px; }
+.uw-msg small { color: var(--muted); font-weight: 600; }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.danger kbd { background: rgba(255, 255, 255, .2); color: #fff; border-color: rgba(255, 255, 255, .4); }
+.unsolved-warn .sheet-foot { flex-wrap: wrap; }
+.sheet.narrow.unsolved-warn { width: min(600px, calc(100vw - 32px)); max-width: 600px; }

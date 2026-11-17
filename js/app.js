@@ -1140,7 +1140,49 @@
       return;
     }
     const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
-    if (plan.action === 'resolve') {
+    if (plan.action === 'resolve' && plan.solved === false) {
+      unsolvedWarning(plan, contact, name, after);
+    } else if (plan.action === 'resolve') {
+      sendCloserPending(plan, contact, name, after);
+    } else if (plan.action === 'resolve_silent') {
+      const quiet = plan.why === 'customer_quiet';
+      if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat'); return; }
+      silentPending(contact, name, plan.thread_id, quiet
+        ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
+        : 'no message: the reply window is closed');
+    } else {
+      goNext(contact);
+      startPending({
+        contact, ms: 1800, text: [h('b', null, `${name}`), ' marked done'],
+        run: async () => { try { await api.call('read', { contact }); } catch (e) { /* next poll */ } after(); },
+      });
+    }
+  }
+  // The AI thinks the issue is still open: stop and ask before any closing message goes out.
+  function unsolvedWarning(plan, contact, name, after) {
+    const c = plan.closer;
+    const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast('Nothing sent, the chat stays unsolved'); } }, 'Cancel', h('kbd', null, 'Esc'));
+    const silent = h('button', { class: 'btn', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (issue not solved)'); } }, 'Solve without a message', h('kbd', null, 'N'));
+    const send = h('button', { class: 'btn danger', onclick: () => { closeModal(); sendCloserPending(plan, contact, name, after); } }, 'Send anyway', h('kbd', null, 'Y'));
+    const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
+      h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, 'Issue doesn’t seem solved')),
+      h('div', { class: 'sheet-body' },
+        h('p', { class: 'uw-q' }, `Are you sure you want to send ${name} a closing message?`),
+        plan.unsolved_reason ? h('p', { class: 'uw-why' }, h('b', null, 'AI: '), plan.unsolved_reason) : null,
+        h('div', { class: 'uw-msg' }, h('small', null, `Would send “${c.title}”`), c.body)),
+      h('div', { class: 'sheet-foot' }, cancel, silent, send));
+    const keys = (e) => {
+      if (!document.body.contains(box)) { document.removeEventListener('keydown', keys, true); return; }
+      const k = e.key.toLowerCase();
+      if (k === 'y') { e.preventDefault(); e.stopPropagation(); send.click(); }
+      else if (k === 'n') { e.preventDefault(); e.stopPropagation(); silent.click(); }
+    };
+    document.addEventListener('keydown', keys, true);
+    openModal(box, true);
+    setTimeout(() => cancel.focus(), 40);
+  }
+  function sendCloserPending(plan, contact, name, after) {
+    {
       const c = plan.closer;
       const request_id = uuid();
       goNext(contact);
@@ -1156,18 +1198,6 @@
           } catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
           after();
         },
-      });
-    } else if (plan.action === 'resolve_silent') {
-      const quiet = plan.why === 'customer_quiet';
-      if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat'); return; }
-      silentPending(contact, name, plan.thread_id, quiet
-        ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
-        : 'no message: the reply window is closed');
-    } else {
-      goNext(contact);
-      startPending({
-        contact, ms: 1800, text: [h('b', null, `${name}`), ' marked done'],
-        run: async () => { try { await api.call('read', { contact }); } catch (e) { /* next poll */ } after(); },
       });
     }
   }
