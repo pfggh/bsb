@@ -1144,6 +1144,8 @@
       unsolvedWarning(plan, contact, name, after);
     } else if (plan.action === 'resolve') {
       sendCloserPending(plan, contact, name, after);
+    } else if (plan.action === 'resolve_silent' && plan.solved === false) {
+      unsolvedSilentWarning(plan, contact, name);
     } else if (plan.action === 'resolve_silent') {
       const quiet = plan.why === 'customer_quiet';
       if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat'); return; }
@@ -1176,6 +1178,25 @@
       const k = e.key.toLowerCase();
       if (k === 'y') { e.preventDefault(); e.stopPropagation(); send.click(); }
       else if (k === 'n') { e.preventDefault(); e.stopPropagation(); silent.click(); }
+    };
+    document.addEventListener('keydown', keys, true);
+    openModal(box, true);
+    setTimeout(() => cancel.focus(), 40);
+  }
+  // Same warning when nothing would be sent: support is only solved when the issue sounds solved.
+  function unsolvedSilentWarning(plan, contact, name) {
+    const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast('Not solved, the chat stays open'); } }, 'Cancel', h('kbd', null, 'Esc'));
+    const anyway = h('button', { class: 'btn danger', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (marked solved anyway)'); } }, 'Solve anyway', h('kbd', null, 'Y'));
+    const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
+      h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, 'Issue doesn’t seem solved')),
+      h('div', { class: 'sheet-body' },
+        h('p', { class: 'uw-q' }, `Are you sure you want to mark ${name} as solved?`),
+        plan.unsolved_reason ? h('p', { class: 'uw-why' }, h('b', null, 'AI: '), plan.unsolved_reason) : null,
+        h('p', { class: 'hint', style: 'margin-top:8px' }, 'No message would be sent to the customer.')),
+      h('div', { class: 'sheet-foot' }, cancel, anyway));
+    const keys = (e) => {
+      if (!document.body.contains(box)) { document.removeEventListener('keydown', keys, true); return; }
+      if (e.key.toLowerCase() === 'y') { e.preventDefault(); e.stopPropagation(); anyway.click(); }
     };
     document.addEventListener('keydown', keys, true);
     openModal(box, true);
