@@ -328,6 +328,8 @@
     $('#login').hidden = true;
     $('#app').hidden = false;
     bindUi();
+    // the voice recorder's scripts, ahead of the first mic click
+    setTimeout(() => { if (window.DeskVoice && window.DeskVoice.support().engines.includes('wasm')) window.DeskVoice.preload().catch(() => {}); }, 3000);
     try {
       const b = await api.call('boot', { view: /^(all|unresolved|l\d+)$/.test(S.view) ? S.view : 'unresolved', line: S.line || null });
       S.me = b.me;
@@ -767,7 +769,7 @@
   async function openChat(contact) {
     if (!/^([0-9]{6,20}|ig_[0-9]{5,30})$/.test(contact)) return;
     if (S.active && S.active.contact === contact) { showChatPane(); return; }
-    voiceDiscard();
+    voiceLeave();
     S.detailsNarrow = false;
     const a = S.active = { contact, data: null, pending: [], customer: null, draft: (store('desk_drafts') || {})[contact] || '',
       nodes: new Map(), media: new Map(), sig: '', srvSig: null };
@@ -804,7 +806,7 @@
   }
   function showChatPane() { $('#app').classList.add('chat-open'); }
   function closeChat() {
-    voiceDiscard();
+    voiceLeave();
     S.active = null;
     history.replaceState(null, '', location.pathname + location.search);
     $('#app').classList.remove('chat-open');
@@ -1836,97 +1838,103 @@
     deliver(p, S.active);
   }
 
-  // Voice notes: OGG/Opus mono (what WhatsApp needs), recorded with opus-recorder.
-  const OPUS = 'https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/';
-  const voice = { phase: 'idle', rec: null, stream: null, ctx: null, blob: null, url: null, started: 0, tick: null, max: null };
-  function loadRecorder() {
-    if (window.Recorder) return Promise.resolve();
-    return new Promise((res, rej) => {
-      const s = document.createElement('script');
-      s.src = OPUS + 'recorder.min.js'; s.crossOrigin = 'anonymous'; s.onload = res; s.onerror = () => rej(new Error('recorder could not load'));
-      document.head.append(s);
-    });
-  }
-  function encoderPath() {
-    const u = OPUS + 'encoderWorker.min.js';
-    if (typeof BaseAudioContext !== 'undefined' && 'audioWorklet' in BaseAudioContext.prototype) return u;
-    return URL.createObjectURL(new Blob([`importScripts(${JSON.stringify(u)});`], { type: 'application/javascript' }));
-  }
+  // Voice notes: js/voice.js records them (always OGG/Opus mono, checked before sending).
+  // A recording belongs to the chat it was started in; leaving that chat discards it.
+  const voice = { phase: 'idle', rec: null, chat: null, result: null, url: null, started: 0, stopped: 0, level: 0, tick: null, note: '' };
   function voiceUi() {
     const bar = $('#voicebar');
     if (!bar) return;
     const p = voice.phase;
     bar.hidden = p === 'idle';
-    $('#composer .composer-box').classList.toggle('dim', p !== 'idle');
+    const box = $('#composer .composer-box');
+    if (box) box.classList.toggle('dim', p !== 'idle');
     if (p === 'idle') return bar.replaceChildren();
-    const secs = Math.floor(((p === 'recording' ? Date.now() : voice.stopped) - voice.started) / 1000);
-    bar.replaceChildren(
+    const r = voice.result;
+    const secs = Math.floor(r ? r.durationSec : ((p === 'recording' ? Date.now() : voice.stopped || Date.now()) - voice.started) / 1000);
+    const time = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    let middle;
+    if (p === 'ready' && voice.url) {
+      middle = window.DeskVoice.canPreview() ? h('audio', { src: voice.url, controls: true, preload: 'metadata' })
+        : h('span', { class: 'muted' }, 'Ready to send (this browser cannot play it back)');
+    } else if (p === 'recording') {
+      middle = h('span', { class: 'rec-level', title: 'Microphone level' }, h('i', { style: `width:${Math.round(Math.min(1, voice.level * 1.6) * 100)}%` }));
+    } else middle = h('span', { class: 'muted' }, p === 'starting' ? 'Starting the microphone…' : 'Finishing…');
+    bar.replaceChildren(...[
       h('span', { class: `rec-dot${p === 'recording' ? ' on' : ''}` }),
-      h('span', { class: 'rec-time' }, `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`),
-      p === 'ready' && voice.url ? h('audio', { src: voice.url, controls: true }) : h('span', { class: 'muted' }, p === 'recording' ? 'Recording…' : 'Finishing…'),
+      h('span', { class: 'rec-time' }, time),
+      middle,
+      voice.note ? h('span', { class: 'rec-note' }, voice.note) : null,
       h('button', { class: 'btn sm ghost', onclick: voiceDiscard }, 'Discard'),
       p === 'recording' ? h('button', { class: 'btn sm', onclick: voiceStop }, icon('stop', 'sm'), 'Stop')
-        : h('button', { class: 'btn sm primary', disabled: p !== 'ready', onclick: voiceSend }, icon('send', 'sm'), 'Send'));
+        : h('button', { class: 'btn sm primary', disabled: p !== 'ready', onclick: voiceSend }, icon('send', 'sm'), r && r.silent ? 'Send anyway' : 'Send'),
+    ].filter(Boolean));
   }
-  async function voiceStart() {
+  // Must stay synchronous up to rec.start(): Safari only allows the microphone / audio engine
+  // from inside the click.
+  function voiceStart() {
     if (voice.phase !== 'idle' || !S.active || !S.active.data) return;
     if (isIg(S.active.data.conv)) return toast('Voice notes can only be sent on WhatsApp', 'error');
-    if (!window.isSecureContext || !navigator.mediaDevices) return toast('The microphone needs https', 'error');
-    voice.phase = 'starting'; voice.started = Date.now(); voiceUi();
-    try {
-      await loadRecorder();
-      if (!window.Recorder.isRecordingSupported()) throw new Error('voice recording is not supported in this browser');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      if (voice.phase !== 'starting') { stream.getTracks().forEach((t) => t.stop()); return; }
-      voice.stream = stream;
-      voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const rec = new window.Recorder({ sourceNode: voice.ctx.createMediaStreamSource(stream), encoderPath: encoderPath(), numberOfChannels: 1,
-        encoderSampleRate: 48000, encoderBitRate: 32000, encoderApplication: 2048, streamPages: false, monitorGain: 0 });
-      rec.ondataavailable = (arr) => {
-        voice.blob = new Blob([arr], { type: 'audio/ogg' });
-        voice.url = URL.createObjectURL(voice.blob);
-        voice.phase = 'ready'; voiceUi();
-      };
-      voice.rec = rec;
-      await rec.start();
+    if (!window.DeskVoice) return toast('The voice recorder did not load — reload the page', 'error');
+    const sup = window.DeskVoice.support();
+    if (!sup.ok) return toast(sup.reason === 'insecure' ? 'The microphone needs https' : 'This browser cannot record voice notes — update it, or use Chrome, Edge, Firefox or Safari', 'error');
+    const rec = window.DeskVoice.create({
+      onLevel: (v) => { voice.level = v; },
+      onAutoStop: (why) => { if (voice.rec === rec) { voice.note = why === 'maximum length' ? 'Stopped at 5 minutes' : `Stopped: ${why}`; voiceStop(); } },
+    });
+    Object.assign(voice, { phase: 'starting', rec, chat: S.active, result: null, url: null, started: Date.now(), stopped: 0, level: 0, note: '' });
+    voiceUi();
+    rec.start().then(() => {
+      if (voice.rec !== rec) return;
       voice.phase = 'recording'; voice.started = Date.now();
-      voice.tick = setInterval(voiceUi, 250);
-      voice.max = setTimeout(voiceStop, 5 * 60 * 1000);
+      clearInterval(voice.tick);
+      voice.tick = setInterval(voiceUi, 150);
       voiceUi();
-    } catch (e) {
-      voiceDiscard();
-      toast(e.name === 'NotAllowedError' ? 'Microphone permission was refused' : `Cannot record: ${e.message}`, 'error');
-    }
+    }, (e) => {
+      if (voice.rec !== rec) return;
+      voiceReset();
+      toast(e.message || 'Cannot record', 'error');
+    });
   }
-  function voiceRelease() {
-    clearInterval(voice.tick); clearTimeout(voice.max);
-    if (voice.stream) voice.stream.getTracks().forEach((t) => t.stop());
-    if (voice.ctx) voice.ctx.close().catch(() => {});
-    voice.stream = null; voice.ctx = null; voice.tick = null; voice.max = null;
-  }
-  async function voiceStop() {
-    if (voice.phase !== 'recording') return;
+  function voiceStop() {
+    const rec = voice.rec;
+    if (!rec || voice.phase !== 'recording') return;
     voice.phase = 'stopping'; voice.stopped = Date.now();
-    voiceRelease(); voiceUi();
-    if (voice.stopped - voice.started < 1000) { voiceDiscard(); return toast('Too short'); }
-    try { await voice.rec.stop(); } catch (e) { voiceDiscard(); toast('Recording failed', 'error'); }
+    clearInterval(voice.tick); voice.tick = null;
+    voiceUi();
+    rec.stop().then((r) => {
+      if (voice.rec !== rec) return;
+      voice.result = r;
+      voice.url = URL.createObjectURL(r.blob);
+      if (r.silent) voice.note = 'No sound was picked up — check the microphone';
+      voice.phase = 'ready';
+      voiceUi();
+    }, (e) => {
+      if (voice.rec !== rec) return;
+      voiceReset();
+      toast(e.code === 'too-short' ? 'Too short' : e.message || 'Recording failed', e.code === 'too-short' ? undefined : 'error');
+    });
   }
-  function voiceDiscard() {
-    voiceRelease();
-    if (voice.rec) { try { voice.rec.ondataavailable = null; voice.rec.close(); } catch (e) { /* gone */ } }
-    voice.rec = null; voice.blob = null; voice.phase = 'idle';
+  function voiceReset(keepUrl) {
+    clearInterval(voice.tick);
+    if (voice.rec) voice.rec.cancel();
+    if (voice.url && !keepUrl) URL.revokeObjectURL(voice.url);
+    Object.assign(voice, { phase: 'idle', rec: null, chat: null, result: null, url: null, tick: null, level: 0, note: '' });
     voiceUi();
   }
+  function voiceDiscard() { voiceReset(); }
+  function voiceLeave() {
+    if (voice.phase !== 'idle') toast('Voice note discarded');
+    voiceReset();
+  }
   async function voiceSend() {
-    if (voice.phase !== 'ready' || !voice.blob || !S.active) return;
-    const blob = voice.blob, url = voice.url;
-    voice.url = null;
-    voiceDiscard();
+    const r = voice.result, a = voice.chat, url = voice.url;
+    if (voice.phase !== 'ready' || !r || !a || a !== S.active) return;
+    voiceReset(true);
     const p = { request_id: uuid(), text: '', status: 'sending', at: now(), preview: h('audio', { src: url, controls: true }),
-      media: { kind: 'voice', mime: 'audio/ogg', filename: 'voice.ogg', base64: await toB64(blob) } };
-    S.active.pending.push(p);
-    renderMessages(true);
-    deliver(p, S.active);
+      media: { kind: 'voice', mime: 'audio/ogg', filename: 'voice.ogg', base64: await toB64(r.blob) } };
+    a.pending.push(p);
+    if (S.active === a) renderMessages(true);
+    deliver(p, a);
   }
 
   // ---- quick replies (the staff's own, desk.quick_replies)
