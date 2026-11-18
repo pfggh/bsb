@@ -24,14 +24,29 @@
   // A sign-in link opened in a tab that already shows the desk only changes the hash.
   window.addEventListener('hashchange', () => { if (takeLinkToken()) location.reload(); });
 
-  // Activity for the admin's Team panel: when the keyboard, mouse or touch screen was last used on
-  // this page. Every request carries {i: seconds since then, v: tab in front}; nothing else is recorded.
-  let lastInput = 0;
-  const touch = () => { lastInput = Date.now(); };
-  for (const ev of ['keydown', 'pointerdown', 'wheel', 'touchstart']) window.addEventListener(ev, touch, { passive: true, capture: true });
+  // Activity for the admin's Team panel. The page notes in which minutes (on the SERVER's clock) the
+  // keyboard, mouse or touch screen was used here, and every request carries the minutes not yet
+  // delivered: {v: tab in front, m: [epoch minutes]}. A minute is dropped only after a request that
+  // carried it succeeded, so a failed request or a short network drop loses nothing. The server accepts
+  // only the last 10 minutes. Nothing else is recorded: no keys, no positions, no screen content.
+  let skew = 0;                       // server clock - this clock, learned from every answer
+  const pendingMinutes = new Set();
+  const serverMinute = () => Math.floor((Date.now() + skew) / 60000);
+  function noteInput() {
+    const m = serverMinute();
+    pendingMinutes.add(m);
+    if (pendingMinutes.size > 12) for (const x of pendingMinutes) if (x < m - 10) pendingMinutes.delete(x);
+  }
+  for (const ev of ['keydown', 'pointerdown', 'wheel', 'touchstart']) window.addEventListener(ev, noteInput, { passive: true, capture: true });
   let moveAt = 0;
-  window.addEventListener('pointermove', () => { const n = Date.now(); if (n - moveAt > 2000) { moveAt = n; lastInput = n; } }, { passive: true, capture: true });
-  const activity = () => ({ i: lastInput ? Math.min(86400, Math.round((Date.now() - lastInput) / 1000)) : 86400, v: !document.hidden });
+  for (const ev of ['pointermove', 'scroll']) {
+    window.addEventListener(ev, () => { const n = Date.now(); if (n - moveAt > 1500) { moveAt = n; noteInput(); } }, { passive: true, capture: true });
+  }
+  function activity() {
+    const now = serverMinute();
+    const m = [...pendingMinutes].filter((x) => x >= now - 10 && x <= now);
+    return { v: !document.hidden, m };
+  }
 
   class ApiError extends Error {
     constructor(status, message, body) { super(message); this.status = status; this.body = body || {}; }
@@ -40,12 +55,13 @@
   async function call(op, body = {}, token = getToken()) {
     if (!TOKEN_RE.test(token)) throw new ApiError(401, 'Signed out');
     const url = C.demo ? '/api/desk' : `${C.supabaseUrl}/functions/v1/desk`;
+    const act = activity();
     let resp;
     try {
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-desk-token': token },
-        body: JSON.stringify({ op, ...body, _a: activity() }),
+        body: JSON.stringify({ op, ...body, _a: act }),
         credentials: 'omit',
       });
     } catch (e) {
@@ -53,6 +69,9 @@
     }
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new ApiError(resp.status, data.error || `HTTP ${resp.status}`, data);
+    // delivered: these minutes need not be sent again (the current minute is re-added by the next input)
+    for (const x of act.m) pendingMinutes.delete(x);
+    if (data && typeof data.now === 'string') { const t = Date.parse(data.now); if (Number.isFinite(t)) skew = t - Date.now(); }
     return data;
   }
 
