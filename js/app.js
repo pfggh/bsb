@@ -231,6 +231,7 @@
     details: store('desk_details2') === true,
     notify: store('desk_notify') === true,
     lastLate: 0,
+    adminFlags: 0,      // admins: chats the AI check found and nobody answered yet
     metaVer: 0,         // bumps when labels / channel names change (rows and bars show them)
     listHover: false, listScrollAt: 0, listFrozen: false, listSig: null,
   };
@@ -345,6 +346,7 @@
     try {
       const b = await api.call('boot', { view: /^(all|unresolved|l\d+)$/.test(S.view) ? S.view : 'unresolved', line: S.line || null });
       S.me = b.me;
+      if (b.admin) S.adminFlags = b.admin.flags || 0;
       setMeta(b.meta);
       S.canned = b.canned || [];
       S.closers = b.closers || [];
@@ -459,9 +461,9 @@
   }
 
   // The admin's tracking panel lives in js/team.js.
-  function openTracking() {
+  function openTracking(tab) {
     if (!window.DeskTeam) return toast('The team panel did not load; reload the page', 'error');
-    window.DeskTeam.open({ h, icon, toast, api, avColor, initials, dur, ago, now, displayName, openChat, TZ });
+    window.DeskTeam.open({ h, icon, toast, api, avColor, initials, dur, ago, now, displayName, openChat, TZ }, { tab });
   }
   // A newer desk was published: ask for a reload once (old pages miss new features).
   let versionAsked = false;
@@ -486,9 +488,10 @@
     const isAdmin = S.me && S.me.role === 'admin';
     if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
     // the sidebar is rebuilt only when something it shows changed (not on every 8 s poll)
-    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin]))) return;
+    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin, S.adminFlags]))) return;
     $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))),
-      isAdmin ? h('button', { class: 'nav-item', title: 'Employee activity time, work done and the AI scanner (admins only)', onclick: () => { closeSide(); openTracking(); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team activity')) : null);
+      isAdmin ? h('button', { class: 'nav-item', title: S.adminFlags ? `Team activity: ${S.adminFlags} chat${S.adminFlags > 1 ? 's' : ''} marked solved that the AI thinks are not (only admins see this)` : 'Who worked when, what they did, and the AI check of solved chats (only admins see this)',
+        onclick: () => { closeSide(); openTracking(S.adminFlags ? 'ai' : null); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team activity'), S.adminFlags ? h('span', { class: 'n hot' }, S.adminFlags > 99 ? '99+' : S.adminFlags) : null) : null);
     // labels: BSB lists every custom label as a filter
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
@@ -570,6 +573,7 @@
   }
   function applyList(b, replace, reset = false) {
     if (b.counts) S.counts = b.counts;
+    if (b.admin) S.adminFlags = b.admin.flags || 0;
     checkVersion();
     if (b.now) S.skew = Date.parse(b.now) - Date.now();
     // a chat being completed (undo bar showing) is already gone from the list
@@ -1188,13 +1192,13 @@
     } else if (plan.action === 'resolve_silent' && plan.solved === false) {
       unsolvedSilentWarning(plan, contact, name);
     } else if (plan.action === 'resolve_silent' && plan.kind === 'sales') {
-      silentPending(contact, name, plan.thread_id, 'no message is sent', { sales: true });
+      silentPending(contact, name, plan.thread_id, 'no message is sent', { sales: true, expect: plan.expect_in });
     } else if (plan.action === 'resolve_silent') {
       const quiet = plan.why === 'customer_quiet';
-      if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat'); return; }
+      if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat', { expect: plan.expect_in }); return; }
       silentPending(contact, name, plan.thread_id, quiet
         ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
-        : 'no message: the reply window is closed');
+        : 'no message: the reply window is closed', { expect: plan.expect_in });
     } else {
       goNext(contact);
       startPending({
@@ -1207,7 +1211,7 @@
   function unsolvedWarning(plan, contact, name, after) {
     const c = plan.closer;
     const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast('Nothing sent, the chat stays unsolved'); } }, 'Cancel', h('kbd', null, 'Esc'));
-    const silent = h('button', { class: 'btn', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (issue not solved)', { warned: plan.unsolved_reason || 'yes' }); } }, 'Solve without a message', h('kbd', null, 'N'));
+    const silent = h('button', { class: 'btn', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (issue not solved)', { warned: plan.unsolved_reason || 'yes', expect: plan.expect_in }); } }, 'Solve without a message', h('kbd', null, 'N'));
     const send = h('button', { class: 'btn danger', onclick: () => { closeModal(); sendCloserPending(plan, contact, name, after, plan.unsolved_reason || 'yes'); } }, 'Send anyway', h('kbd', null, 'Y'));
     const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
       h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, 'Issue doesn’t seem solved')),
@@ -1230,7 +1234,7 @@
   function unsolvedSilentWarning(plan, contact, name) {
     const sales = plan.kind === 'sales';
     const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast(sales ? 'Not complete, the chat stays in Unresolved' : 'Not solved, the chat stays open'); } }, 'Cancel', h('kbd', null, 'Esc'));
-    const anyway = h('button', { class: 'btn danger', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, sales ? 'marked complete anyway' : 'no message (marked solved anyway)', { sales, warned: plan.unsolved_reason || 'yes' }); } }, sales ? 'Complete anyway' : 'Solve anyway', h('kbd', null, 'Y'));
+    const anyway = h('button', { class: 'btn danger', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, sales ? 'marked complete anyway' : 'no message (marked solved anyway)', { sales, warned: plan.unsolved_reason || 'yes', expect: plan.expect_in }); } }, sales ? 'Complete anyway' : 'Solve anyway', h('kbd', null, 'Y'));
     const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
       h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, sales ? 'The customer still seems to be waiting' : 'Issue doesn’t seem solved')),
       h('div', { class: 'sheet-body' },
@@ -1257,10 +1261,10 @@
         sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
         run: async () => {
           try {
-            await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, ...(warned ? { warned } : {}) });
+            await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, expect_in: plan.expect_in ?? null, ...(warned ? { warned } : {}) });
             await labelComplete(contact);
             toast(`${name}: solved · “${c.title}” sent`, 'ok');
-          } catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
+          } catch (e) { toast(e.body && e.body.customer_wrote ? `${name} wrote again just now — read it first` : `${name} not solved: ${e.message}`, 'error'); if (e.body && e.body.customer_wrote) openChat(contact); }
           after();
         },
       });
@@ -1272,11 +1276,11 @@
       contact, ms: opt.sales ? 2000 : 3000, text: [h('b', null, `${opt.sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`],
       run: async () => {
         try {
-          await api.call('resolve_silent', { thread_id: threadId, ...(opt.warned ? { warned: opt.warned } : {}) });
+          await api.call('resolve_silent', { thread_id: threadId, expect_in: opt.expect ?? null, ...(opt.warned ? { warned: opt.warned } : {}) });
           await labelComplete(contact);
           toast(opt.sales ? `${name}: complete` : `${name}: solved (no message)`, 'ok');
         }
-        catch (e) { toast(`${name} not ${opt.sales ? 'completed' : 'solved'}: ${e.message}`, 'error'); }
+        catch (e) { toast(e.body && e.body.customer_wrote ? `${name} wrote again just now — read it first` : `${name} not ${opt.sales ? 'completed' : 'solved'}: ${e.message}`, 'error'); if (e.body && e.body.customer_wrote) openChat(contact); }
         if (S.active && S.active.contact === contact) pollChat();
         refreshList();
       },
