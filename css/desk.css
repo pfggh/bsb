@@ -301,9 +301,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .msg::after { content: ''; display: block; clear: both; }
 .msg.reaction { background: transparent; box-shadow: none; padding: 2px 4px; font-size: 13px; color: var(--text-2); }
 .msg.pending { opacity: .8; }
-.sched-msg { align-self: flex-end; max-width: min(72%, 560px); margin-top: 6px; padding: 4px 9px 5px; border: 1px dashed var(--border-strong); border-radius: 10px; color: var(--muted); font-size: 12.5px; }
-.sched-when { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.sched-msg { align-self: flex-end; max-width: min(72%, 560px); margin-top: 10px; padding: 9px 13px 10px; border: 1.5px dashed var(--accent); border-radius: 10px;
+  background: color-mix(in srgb, var(--bubble-out) 55%, var(--panel)); color: var(--bubble-text); font-size: 15px; box-shadow: var(--shadow-sm); }
+.sched-when { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; font-size: 13px; font-weight: 600; color: var(--accent); }
+.sched-when svg.i { width: 15px; height: 15px; }
 .sched-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sched-chip { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; white-space: nowrap;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.sched-chip svg.i { width: 11px; height: 11px; }
 .msg.pending.failed { outline: 1px solid var(--danger); opacity: 1; }
 .msg .bad { color: var(--danger); }
 .msg .link { border: 0; background: none; color: var(--accent-strong); padding: 0; font-weight: 600; font-size: 11px; }
@@ -1141,3 +1146,15 @@ button.tm-flag:hover { filter: brightness(.96); }
   .tm-scanline { margin-left: 0; } .tm-people { padding-left: 0; border-left: 0; }
   .tm-rv-keys { display: none; }
 }
+
+/* ---------- chat marked unsolved by an admin (AI check) */
+.holdbar { flex-basis: 100%; margin-top: 8px; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 13px; line-height: 1.45;
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel)); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); color: var(--text); }
+.holdbar.replied { background: color-mix(in srgb, var(--warn) 9%, var(--panel)); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.holdbar-h { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.holdbar-h svg { color: var(--danger); flex: none; }
+.holdbar-f { margin-top: 4px; font-weight: 600; }
+
+.tm-again { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 10px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--panel-2); border: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
+.tm-again svg { width: 14px; height: 14px; margin-top: 3px; flex: none; }
+.tm-again b { color: var(--text); }
