@@ -1524,6 +1524,7 @@
         put(`p:${p.request_id}`, JSON.stringify([p.status, p.error, p.text, first]), () => pendingBubble(p, first));
       }
     }
+    for (const f of d.scheduled || []) put(`f:${f.id}`, JSON.stringify([f.body, f.due_at]), () => scheduledLine(f));
     // forget nodes and media of lines that are gone
     for (const k of a.nodes.keys()) if (!used.has(k)) a.nodes.delete(k);
     for (const k of a.media.keys()) if (!used.has(k)) a.media.delete(k);
@@ -1535,6 +1536,14 @@
     if (!placed) reconcile(box, want);
     if (stick) box.scrollTop = box.scrollHeight;
     else if (a.keepScroll) { box.scrollTop = box.scrollHeight - prevH + prevTop; a.keepScroll = false; }
+  }
+  // An automatic follow-up booked for this chat: faint, inside the chat only.
+  function scheduledLine(f) {
+    const at = new Date(f.due_at), dk = dayKey(at);
+    const when = dk === dayKey(new Date(now())) ? fmtTime.format(at) : `${dayLabel(at, dk)} ${fmtTime.format(at)}`;
+    return h('div', { class: 'sched-msg', title: 'Automatic follow-up. It is cancelled if anyone writes in this chat first.' },
+      h('div', { class: 'sched-when' }, icon('clock', 'xs'), `Scheduled ${when}`),
+      h('div', { class: 'sched-text' }, f.body));
   }
   const EVENT_KINDS = new Set(['relabel', 'label_add', 'label_remove', 'sys_label', 'stage', 'resolved', 'reopened']);
 

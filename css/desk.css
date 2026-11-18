@@ -301,6 +301,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .msg::after { content: ''; display: block; clear: both; }
 .msg.reaction { background: transparent; box-shadow: none; padding: 2px 4px; font-size: 13px; color: var(--text-2); }
 .msg.pending { opacity: .8; }
+.sched-msg { align-self: flex-end; max-width: min(72%, 560px); margin-top: 6px; padding: 4px 9px 5px; border: 1px dashed var(--border-strong); border-radius: 10px; color: var(--muted); font-size: 12.5px; }
+.sched-when { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.sched-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.pending.failed { outline: 1px solid var(--danger); opacity: 1; }
 .msg .bad { color: var(--danger); }
 .msg .link { border: 0; background: none; color: var(--accent-strong); padding: 0; font-weight: 600; font-size: 11px; }
