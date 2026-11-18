@@ -1647,6 +1647,7 @@
         if (dd.kind === 'sales') return h('div', { class: 'ev ok-ev' }, icon('check', 'xs'), ' Marked complete by ', h('b', null, who), ' ', t);
         return h('div', { class: 'ev ok-ev' }, icon('check', 'xs'), ' Resolved by ', h('b', null, who), dd.title ? ` · ${dd.title}` : '', ' ', t);
       case 'reopened':
+        if (dd.audit) return h('div', { class: 'ev warn-ev' }, '↺ ', h('b', null, who), ' marked this unsolved after the AI check', dd.reason ? `: ${dd.reason}` : '', ' ', t);
         if (dd.kind === 'sales') return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ The customer wrote again: not complete any more' : ['↺ Put back in Unresolved by ', h('b', null, who)], ' ', t);
         return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ Reopened: the customer wrote again' : ['↺ Reopened by ', h('b', null, who)], ' ', t);
       default:
