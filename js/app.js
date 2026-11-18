@@ -79,6 +79,10 @@
     belloff: '<path d="M8.7 3A6 6 0 0 1 18 8a21 21 0 0 0 .6 5M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-2M10.3 21a1.9 1.9 0 0 0 3.4 0M2 2l20 20"/>',
     logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
     key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
+    chart: '<path d="M3 3v18h18"/><path d="M8 17v-5M13 17V7M18 17v-8"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
+    warn: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>',
+    chev: '<path d="m6 9 6 6 6-6"/>',
   };
   function icon(name, cls = '') {
     const span = document.createElement('span');
@@ -247,10 +251,10 @@
     return h('span', { class: `chip${xs ? ' xs' : ''}`, style: `--c:${l.color}` }, l.name);
   }
 
-  // Two views only: Unresolved (open support + everything unread, so sales only while unread) and All.
+  // Two views only: Unresolved (unsolved support + sales not marked complete + everything unread) and All.
   // Labels and channels below them filter like in BSB. The number is the keyboard shortcut.
   const MAIN_VIEWS = [
-    ['unresolved', 'inbox', 'Unresolved', () => S.counts.uncomplete, true, 'Unsolved support chats and everything unread. Press V to solve a chat.'],
+    ['unresolved', 'inbox', 'Unresolved', () => S.counts.uncomplete, true, 'Unsolved support chats, sales chats not marked complete, and everything unread. Press V to solve / complete a chat.'],
     ['all', 'all', 'All chats', () => null, false, 'Every conversation'],
   ];
   const ALL_VIEWS = MAIN_VIEWS;
@@ -302,6 +306,9 @@
     window_closed: 'The reply window is closed, so no closing message can be sent.',
     customer_quiet: 'The customer has not written in the last 4h (1h at night): V resolves without a message.',
   };
+  // Still to do: support until solved, sales (and not yet labelled chats) until marked complete.
+  const isSalesLike = (t) => !!t && (t.kind === 'sales' || t.kind === 'pending' || t.kind === 'unsure');
+  const todo = (t) => !!t && t.status === 'open' && (t.kind === 'support' || (isSalesLike(t) && !t.done_at));
   function waitMs(t) { return t && t.waiting && t.waiting_since ? now() - Date.parse(t.waiting_since) : 0; }
   // System tag: Support (Unsolved / Solved) or Sales. Nothing else.
   function sysBadge(t, big = false) {
@@ -315,7 +322,12 @@
         ? h('span', { class: `${cls} k-support`, title: 'Support · unsolved: press V to solve' }, icon('life', 'xs'), 'Support · Unsolved')
         : h('span', { class: `${cls} k-done`, title: t.resolved_by ? `Solved by ${t.resolved_by}` : 'Solved' }, icon('check', 'xs'), 'Support · Solved');
     }
-    if (t.kind === 'sales') return h('span', { class: `${cls} k-sales` }, icon('dollar', 'xs'), 'Sales');
+    if (t.kind === 'sales') {
+      if (!big || t.status !== 'open') return h('span', { class: `${cls} k-sales` }, icon('dollar', 'xs'), 'Sales');
+      return t.done_at
+        ? h('span', { class: `${cls} k-done`, title: t.done_by ? `Marked complete by ${t.done_by}` : 'Complete' }, icon('check', 'xs'), 'Sales · Complete')
+        : h('span', { class: `${cls} k-sales`, title: 'Sales · not complete: press V when nothing is left to do' }, icon('dollar', 'xs'), 'Sales · Open');
+    }
     return null;
   }
 
@@ -395,6 +407,7 @@
       h('div', { class: 'sheet-body' },
         h('p', { class: 'hint' }, `Signed in with your personal access token${S.me ? ` (${S.me.role})` : ''}. Everything you do is saved under your name.`),
         h('div', { class: 'menu-list' },
+          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openTracking(); } }, icon('chart', 'sm'), 'Team activity & AI scanner') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: openTeam }, icon('team', 'sm'), 'Team & access tokens') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openManage(); } }, icon('sliders', 'sm'), 'Labels & views') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openQuickManage(); } }, icon('zap', 'sm'), 'Quick replies') : null,
@@ -445,6 +458,21 @@
     try { list = await api.call('staff_list'); draw(); } catch (e) { body.replaceChildren(h('p', { class: 'error' }, e.message)); }
   }
 
+  // The admin's tracking panel lives in js/team.js.
+  function openTracking() {
+    if (!window.DeskTeam) return toast('The team panel did not load; reload the page', 'error');
+    window.DeskTeam.open({ h, icon, toast, api, avColor, initials, dur, ago, now, displayName, openChat, TZ });
+  }
+  // A newer desk was published: ask for a reload once (old pages miss new features).
+  let versionAsked = false;
+  function checkVersion() {
+    const web = Number(S.counts && S.counts.web) || 0;
+    if (versionAsked || !web || web <= (C.version || 0)) return;
+    versionAsked = true;
+    document.body.append(h('div', { class: 'update-bar', role: 'status' }, h('span', null, 'A new version of the desk is ready.'),
+      h('button', { class: 'btn sm primary', onclick: () => location.reload() }, 'Reload now')));
+  }
+
   // ------------------------------------------------------------------ sidebar
 
   function navItem(key, ic, name, n, hot, title, keyHint) {
@@ -459,7 +487,8 @@
     if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
     // the sidebar is rebuilt only when something it shows changed (not on every 8 s poll)
     if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin]))) return;
-    $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))));
+    $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))),
+      isAdmin ? h('button', { class: 'nav-item', title: 'Employee activity time, work done and the AI scanner (admins only)', onclick: () => { closeSide(); openTracking(); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team activity')) : null);
     // labels: BSB lists every custom label as a filter
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
@@ -541,6 +570,7 @@
   }
   function applyList(b, replace, reset = false) {
     if (b.counts) S.counts = b.counts;
+    checkVersion();
     if (b.now) S.skew = Date.parse(b.now) - Date.now();
     // a chat being completed (undo bar showing) is already gone from the list
     const rows = (b.chats || []).filter((x) => !(pending && pending.contact === x.contact));
@@ -629,18 +659,19 @@
   // red once the customer has been waiting more than an hour). Unread keeps its number.
   const LATE_MS = 60 * 60 * 1000;
   function rowDot(c) {
-    const unsolved = c.sys && c.sys.kind === 'support' && c.sys.status === 'open';
-    const late = unsolved && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
-    const why = unsolved ? (late ? `Unsolved · customer last wrote ${dur(now() - Date.parse(c.last_in_at))} ago` : 'Unsolved support chat') : '';
+    const unsolved = todo(c.sys);
+    const support = unsolved && c.sys.kind === 'support';
+    const late = support && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
+    const why = !unsolved ? '' : !support ? 'Sales chat · not marked complete (V)' : late ? `Unsolved · customer last wrote ${dur(now() - Date.parse(c.last_in_at))} ago` : 'Unsolved support chat';
     if (c.unread) return h('span', { class: `badge-n${late ? ' late' : ''}`, title: why || 'Unread' }, c.unread_n > 99 ? '99+' : c.unread_n || '');
     if (unsolved) return h('span', { class: `badge-n dot${late ? ' late' : ''}`, title: why, 'aria-label': why });
     return null;
   }
   // Everything a row shows, as one string: a row is rebuilt only when this changes.
   function rowKey(c) {
-    const unsolved = c.sys && c.sys.kind === 'support' && c.sys.status === 'open';
-    const late = unsolved && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
-    return JSON.stringify([c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
+    const unsolved = todo(c.sys);
+    const late = unsolved && c.sys.kind === 'support' && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
+    return JSON.stringify([unsolved, c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
       c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name]);
   }
   function row(c) {
@@ -711,7 +742,7 @@
       const done = S.view === 'unresolved' && !S.q;
       rowEls.clear();
       if (same(list, `empty|${done}|${!!S.q}`)) return;
-      list.replaceChildren(h('li', { class: 'list-empty' }, done ? [h('div', { class: 'empty-big' }, '🎉'), h('b', null, 'All resolved'), h('div', { class: 'muted' }, 'No open support and nothing unread.')]
+      list.replaceChildren(h('li', { class: 'list-empty' }, done ? [h('div', { class: 'empty-big' }, '🎉'), h('b', null, 'All resolved'), h('div', { class: 'muted' }, 'Nothing to solve, nothing to complete, nothing unread.')]
         : S.q ? 'Nothing matches your search.' : 'No chats here.'));
       return;
     }
@@ -822,8 +853,8 @@
     return [h('div', { class: 'chat-empty' },
       h('div', { class: 'chat-empty-ic' }, icon('chat')),
       h('h3', null, 'Open a chat to start'),
-      h('p', { class: 'muted' }, 'Work down ', h('b', null, 'Unresolved'), ': open support chats and everything unread. Reply, then press ', h('kbd', null, 'V'), ' to solve. If the customer wrote recently, the AI sends a fitting closing message.'),
-      h('div', { class: 'empty-keys' }, k('J', 'next chat'), k('K', 'previous'), k('V', 'solve'), k('R', 'reply'), k('L', 'labels'), k('U', 'unread'), k('/', 'search'), k('?', 'all shortcuts')),
+      h('p', { class: 'muted' }, 'Work down ', h('b', null, 'Unresolved'), ': unsolved support, sales chats not yet complete, and everything unread. Reply, then press ', h('kbd', null, 'V'), ': it solves a support chat (the AI sends a fitting closing message if the customer wrote recently) and marks a sales chat complete.'),
+      h('div', { class: 'empty-keys' }, k('J', 'next chat'), k('K', 'previous'), k('V', 'solve / complete'), k('R', 'reply'), k('L', 'labels'), k('U', 'unread'), k('/', 'search'), k('?', 'all shortcuts')),
       h('button', { class: 'btn', onclick: () => { if (S.chats[0]) openChat(S.chats[0].contact); } }, 'Open the first chat', h('kbd', null, 'J')))];
   }
 
@@ -935,10 +966,15 @@
     if (t && t.kind === 'support' && t.status === 'resolved') {
       return h('button', { class: 'btn sm', title: 'Solved. Reopen it?', onclick: () => reopen(t) }, icon('check', 'sm'), 'Reopen');
     }
+    if (t && t.status === 'open' && isSalesLike(t) && t.done_at) {
+      return h('button', { class: 'btn sm', title: `Marked complete${t.done_by ? ' by ' + t.done_by : ''}. Put it back in Unresolved?`, onclick: () => reopen(t) }, icon('check', 'sm'), 'Complete · Reopen');
+    }
     const support = t && t.kind === 'support' && t.status === 'open';
-    return h('button', { class: `btn sm ${support ? 'primary' : ''}`, id: 'completeBtn',
-      title: support ? 'Solve (V). Sends an AI-picked closing message only if the customer wrote in the last 4h (1h from 11pm to 7am).' : 'Mark done: it leaves Unresolved (V)',
-      onclick: completeChat }, icon('check', 'sm'), support ? 'Solve' : 'Done', h('kbd', null, 'V'));
+    const sales = todo(t) && !support;
+    return h('button', { class: `btn sm ${support || sales ? 'primary' : ''}`, id: 'completeBtn',
+      title: support ? 'Solve (V). Sends an AI-picked closing message only if the customer wrote in the last 4h (1h from 11pm to 7am).'
+        : sales ? 'Mark complete (V): nothing is left to do for now. No message is sent. It comes back when the customer writes again.' : 'Mark done: it leaves Unresolved (V)',
+      onclick: completeChat }, icon('check', 'sm'), support ? 'Solve' : sales ? 'Complete' : 'Done', h('kbd', null, 'V'));
   }
   function markUnreadAndLeave() {
     if (!S.active) return;
@@ -979,7 +1015,10 @@
     if (t.kind === 'pending' || t.kind === 'unsure') {
       right.push(h('span', { class: 'hint-strong' }, t.kind === 'pending' ? 'Labelling…' : `Not sure${t.kind_reason ? ': ' + t.kind_reason.slice(0, 90) : ''}`));
     } else if (t.kind === 'sales') {
-      right.push(h('span', { class: 'muted' }, 'Sales'));
+      if (t.status !== 'open') right.push(h('span', { class: 'muted' }, 'Sales'));
+      else if (t.done_at) right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Complete${t.done_by && t.done_by !== 'system' ? ' by ' + t.done_by : ''}`),
+        h('span', { class: 'muted' }, ago(t.done_at)), h('button', { class: 'btn sm', onclick: () => reopen(t) }, 'Reopen'));
+      else right.push(h('span', { class: 'unsolved' }, 'Not complete'), h('span', { class: 'v-hint ok' }, h('kbd', null, 'V'), ' marks it complete · no message is sent'));
     } else if (t.kind === 'support') {
       const g = d.gate || {};
       if (t.status !== 'open') {
@@ -1134,7 +1173,7 @@
     const name = displayName(a.data.conv);
     const btn = $('#completeBtn');
     planning = true;
-    if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), 'Solving…'); }
+    if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), todo(a.data.thread) && a.data.thread.kind !== 'support' ? 'Completing…' : 'Solving…'); }
     let plan;
     try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderLabelbar(null, true); }
     if (plan.action === 'blocked') {
@@ -1148,6 +1187,8 @@
       sendCloserPending(plan, contact, name, after);
     } else if (plan.action === 'resolve_silent' && plan.solved === false) {
       unsolvedSilentWarning(plan, contact, name);
+    } else if (plan.action === 'resolve_silent' && plan.kind === 'sales') {
+      silentPending(contact, name, plan.thread_id, 'no message is sent', { sales: true });
     } else if (plan.action === 'resolve_silent') {
       const quiet = plan.why === 'customer_quiet';
       if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat'); return; }
@@ -1166,8 +1207,8 @@
   function unsolvedWarning(plan, contact, name, after) {
     const c = plan.closer;
     const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast('Nothing sent, the chat stays unsolved'); } }, 'Cancel', h('kbd', null, 'Esc'));
-    const silent = h('button', { class: 'btn', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (issue not solved)'); } }, 'Solve without a message', h('kbd', null, 'N'));
-    const send = h('button', { class: 'btn danger', onclick: () => { closeModal(); sendCloserPending(plan, contact, name, after); } }, 'Send anyway', h('kbd', null, 'Y'));
+    const silent = h('button', { class: 'btn', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (issue not solved)', { warned: plan.unsolved_reason || 'yes' }); } }, 'Solve without a message', h('kbd', null, 'N'));
+    const send = h('button', { class: 'btn danger', onclick: () => { closeModal(); sendCloserPending(plan, contact, name, after, plan.unsolved_reason || 'yes'); } }, 'Send anyway', h('kbd', null, 'Y'));
     const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
       h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, 'Issue doesn’t seem solved')),
       h('div', { class: 'sheet-body' },
@@ -1187,12 +1228,13 @@
   }
   // Same warning when nothing would be sent: support is only solved when the issue sounds solved.
   function unsolvedSilentWarning(plan, contact, name) {
-    const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast('Not solved, the chat stays open'); } }, 'Cancel', h('kbd', null, 'Esc'));
-    const anyway = h('button', { class: 'btn danger', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (marked solved anyway)'); } }, 'Solve anyway', h('kbd', null, 'Y'));
+    const sales = plan.kind === 'sales';
+    const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast(sales ? 'Not complete, the chat stays in Unresolved' : 'Not solved, the chat stays open'); } }, 'Cancel', h('kbd', null, 'Esc'));
+    const anyway = h('button', { class: 'btn danger', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, sales ? 'marked complete anyway' : 'no message (marked solved anyway)', { sales, warned: plan.unsolved_reason || 'yes' }); } }, sales ? 'Complete anyway' : 'Solve anyway', h('kbd', null, 'Y'));
     const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
-      h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, 'Issue doesn’t seem solved')),
+      h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, sales ? 'The customer still seems to be waiting' : 'Issue doesn’t seem solved')),
       h('div', { class: 'sheet-body' },
-        h('p', { class: 'uw-q' }, `Are you sure you want to mark ${name} as solved?`),
+        h('p', { class: 'uw-q' }, `Are you sure you want to mark ${name} as ${sales ? 'complete' : 'solved'}?`),
         plan.unsolved_reason ? h('p', { class: 'uw-why' }, h('b', null, 'AI: '), plan.unsolved_reason) : null,
         h('p', { class: 'hint', style: 'margin-top:8px' }, 'No message would be sent to the customer.')),
       h('div', { class: 'sheet-foot' }, cancel, anyway));
@@ -1204,7 +1246,7 @@
     openModal(box, true);
     setTimeout(() => cancel.focus(), 40);
   }
-  function sendCloserPending(plan, contact, name, after) {
+  function sendCloserPending(plan, contact, name, after, warned) {
     {
       const c = plan.closer;
       const request_id = uuid();
@@ -1215,7 +1257,7 @@
         sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
         run: async () => {
           try {
-            await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id });
+            await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, ...(warned ? { warned } : {}) });
             await labelComplete(contact);
             toast(`${name}: solved · “${c.title}” sent`, 'ok');
           } catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
@@ -1224,13 +1266,17 @@
       });
     }
   }
-  function silentPending(contact, name, threadId, why) {
+  function silentPending(contact, name, threadId, why, opt = {}) {
     goNext(contact);
     startPending({
-      contact, ms: 3000, text: [h('b', null, `Solving ${name}`), ` · ${why}`],
+      contact, ms: opt.sales ? 2000 : 3000, text: [h('b', null, `${opt.sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`],
       run: async () => {
-        try { await api.call('resolve_silent', { thread_id: threadId }); await labelComplete(contact); toast(`${name}: solved (no message)`, 'ok'); }
-        catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
+        try {
+          await api.call('resolve_silent', { thread_id: threadId, ...(opt.warned ? { warned: opt.warned } : {}) });
+          await labelComplete(contact);
+          toast(opt.sales ? `${name}: complete` : `${name}: solved (no message)`, 'ok');
+        }
+        catch (e) { toast(`${name} not ${opt.sales ? 'completed' : 'solved'}: ${e.message}`, 'error'); }
         if (S.active && S.active.contact === contact) pollChat();
         refreshList();
       },
@@ -1262,7 +1308,7 @@
       ['/', 'F', 'Search', 'Ctrl+K'],
     ]],
     ['Act on the open chat', [
-      ['V', null, 'Solve. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it is solved without a message. Other chats: mark done', 'Ctrl+Shift+E'],
+      ['V', null, 'Solve / complete. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it is solved without a message. Sales: marks the chat complete (no message); it stays in Unresolved until you do, and comes back when the customer writes again', 'Ctrl+Shift+E'],
       ['R', 'Enter', 'Reply: jump into the message box', 'Ctrl+M'],
       ['U', null, 'Mark unread and leave', 'Ctrl+Shift+U'],
       ['L', null, 'Labels: add or remove (then 1…9)', 'Ctrl+Shift+L'],
@@ -1304,7 +1350,7 @@
     const t = S.active && S.active.data ? S.active.data.thread : null;
     const bar = $('#labelbar');
     if (force && bar) bar._k = null;
-    if (same(bar, JSON.stringify([c.labels, t && t.kind, t && t.status, t && t.id, S.metaVer]))) return;
+    if (same(bar, JSON.stringify([c.labels, t && t.kind, t && t.status, t && t.id, t && t.done_at, S.metaVer]))) return;
     const on = S.labels.filter((l) => (c.labels || []).includes(l.id));
     bar.replaceChildren(
       completeButton(),
@@ -1594,8 +1640,10 @@
       case 'stage':
         return h('div', { class: 'ev sys-ev' }, h('b', null, who), dd.to ? ` set the stage to ${STAGES[dd.to] || dd.to}` : ' put the stage back to automatic', ' ', t);
       case 'resolved':
+        if (dd.kind === 'sales') return h('div', { class: 'ev ok-ev' }, icon('check', 'xs'), ' Marked complete by ', h('b', null, who), ' ', t);
         return h('div', { class: 'ev ok-ev' }, icon('check', 'xs'), ' Resolved by ', h('b', null, who), dd.title ? ` · ${dd.title}` : '', ' ', t);
       case 'reopened':
+        if (dd.kind === 'sales') return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ The customer wrote again: not complete any more' : ['↺ Put back in Unresolved by ', h('b', null, who)], ' ', t);
         return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ Reopened: the customer wrote again' : ['↺ Reopened by ', h('b', null, who)], ' ', t);
       default:
         return null;
