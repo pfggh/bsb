@@ -410,7 +410,7 @@
       h('div', { class: 'sheet-body' },
         h('p', { class: 'hint' }, `Signed in with your personal access token${S.me ? ` (${S.me.role})` : ''}. Everything you do is saved under your name.`),
         h('div', { class: 'menu-list' },
-          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openTracking(); } }, icon('chart', 'sm'), 'Team activity & AI scanner') : null,
+          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openTracking(); } }, icon('chart', 'sm'), 'Team, quality & AI check') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: openTeam }, icon('team', 'sm'), 'Team & access tokens') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openManage(); } }, icon('sliders', 'sm'), 'Labels & views') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openQuickManage(); } }, icon('zap', 'sm'), 'Quick replies') : null,
@@ -492,7 +492,7 @@
     if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin, S.adminFlags]))) return;
     $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))),
       isAdmin ? h('button', { class: 'nav-item', title: S.adminFlags ? `Team activity: ${S.adminFlags} chat${S.adminFlags > 1 ? 's' : ''} marked solved that the AI thinks are not (only admins see this)` : 'Who worked when, what they did, and the AI check of solved chats (only admins see this)',
-        onclick: () => { closeSide(); openTracking(S.adminFlags ? 'ai' : null); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team activity'), S.adminFlags ? h('span', { class: 'n hot' }, S.adminFlags > 99 ? '99+' : S.adminFlags) : null) : null);
+        onclick: () => { closeSide(); openTracking(S.adminFlags ? 'ai' : null); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team & quality'), S.adminFlags ? h('span', { class: 'n hot' }, S.adminFlags > 99 ? '99+' : S.adminFlags) : null) : null);
     // labels: BSB lists every custom label as a filter
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
@@ -677,7 +677,7 @@
     const unsolved = todo(c.sys);
     const late = unsolved && c.sys.kind === 'support' && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
     return JSON.stringify([unsolved, c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
-      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled]);
+      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled, c.fu_alert || '']);
   }
   function row(c) {
     const on = S.active && S.active.contact === c.contact;
@@ -689,7 +689,9 @@
           c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), rowLine(c.line)) : null,
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
         h('div', { class: 'row-mid' }, preview(c), rowDot(c)),
-        sb || c.scheduled || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
+        sb || c.scheduled || c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
+          c.fu_alert === 'says_paid' ? h('span', { class: 'fu-chip paid', title: 'The customer says they paid. Check the payment and activate.' }, icon('warn', 'xs'), 'Says paid')
+            : c.fu_alert === 'plan_chosen' ? h('span', { class: 'fu-chip', title: 'The customer chose a plan and is waiting for the payment details.' }, icon('check', 'xs'), 'Ready to pay') : null,
           c.scheduled ? h('span', { class: 'sched-chip', title: 'An automatic follow-up is scheduled for this chat' }, icon('clock', 'xs'), 'Message scheduled') : null,
           (c.labels || []).map((id) => labelChip(id))) : null));
   }
@@ -809,6 +811,7 @@
     if (S.active && S.active.contact === contact) { showChatPane(); return; }
     if (!voiceMayLeave()) return;
     S.detailsNarrow = false;
+    DeskApi.setChat(contact);
     const a = S.active = { contact, data: null, pending: [], customer: null, draft: (store('desk_drafts') || {})[contact] || '',
       nodes: new Map(), media: new Map(), sig: '', srvSig: null };
     history.replaceState(null, '', `#c=${contact}`);
@@ -846,6 +849,7 @@
   function closeChat() {
     if (!voiceMayLeave()) return;
     S.active = null;
+    DeskApi.setChat(null);
     history.replaceState(null, '', location.pathname + location.search);
     $('#app').classList.remove('chat-open');
     const chat = $('#chat');
@@ -1540,6 +1544,7 @@
       }
     }
     for (const f of d.scheduled || []) put(`f:${f.id}`, JSON.stringify([f.body, f.due_at]), () => scheduledLine(f));
+    if (d.fu_alert && d.fu_alert.kind) put('fu-alert', JSON.stringify([d.fu_alert.kind, d.fu_alert.at]), () => alertLine(d.fu_alert));
     // forget nodes and media of lines that are gone
     for (const k of a.nodes.keys()) if (!used.has(k)) a.nodes.delete(k);
     for (const k of a.media.keys()) if (!used.has(k)) a.media.delete(k);
@@ -1551,6 +1556,14 @@
     if (!placed) reconcile(box, want);
     if (stick) box.scrollTop = box.scrollHeight;
     else if (a.keepScroll) { box.scrollTop = box.scrollHeight - prevH + prevTop; a.keepScroll = false; }
+  }
+  // The follow-up engine noticed something staff must act on (it never answers these itself).
+  function alertLine(x) {
+    const paid = x.kind === 'says_paid';
+    return h('div', { class: `fu-alert${paid ? ' paid' : ''}`, role: 'status' }, icon(paid ? 'warn' : 'check', 'sm'),
+      h('div', null, h('b', null, paid ? 'The customer says they paid' : 'The customer chose a plan'),
+        h('span', null, paid ? 'Check the payment and activate. This note goes away once the purchase is recorded or the chat is marked complete.'
+          : 'Send the payment details. This note goes away when someone replies.')));
   }
   // An automatic follow-up booked for this chat: faint, inside the chat only.
   function scheduledLine(f) {
