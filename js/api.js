@@ -42,10 +42,12 @@
   for (const ev of ['pointermove', 'scroll']) {
     window.addEventListener(ev, () => { const n = Date.now(); if (n - moveAt > 1500) { moveAt = n; noteInput(); } }, { passive: true, capture: true });
   }
+  let chatOnScreen = null;            // for the admin's live board: which chat this desk is showing
+  function setChat(c) { chatOnScreen = c || null; }
   function activity() {
     const now = serverMinute();
     const m = [...pendingMinutes].filter((x) => x >= now - 10 && x <= now);
-    return { v: !document.hidden, m };
+    return { v: !document.hidden, m, c: document.hidden ? null : chatOnScreen };
   }
 
   class ApiError extends Error {
@@ -94,5 +96,5 @@
     return null;
   }
 
-  window.DeskApi = { call, signIn, signOut, hasToken, ApiError, mediaSource };
+  window.DeskApi = { call, signIn, signOut, hasToken, ApiError, mediaSource, setChat };
 })();
