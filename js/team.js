@@ -934,26 +934,27 @@
     const keepScroll = oldBody && oldBody.dataset.tab === st.tab ? oldBody.scrollTop : 0;
     const oldList = root.querySelector('.tm-rv-list'), oldConv = root.querySelector('.tm-rv-scroll');
     const listTop = oldList ? oldList.scrollTop : 0;
+    const convKey = oldConv ? oldConv.dataset.key : '', convTop = oldConv ? oldConv.scrollTop : 0;
     if (oldConv && st.threadTop !== null) st.threadTop = oldConv.scrollTop;
     const from = h('input', { type: 'date', value: st.from, max: today(), 'aria-label': 'From' });
     const to = h('input', { type: 'date', value: st.to, max: today(), 'aria-label': 'To' });
     const custom = () => { if (from.value && to.value && from.value <= to.value) { st.preset = ''; st.from = from.value; st.to = to.value; st.logMore = false; load(); } };
     from.addEventListener('change', custom); to.addEventListener('change', custom);
-    const openFindings = d ? new Set((d.checks || []).filter((c) => isFinding(c) && !c.review).map((c) => c.contact)).size : 0;
     const head = h('header', { class: 'tm-head' },
       h('div', { class: 'tm-head-1' },
         h('button', { class: 'btn sm', onclick: close }, U.icon('back', 'sm'), 'Back to chats', h('kbd', null, 'Esc')),
         h('h2', null, 'Team & quality'),
-        st.tab === 'live' ? h('span', { class: 'tm-livedot' }, h('i'), 'Live · updates every 10 seconds') : h('div', { class: 'tm-range', role: 'group', 'aria-label': 'Period' },
+        st.tab === 'live' ? h('span', { class: 'tm-livedot' }, h('i'), 'Live · updates every 10 seconds') : st.tab === 'ai' ? null : h('div', { class: 'tm-range', role: 'group', 'aria-label': 'Period' },
           PRESETS.map(([k, l]) => h('button', { class: `tm-tab${st.preset === k ? ' on' : ''}`, onclick: () => { setPreset(k); st.logMore = false; load(); } }, l)),
           h('span', { class: 'tm-dates' }, from, h('span', { class: 'muted' }, 'to'), to)),
         h('button', { class: 'icon-btn', title: 'Refresh', 'aria-label': 'Refresh', onclick: () => { if (st.tab === 'live') loadLive(); else { load(); if (st.tab === 'quality') loadQuality(false, true); } } }, U.icon('refresh'))),
-      h('nav', { class: 'tm-tabs', role: 'tablist' }, [['live', 'clock', 'Live'], ['quality', 'check', 'Quality'], ['people', 'team', 'People'], ['ai', 'warn', 'AI check'], ['compare', 'chart', 'Compare']].map(([k, ic, l]) =>
+      h('nav', { class: 'tm-tabs', role: 'tablist' }, [['live', 'clock', 'Live'], ['quality', 'check', 'Quality'], ['people', 'team', 'People'], ['ai', 'warn', 'Radar'], ['compare', 'chart', 'Compare']].map(([k, ic, l]) =>
         h('button', { class: `tm-maintab${st.tab === k ? ' on' : ''}`, role: 'tab', 'aria-selected': String(st.tab === k), onclick: () => { st.tab = k; if (k === 'live') loadLive(); draw(); } },
-          U.icon(ic, 'sm'), l, k === 'ai' && openFindings ? h('span', { class: 'tm-badge' }, num(openFindings)) : null))));
+          U.icon(ic, 'sm'), l, k === 'ai' && window.DeskRadar.count() ? h('span', { class: 'tm-badge' }, num(window.DeskRadar.count())) : null))));
 
     let body;
     if (st.tab === 'live') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' }, liveTab().flat(Infinity)));
+    else if (st.tab === 'ai') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' }, window.DeskRadar.view()));
     else if (!d) body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-empty' }, st.error ? [h('b', null, 'Could not load the report.'), h('div', null, st.error), h('button', { class: 'btn', onclick: () => load() }, 'Try again')] : 'Loading…'));
     else {
       const single = d.from === d.to;
@@ -974,9 +975,10 @@
     if (list) {
       list.scrollTop = listTop;
       const on = list.querySelector('.tm-rv-row.on');
-      if (on && st.selScroll) { on.scrollIntoView({ block: 'nearest' }); st.selScroll = false; }
+      if (on && (st.selScroll || st.tab === 'ai')) { on.scrollIntoView({ block: 'nearest' }); st.selScroll = false; }
     }
-    if (conv) {
+    if (conv && st.tab === 'ai') conv.scrollTop = conv.dataset.key === convKey ? convTop : conv.scrollHeight;   // a new chat opens on its latest messages
+    else if (conv) {
       if (st.threadTop !== null) conv.scrollTop = st.threadTop;
       else if (conv._conv && conv._conv._mark) { conv.scrollTop = 0; st.threadTop = 0; }   // the AI's finding first; the mark is one scroll away
     }
@@ -987,7 +989,7 @@
     // the desk's own shortcuts (J, K, V, Tab, arrows...) stay off while this screen is open
     e.stopPropagation();
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
-    if (st.tab === 'ai' && st.data && reviewKey(e)) e.preventDefault();
+    if (st.tab === 'ai' && window.DeskRadar.key(e)) e.preventDefault();
   }
   function open(helpers, opts = {}) {
     U = helpers;
@@ -998,6 +1000,7 @@
     document.body.append(root);
     bindTip(root);
     document.addEventListener('keydown', onKey, true);
+    window.DeskRadar.start({ U, draw, close, root: () => root });
     draw();
     load();
     loadLive();
@@ -1006,6 +1009,7 @@
   function close() {
     if (!root) return;
     clearTimeout(timer); clearInterval(liveTimer);
+    window.DeskRadar.stop();
     flushAnswer();
     st.stopScan = true;
     document.removeEventListener('keydown', onKey, true);
