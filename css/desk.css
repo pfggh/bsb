@@ -1266,3 +1266,22 @@ button.tm-flag:hover { filter: brightness(.96); }
   .rd-cols { grid-template-columns: minmax(0, 1fr); grid-template-rows: 34vh minmax(0, 1fr); }
   .rd-note { display: none; }
 }
+
+/* ---------- the red stop on V (certain the customer was left without help) */
+.sheet.stop-warn { width: min(680px, calc(100vw - 24px)); max-width: 680px; padding: 0; overflow: hidden; border: 3px solid var(--danger); box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 25%, transparent), var(--shadow-lg, 0 20px 60px rgba(0,0,0,.35)); }
+.sw-head { display: flex; align-items: center; gap: 18px; padding: 26px 28px; background: var(--danger); color: #fff; }
+.sw-head h3 { margin: 0; font-size: 26px; line-height: 1.2; font-weight: 800; color: #fff; text-wrap: balance; }
+.sw-icon { width: 64px; height: 64px; border-radius: 50%; background: #fff; color: var(--danger); display: grid; place-items: center; font-size: 42px; font-weight: 900; flex: none; }
+.sw-body { padding: 22px 28px 6px; display: flex; flex-direction: column; gap: 12px; }
+.sw-kind { margin: 0; font-size: 17px; font-weight: 700; color: var(--danger); }
+.sw-quote { margin: 0; padding: 12px 14px; border-left: 4px solid var(--danger); border-radius: 0 10px 10px 0; background: color-mix(in srgb, var(--danger) 8%, var(--panel)); font-size: 17px; overflow-wrap: anywhere; }
+.sw-quote small { display: block; margin-bottom: 4px; font-size: 12.5px; color: var(--text-2); }
+.sw-why { margin: 0; color: var(--text-2); }
+.sw-ask { margin: 6px 0 0; font-size: 20px; font-weight: 800; }
+.sw-foot { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 18px 28px 26px; }
+.sw-back { font-size: 16px; padding: 12px 18px; height: auto; }
+.sw-hold { position: relative; overflow: hidden; height: auto; padding: 12px 18px; font-size: 14px; color: var(--danger); border: 2px solid var(--danger); background: transparent; user-select: none; -webkit-user-select: none; touch-action: none; }
+.sw-hold span { position: relative; }
+.sw-fill { position: absolute; inset: 0; width: 0; background: color-mix(in srgb, var(--danger) 30%, transparent); }
+.sw-hold.holding .sw-fill { width: 100%; transition: width 3s linear; }
+@media (max-width: 560px) { .sw-head { padding: 18px; gap: 12px; } .sw-head h3 { font-size: 20px; } .sw-icon { width: 46px; height: 46px; font-size: 30px; } .sw-body, .sw-foot { padding-left: 18px; padding-right: 18px; } }

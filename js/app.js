@@ -1044,8 +1044,7 @@
     } else if (t.kind === 'ignore') {
       right.push(h('span', { class: 'muted' }, t.kind_reason || 'Nothing to do.'));
     }
-    bar.replaceChildren(h('div', { class: 'sys-left' }, left), h('div', { class: 'sys-right' }, right),
-      holdBanner(t));
+    bar.replaceChildren(...[h('div', { class: 'sys-left' }, left), h('div', { class: 'sys-right' }, right), holdBanner(t)].filter(Boolean));
   }
   // An admin looked at this chat after the AI check and marked it unsolved: say why and what to do.
   function holdBanner(t) {
@@ -1204,12 +1203,10 @@
       return;
     }
     const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
-    if (plan.action === 'resolve' && plan.solved === false) {
-      unsolvedWarning(plan, contact, name, after);
+    if (plan.stop) {
+      stopWarning(plan, contact, name);
     } else if (plan.action === 'resolve') {
       sendCloserPending(plan, contact, name, after);
-    } else if (plan.action === 'resolve_silent' && plan.solved === false) {
-      unsolvedSilentWarning(plan, contact, name);
     } else if (plan.action === 'resolve_silent' && plan.kind === 'sales') {
       silentPending(contact, name, plan.thread_id, 'no message is sent', { sales: true, expect: plan.expect_in });
     } else if (plan.action === 'resolve_silent') {
@@ -1226,48 +1223,46 @@
       });
     }
   }
-  // The AI thinks the issue is still open: stop and ask before any closing message goes out.
-  function unsolvedWarning(plan, contact, name, after) {
-    const c = plan.closer;
-    const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast('Nothing sent, the chat stays unsolved'); } }, 'Cancel', h('kbd', null, 'Esc'));
-    const silent = h('button', { class: 'btn', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, 'no message (issue not solved)', { warned: plan.unsolved_reason || 'yes', expect: plan.expect_in }); } }, 'Solve without a message', h('kbd', null, 'N'));
-    const send = h('button', { class: 'btn danger', onclick: () => { closeModal(); sendCloserPending(plan, contact, name, after, plan.unsolved_reason || 'yes'); } }, 'Send anyway', h('kbd', null, 'Y'));
-    const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
-      h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, 'Issue doesn’t seem solved')),
-      h('div', { class: 'sheet-body' },
-        h('p', { class: 'uw-q' }, `Are you sure you want to send ${name} a closing message?`),
-        plan.unsolved_reason ? h('p', { class: 'uw-why' }, h('b', null, 'AI: '), plan.unsolved_reason) : null,
-        h('div', { class: 'uw-msg' }, h('small', null, `Would send “${c.title}”`), c.body)),
-      h('div', { class: 'sheet-foot' }, cancel, silent, send));
-    const keys = (e) => {
-      if (!document.body.contains(box)) { document.removeEventListener('keydown', keys, true); return; }
-      const k = e.key.toLowerCase();
-      if (k === 'y') { e.preventDefault(); e.stopPropagation(); send.click(); }
-      else if (k === 'n') { e.preventDefault(); e.stopPropagation(); silent.click(); }
-    };
-    document.addEventListener('keydown', keys, true);
-    openModal(box, true);
-    setTimeout(() => cancel.focus(), 40);
-  }
-  // Same warning when nothing would be sent: support is only solved when the issue sounds solved.
-  function unsolvedSilentWarning(plan, contact, name) {
+  // The red stop. Shown ONLY when it is certain the customer was left without help: they wrote last, nobody
+  // answered, and their own words say it (checked by two AI models on the server, with the exact quote).
+  // Nothing is sent to the customer from here. Validating anyway needs a 3-second hold and is logged.
+  function stopWarning(plan, contact, name) {
     const sales = plan.kind === 'sales';
-    const cancel = h('button', { class: 'btn', onclick: () => { closeModal(); toast(sales ? 'Not complete, the chat stays in Unresolved' : 'Not solved, the chat stays open'); } }, 'Cancel', h('kbd', null, 'Esc'));
-    const anyway = h('button', { class: 'btn danger', onclick: () => { closeModal(); silentPending(contact, name, plan.thread_id, sales ? 'marked complete anyway' : 'no message (marked solved anyway)', { sales, warned: plan.unsolved_reason || 'yes', expect: plan.expect_in }); } }, sales ? 'Complete anyway' : 'Solve anyway', h('kbd', null, 'Y'));
-    const box = h('div', { class: 'sheet narrow unsolved-warn', role: 'alertdialog', 'aria-labelledby': 'uwTitle' },
-      h('div', { class: 'uw-head' }, h('div', { class: 'uw-icon' }, '!'), h('h3', { id: 'uwTitle' }, sales ? 'The customer still seems to be waiting' : 'Issue doesn’t seem solved')),
-      h('div', { class: 'sheet-body' },
-        h('p', { class: 'uw-q' }, `Are you sure you want to mark ${name} as ${sales ? 'complete' : 'solved'}?`),
-        plan.unsolved_reason ? h('p', { class: 'uw-why' }, h('b', null, 'AI: '), plan.unsolved_reason) : null,
-        h('p', { class: 'hint', style: 'margin-top:8px' }, 'No message would be sent to the customer.')),
-      h('div', { class: 'sheet-foot' }, cancel, anyway));
-    const keys = (e) => {
-      if (!document.body.contains(box)) { document.removeEventListener('keydown', keys, true); return; }
-      if (e.key.toLowerCase() === 'y') { e.preventDefault(); e.stopPropagation(); anyway.click(); }
+    const x = plan.stop || {};
+    const KIND = { still_broken: 'The customer says it is still not working', unanswered_question: 'The customer asked something and nobody answered', waiting_delivery: 'The customer is waiting for something they paid for or were promised' };
+    const HOLD_MS = 3000;
+    let timer = null;
+    const back = h('button', { class: 'btn primary sw-back', onclick: () => { closeModal(); toast(`${name} stays in Unresolved`); } }, 'Go back and help the customer', h('kbd', null, 'Esc'));
+    const fill = h('i', { class: 'sw-fill' });
+    const hold = h('button', { class: 'btn sw-hold', type: 'button', 'aria-label': 'Hold 3 seconds to approve' }, fill, h('span', null, 'Hold 3 seconds to approve'));
+    const stop = () => { clearTimeout(timer); timer = null; hold.classList.remove('holding'); };
+    const start = () => {
+      if (timer) return;
+      hold.classList.add('holding');
+      timer = setTimeout(() => {
+        timer = null;
+        closeModal();
+        silentPending(contact, name, plan.thread_id, 'validated despite the warning, no message sent', { sales, warned: x.reason || x.quote || 'yes', expect: plan.expect_in });
+      }, HOLD_MS);
     };
-    document.addEventListener('keydown', keys, true);
+    hold.addEventListener('pointerdown', (e) => { e.preventDefault(); hold.focus(); start(); });
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel', 'blur']) hold.addEventListener(ev, stop);
+    hold.addEventListener('keydown', (e) => { if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); start(); } else if (e.key === ' ' || e.key === 'Enter') e.preventDefault(); });
+    hold.addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); stop(); } });
+    hold.addEventListener('click', (e) => e.preventDefault());
+    const box = h('div', { class: 'sheet stop-warn', role: 'alertdialog', 'aria-labelledby': 'swTitle', 'aria-describedby': 'swAsk' },
+      h('div', { class: 'sw-head' }, h('div', { class: 'sw-icon', 'aria-hidden': 'true' }, '!'),
+        h('h3', { id: 'swTitle' }, 'Validating a chat without helping the customer is not allowed.')),
+      h('div', { class: 'sw-body' },
+        h('p', { class: 'sw-kind' }, KIND[x.kind] || 'The customer was left without an answer'),
+        x.quote ? h('blockquote', { class: 'sw-quote', dir: 'auto' }, h('small', null, `${name} wrote, and nobody replied:`), `“${x.quote}”`) : null,
+        x.reason ? h('p', { class: 'sw-why' }, x.reason) : null,
+        h('p', { class: 'sw-ask', id: 'swAsk' }, 'Are you sure you want to validate?')),
+      h('div', { class: 'sw-foot' }, back, hold));
+    const guard = new MutationObserver(() => { if (!document.body.contains(box)) { stop(); guard.disconnect(); } });
+    guard.observe(document.body, { childList: true, subtree: true });
     openModal(box, true);
-    setTimeout(() => cancel.focus(), 40);
+    setTimeout(() => back.focus(), 40);
   }
   function sendCloserPending(plan, contact, name, after, warned) {
     {
