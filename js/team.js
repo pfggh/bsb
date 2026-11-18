@@ -352,6 +352,7 @@
     if (c.reopened_at) out.push(['warn', `Customer wrote again ${g.reopened_after_s != null && g.reopened_after_s < 5400 ? (g.reopened_after_s < 90 ? 'within a minute' : `${Math.round(g.reopened_after_s / 60)} min later`) : fDateTime.format(new Date(c.reopened_at))}`]);
     if (g.unanswered) out.push(['warn', 'Customer’s last message got no reply']);
     if (g.staff_replies === 0) out.push(['warn', 'Nobody replied in this chat']);
+    if (g.after_admin) out.push(['warn', 'Marked finished again after you marked it unsolved']);
     if (g.warned) out.push(['warn', 'The desk warned “not solved” — solved anyway']);
     if (g.bulk) out.push(['', `One of ${g.bulk} chats solved within a minute`]);
     if (g.earlier_solves) out.push(['', `Marked finished ${g.earlier_solves}× before this week`]);
@@ -379,9 +380,26 @@
       dismissed: checks.filter((c) => c.review === 'dismissed'),
       all: checks,
     };
-    const order = (a, b) => (st.filter === 'open' ? (b.status === 'flagged') - (a.status === 'flagged') : 0) || Date.parse(b.solved_at) - Date.parse(a.solved_at);
-    const counts = Object.fromEntries(Object.entries(sets).map(([k, v]) => [k, v.filter(mine).length]));
-    return { rows: (sets[st.filter] || sets.open).filter(mine).sort(order), counts, checks };
+    // One case per chat: a chat that was marked finished several times is one row (its latest mark),
+    // and the answer covers all of them. "Every marked chat" stays a plain log.
+    const cases = (list) => {
+      const by = new Map();
+      for (const c of list) { const g = by.get(c.contact); if (g) g.push(c); else by.set(c.contact, [c]); }
+      return [...by.values()].map((g) => {
+        g.sort((a, b) => Date.parse(b.solved_at) - Date.parse(a.solved_at));
+        const head = g.find(mine) || g[0];
+        head._group = g;
+        return head;
+      }).filter((c) => c._group.some(mine));
+    };
+    const grouped = { open: cases(sets.open), confirmed: cases(sets.confirmed), dismissed: cases(sets.dismissed), all: sets.all.filter(mine) };
+    for (const c of grouped.all) c._group = [c];
+    const sure = (c) => c._group.some((x) => x.status === 'flagged');
+    const order = (a, b) => (st.filter === 'open' ? sure(b) - sure(a) : 0) || Date.parse(b.solved_at) - Date.parse(a.solved_at);
+    const counts = Object.fromEntries(Object.entries(grouped).map(([k, v]) => [k, v.length]));
+    const perPerson = new Map();
+    for (const c of cases(sets.open)) for (const id of new Set(c._group.map((x) => x.staff_id))) perPerson.set(id, (perPerson.get(id) || 0) + 1);
+    return { rows: [...(grouped[st.filter] || grouped.open)].sort(order), counts, checks, perPerson };
   }
   let rvRows = [];             // the list as drawn (the keyboard moves through it)
   const details = new Map();   // audit id -> {key, data | error | loading}
@@ -415,13 +433,13 @@
     clearTimeout(p.timer); p.bar.remove();
     (p.value === 'unsolved' ? U.api.call('audit_unsolve', { id: p.c.id }) : U.api.call('audit_review', { id: p.c.id, review: p.value }))
       .then((r) => { if (p.value === 'unsolved' && r && r.how === 'already') U.toast(`${custName(p.c)} is already back in Unresolved`); load(true); },
-        (e) => { p.c.review = p.was; draw(); U.toast(`Not saved: ${e.message}`, 'error'); });
+        (e) => { p.group.forEach((x, k) => { x.review = p.was[k]; }); draw(); U.toast(`Not saved: ${e.message}`, 'error'); });
   }
   function undoAnswer() {
     if (!pendingAns) return false;
     const p = pendingAns; pendingAns = null;
     clearTimeout(p.timer); p.bar.remove();
-    p.c.review = p.was;
+    p.group.forEach((x, k) => { x.review = p.was[k]; });
     st.sel = p.c.id; st.selScroll = true; st.threadTop = null;
     draw();
     return true;
@@ -429,10 +447,11 @@
   function answer(c, value) {            // value: 'dismissed' (V) | 'unsolved' (C) | null (change my answer)
     if (!c) return;
     flushAnswer();
-    const was = c.review;
+    const group = c._group && c._group.length ? c._group : [c];
+    const was = group.map((x) => x.review);
     const i = rvRows.findIndex((x) => x.id === c.id);
     const next = rvRows[i + 1] || rvRows[i - 1] || null;
-    c.review = value === 'unsolved' ? 'confirmed' : value;
+    for (const x of group) x.review = value === 'unsolved' ? 'confirmed' : value;
     const text = value === 'unsolved' ? [h('b', null, custName(c)), ' marked unsolved · it goes back to Unresolved']
       : value === 'dismissed' ? [h('b', null, custName(c)), ' was fine'] : [h('b', null, custName(c)), ' · answer removed'];
     const bar = h('div', { class: 'undo tm-undo', role: 'status' },
@@ -440,7 +459,7 @@
         h('button', { class: 'btn sm', onclick: undoAnswer }, 'Undo', h('kbd', null, 'Z'))),
       h('div', { class: 'undo-progress' }, h('i', { style: 'animation-duration:5000ms' })));
     root.append(bar);
-    pendingAns = { c, value, was, bar, timer: setTimeout(flushAnswer, 5000) };
+    pendingAns = { c, group, value, was, bar, timer: setTimeout(flushAnswer, 5000) };
     // the answered chat leaves the "to review" list: go on with the next one
     if (st.filter === 'open' && next) { st.sel = next.id; st.selScroll = true; st.threadTop = null; }
     draw();
@@ -469,6 +488,7 @@
       h('div', { class: 'tm-rv-main' },
         h('div', { class: 'tm-rv-top' }, h('b', null, custName(c)), h('span', { class: 'muted' }, fDay.format(new Date(c.solved_at)) === today() ? fTime.format(new Date(c.solved_at)) : fDateTime.format(new Date(c.solved_at)))),
         h('div', { class: 'tm-rv-sub' }, h('span', { class: 'tm-rv-who' }, c.actor), ` · ${c.kind === 'sales' ? 'sales' : 'support'}`,
+          c._group && c._group.length > 1 ? h('span', { class: 'tm-chip', title: 'This chat was marked finished several times; one answer covers them all' }, `marked ${c._group.length}×`) : null,
           c.review ? h('span', { class: `tm-chip ${c.review === 'confirmed' ? 'bad' : 'quiet'}` }, c.review === 'confirmed' ? 'unsolved' : 'fine') : null),
         h('div', { class: 'tm-rv-why' }, isFinding(c) ? (c.reason || CATEGORY[c.category] || '') : c.status === 'ok' ? (c.summary || c.reason || label) : label)));
   }
@@ -532,7 +552,11 @@
     let conv;
     if (entry.data) { conv = thread(entry.data); }
     else conv = h('div', { class: 'tm-thread' }, h('div', { class: 'tm-markline quiet' }, h('span', null, entry.error ? `Could not load the conversation: ${entry.error}` : 'Loading the conversation…')));
-    const scroller = h('div', { class: 'tm-rv-scroll' }, verdict, conv);
+    const grp = c._group && c._group.length > 1 ? c._group : null;
+    const again = grp ? h('p', { class: 'tm-again' }, U.icon('refresh', 'xs'), h('span', null, h('b', null, `This chat was marked finished ${grp.length} times`), ': ',
+      [...grp].reverse().map((x) => `${x.actor} ${fDay.format(new Date(x.solved_at)) === today() ? fTime.format(new Date(x.solved_at)) : fDateTime.format(new Date(x.solved_at))}`).join(' · '),
+      '. You are looking at the latest one; your answer covers all of them.')) : null;
+    const scroller = h('div', { class: 'tm-rv-scroll' }, again, verdict, conv);
     scroller._conv = conv;
     const i = rvRows.findIndex((x) => x.id === c.id);
     return h('div', { class: 'tm-rv-detail' },
@@ -552,7 +576,7 @@
   }
   function aiTab(d, staff) {
     const sc = d.scanner || {};
-    const { rows, counts, checks } = reviewRows(d);
+    const { rows, counts, checks, perPerson } = reviewRows(d);
     rvRows = rows;
     if (!rows.some((c) => c.id === st.sel)) { st.sel = rows.length ? rows[0].id : null; st.threadTop = null; st.selScroll = false; }
     const cur = rows.find((c) => c.id === st.sel) || null;
@@ -574,7 +598,7 @@
           onclick: () => { st.filter = k; st.sel = null; draw(); } }, l, h('span', null, num(counts[k]))))),
         h('div', { class: 'tm-people' }, h('button', { class: `tm-tab${!st.person ? ' on' : ''}`, onclick: () => { st.person = 0; st.sel = null; draw(); } }, 'Everyone'),
           who.map((p) => { const t = p.totals, bad = t.flagged + t.doubt; return h('button', { class: `tm-tab${st.person === p.id ? ' on' : ''}`, dataset: { tip: `${p.name}\n${bad} of ${t.checked} checked chats had a problem (${pct(bad, t.checked)})\n${t.flagged} not solved · ${t.doubt} please check${t.pending ? `\n${t.pending} still waiting for the AI` : ''}` },
-            onclick: () => { st.person = st.person === p.id ? 0 : p.id; st.sel = null; draw(); } }, p.name, bad ? h('span', { class: 'bad' }, `${num(bad)} · ${pct(bad, t.checked)}`) : h('span', null, '0')); })),
+            onclick: () => { st.person = st.person === p.id ? 0 : p.id; st.sel = null; draw(); } }, p.name, perPerson.get(p.id) ? h('span', { class: 'bad' }, num(perPerson.get(p.id))) : h('span', null, '0')); })),
         scan),
       h('div', { class: 'tm-rv-cols' },
         h('ul', { class: 'tm-rv-list', 'aria-label': 'Chats to review' }, rows.length ? rows.slice(0, 400).map(listRow)
@@ -643,7 +667,7 @@
     const to = h('input', { type: 'date', value: st.to, max: today(), 'aria-label': 'To' });
     const custom = () => { if (from.value && to.value && from.value <= to.value) { st.preset = ''; st.from = from.value; st.to = to.value; st.logMore = false; load(); } };
     from.addEventListener('change', custom); to.addEventListener('change', custom);
-    const openFindings = d ? (d.checks || []).filter((c) => isFinding(c) && !c.review).length : 0;
+    const openFindings = d ? new Set((d.checks || []).filter((c) => isFinding(c) && !c.review).map((c) => c.contact)).size : 0;
     const head = h('header', { class: 'tm-head' },
       h('div', { class: 'tm-head-1' },
         h('button', { class: 'btn sm', onclick: close }, U.icon('back', 'sm'), 'Back to chats', h('kbd', null, 'Esc')),

@@ -306,6 +306,7 @@
     customer_waiting: "The customer is waiting for an answer: reply first.",
     window_closed: 'The reply window is closed, so no closing message can be sent.',
     customer_quiet: 'The customer has not written in the last 4h (1h at night): V resolves without a message.',
+    admin_unsolved: 'An admin marked this chat unsolved. Reply to the customer first.',
   };
   // Still to do: support until solved, sales (and not yet labelled chats) until marked complete.
   const isSalesLike = (t) => !!t && (t.kind === 'sales' || t.kind === 'pending' || t.kind === 'unsure');
@@ -676,7 +677,7 @@
     const unsolved = todo(c.sys);
     const late = unsolved && c.sys.kind === 'support' && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
     return JSON.stringify([unsolved, c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
-      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name]);
+      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled]);
   }
   function row(c) {
     const on = S.active && S.active.contact === c.contact;
@@ -688,7 +689,9 @@
           c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), rowLine(c.line)) : null,
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
         h('div', { class: 'row-mid' }, preview(c), rowDot(c)),
-        sb || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb, (c.labels || []).map((id) => labelChip(id))) : null));
+        sb || c.scheduled || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
+          c.scheduled ? h('span', { class: 'sched-chip', title: 'An automatic follow-up is scheduled for this chat' }, icon('clock', 'xs'), 'Message scheduled') : null,
+          (c.labels || []).map((id) => labelChip(id))) : null));
   }
   function rowLine(l) { return lineShort(l); }
   function shortLine(l) { const n = (S.channelNames || {})[l]; return n ? n.slice(0, 12) : /^\d{8,}$/.test(l) ? '…' + l.slice(-3) : l.replace(/^Channel /, ''); }
@@ -1037,7 +1040,18 @@
     } else if (t.kind === 'ignore') {
       right.push(h('span', { class: 'muted' }, t.kind_reason || 'Nothing to do.'));
     }
-    bar.replaceChildren(h('div', { class: 'sys-left' }, left), h('div', { class: 'sys-right' }, right));
+    bar.replaceChildren(h('div', { class: 'sys-left' }, left), h('div', { class: 'sys-right' }, right),
+      holdBanner(t));
+  }
+  // An admin looked at this chat after the AI check and marked it unsolved: say why and what to do.
+  function holdBanner(t) {
+    const x = t && t.hold;
+    if (!x) return null;
+    return h('div', { class: `holdbar${x.replied ? ' replied' : ''}`, role: 'alert' },
+      h('div', { class: 'holdbar-h' }, icon('warn', 'sm'), h('b', null, `${x.by || 'An admin'} marked this chat unsolved`), h('span', { class: 'muted' }, ago(x.at))),
+      x.reason ? h('div', null, x.reason) : null,
+      x.todo ? h('div', null, h('b', null, 'To do: '), x.todo) : null,
+      h('div', { class: 'holdbar-f' }, x.replied ? 'You replied since. Solve it once the customer is really sorted.' : 'It cannot be solved again until someone replies to the customer.'));
   }
   // What V will do on this support chat.
   function resolveHint(g) {
@@ -1181,7 +1195,8 @@
     let plan;
     try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderLabelbar(null, true); }
     if (plan.action === 'blocked') {
-      toast(`Can't solve ${name}: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')}`, 'error');
+      toast(plan.message ? `Not solved — ${plan.message}` : `Can't solve ${name}: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')}`, 'error');
+      if (plan.hold && S.active && S.active.contact === contact) pollChat();
       return;
     }
     const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
