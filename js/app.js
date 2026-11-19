@@ -1195,6 +1195,9 @@
     const btn = $('#completeBtn');
     planning = true;
     if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), todo(a.data.thread) && a.data.thread.kind !== 'support' ? 'Completing…' : 'Solving…'); }
+    // a reply still being sent must reach the server first, or the solve check would not see it
+    const inflight = a.pending.filter((x) => x.status === 'sending' && x.done).map((x) => x.done);
+    if (inflight.length) await Promise.all(inflight);
     let plan;
     try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderLabelbar(null, true); }
     if (plan.action === 'blocked') {
@@ -1895,7 +1898,9 @@
     renderMessages(true);
     deliver(p, S.active);
   }
-  async function deliver(p, a) {
+  // p.done: V waits for it, so a reply still on its way counts as answered (never resolves with an error)
+  function deliver(p, a) { p.done = deliverNow(p, a); return p.done; }
+  async function deliverNow(p, a) {
     try {
       if (p.media) await api.call('send_media', { contact: a.contact, request_id: p.request_id, ...p.media });
       else await api.call('send', { contact: a.contact, text: p.text, request_id: p.request_id });
