@@ -84,6 +84,8 @@
     refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
     warn: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>',
     chev: '<path d="m6 9 6 6 6-6"/>',
+    star: '<path d="m12 2.5 2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5-4.8-4.6 6.6-.9z"/>',
+    day: '<path d="M12 3v4M5.2 8.2l2 2M18.8 8.2l-2 2M2 18h20M6.5 18a5.5 5.5 0 0 1 11 0M9 22h6"/>',
   };
   function icon(name, cls = '') {
     const span = document.createElement('span');
@@ -238,6 +240,9 @@
     sortOld: store('desk_sort_old') === true,  // list order: oldest message first (the arrow in the list head)
     sounds: store('desk_sounds') !== false,    // sale bell chime
     listPainted: false, listHadRows: false, animRows: false,
+    here: new Map(),    // contact -> [{name, typing}]: colleagues who have that chat on screen right now
+    kudosSeen: null,    // id of the last thank-you this page knows about (null until the server said)
+    kudosToday: 0,      // my thank-yous today (the small number next to "My day")
   };
   const now = () => Date.now() + S.skew;
   const sys = () => S.counts.sys || {};
@@ -339,6 +344,121 @@
     return null;
   }
 
+  // ------------------------------------------------------------------ presence: "someone is already here"
+  // Every boot / inbox / chat answer lists who else has which chat on screen (`here`). It is only
+  // information: nothing is blocked. Rows and the chat head are patched in place, so a colleague
+  // opening a chat never rebuilds a row or moves the list.
+
+  const HERE_TTL = 30000;
+  let hereSig = '', hereAt = 0;
+  let serverNew = false;   // the server speaks this release (it sends `here`); older servers keep the new features silent
+  const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || '';
+  function setHere(list) {
+    hereAt = Date.now();
+    const map = new Map();
+    for (const x of list) {
+      if (!x || typeof x.contact !== 'string' || !x.contact || !firstName(x.name)) continue;
+      const cur = map.get(x.contact) || [];
+      if (!cur.some((y) => y.name === x.name)) cur.push({ name: String(x.name), typing: !!x.typing });
+      map.set(x.contact, cur);
+    }
+    for (const v of map.values()) v.sort((a, b) => (b.typing - a.typing) || a.name.localeCompare(b.name));
+    const sigv = JSON.stringify([...map].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+    if (sigv === hereSig) return;
+    hereSig = sigv;
+    S.here = map;
+    paintHere();
+  }
+  const joinNames = (a) => (a.length <= 1 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
+  // "Charbel is here" / "Charbel is replying…" / "Charbel and Joseph are here"
+  function hereText(who) {
+    const typing = who.filter((x) => x.typing).map((x) => firstName(x.name));
+    const rest = who.filter((x) => !x.typing).map((x) => firstName(x.name));
+    const part = (names, what) => `${joinNames(names)} ${names.length > 1 ? 'are' : 'is'} ${what}`;
+    return [typing.length ? part(typing, 'replying…') : '', rest.length ? part(rest, 'here') : ''].filter(Boolean).join(' · ');
+  }
+  function hereChip(contact) {
+    const who = S.here.get(contact);
+    if (!who || !who.length) return null;
+    const el = h('span', { class: 'row-here' });
+    fillHereChip(el, who);
+    return el;
+  }
+  function fillHereChip(el, who) {
+    const text = who.map((x) => firstName(x.name) + (x.typing ? ' ✎' : '')).join(', ');
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('typing', who.some((x) => x.typing));
+    el.title = `${hereText(who)} (this chat is open on their desk)`;
+  }
+  const hereRows = new Set();   // contacts whose row carries a chip
+  function paintHere() {
+    const touch = new Set([...hereRows, ...S.here.keys()]);
+    hereRows.clear();
+    for (const ct of touch) {
+      const who = S.here.get(ct);
+      if (who) hereRows.add(ct);
+      const el = rowEls.get(ct);
+      if (!el) continue;
+      const old = el.querySelector('.row-here');
+      if (!who) { if (old) old.remove(); continue; }
+      if (old) { fillHereChip(old, who); continue; }
+      const prev = el.querySelector('.row-prev');
+      if (prev) prev.after(hereChip(ct));
+    }
+    paintHereHead();
+  }
+  function paintHereHead() {
+    const el = document.getElementById('chatHere');
+    if (!el) return;
+    const who = S.active ? S.here.get(S.active.contact) : null;
+    const text = who && who.length ? hereText(who) : '';
+    if (el.textContent !== text) el.textContent = text;
+    el.hidden = !text;
+    el.classList.toggle('typing', !!(who && who.some((x) => x.typing)));
+  }
+  // nobody refreshed the list for 30 s (offline, tab asleep): stop saying who is where
+  setInterval(() => { if (S.here.size && Date.now() - hereAt > HERE_TTL) setHere([]); }, 5000);
+
+  // ------------------------------------------------------------------ thank-yous
+  // A customer thanked the person who helped them: one quiet toast for that person, nothing else.
+  // The list of quotes lives in My day. Only an id cursor is kept, and only in memory.
+
+  function takeKudos(k, boot) {
+    const last = Number(k.last_id) || 0;
+    const today = Math.max(0, Number(k.today) || 0);
+    S.kudosToday = today;
+    // the first answer only sets the starting point: thank-yous from before this page opened are not replayed
+    if (boot || S.kudosSeen === null) { S.kudosSeen = Math.max(S.kudosSeen || 0, last); api.setKudos(S.kudosSeen); return; }
+    const fresh = (Array.isArray(k.new) ? k.new : []).filter((x) => x && Number(x.id) > S.kudosSeen);
+    S.kudosSeen = Math.max(S.kudosSeen, last, ...fresh.map((x) => Number(x.id)));
+    api.setKudos(S.kudosSeen);
+    fresh.forEach((x, i) => thanksToast(x, today - (fresh.length - 1 - i)));
+  }
+  function thanksToast(x, nth) {
+    const box = $('#toasts');
+    if (box.querySelectorAll('.toast.thanks').length >= 2) return;   // never a pile: the rest are in My day
+    const text = String(x.text || '').replace(/\s+/g, ' ').trim();
+    const who = realName(x.name) || 'A customer';
+    const el = h('button', { class: 'toast thanks', type: 'button', title: 'Open this chat', onclick: () => {
+      el.remove();
+      if (window.DeskMyDay) window.DeskMyDay.close();
+      if (window.DeskTeam) window.DeskTeam.close();
+      if (x.contact) openChat(String(x.contact));
+    } },
+      h('span', { class: 'thx-q', dir: 'auto' }, text ? `“${text.length > 140 ? text.slice(0, 139) + '…' : text}”` : 'Thank you'),
+      h('span', { class: 'thx-by' }, nth > 0 ? `${who} · your ${ordinal(nth)} thank-you today` : who));
+    box.append(el);
+    setTimeout(() => el.classList.add('out'), 9000);
+    setTimeout(() => el.remove(), 9400);
+  }
+  // Every answer passes here (see js/api.js). Fields an older server does not send are simply skipped.
+  function onAnswer(op, d) {
+    if (op !== 'boot' && op !== 'inbox' && op !== 'chat') return;
+    if (Array.isArray(d.here)) { serverNew = true; setHere(d.here); }
+    if (op === 'chat' && Array.isArray(d.messages) && d.messages.some((m) => m && m.transcript !== undefined)) serverNew = true;
+    if (op !== 'chat' && d.kudos && typeof d.kudos === 'object') takeKudos(d.kudos, op === 'boot');
+  }
+
   // ------------------------------------------------------------------ boot
 
   async function start() {
@@ -348,6 +468,7 @@
     $('#login').hidden = true;
     $('#app').hidden = false;
     bindUi();
+    api.listen(onAnswer);
     // the voice recorder's scripts, ahead of the first mic click
     setTimeout(() => { if (window.DeskVoice && window.DeskVoice.support().engines.includes('wasm')) window.DeskVoice.preload().catch(() => {}); }, 3000);
     try {
@@ -404,8 +525,8 @@
   function renderStaff() {
     const b = $('#staffBtn');
     const n = S.me ? S.me.name : '…';
-    b.replaceChildren(h('div', { class: 'av sm', style: `background:${avColor(n)}` }, initials({ name: n })),
-      h('span', null, n), S.me && S.me.role === 'admin' ? h('span', { class: 'role' }, 'admin') : null);
+    b.replaceChildren(...[h('div', { class: 'av sm', style: `background:${avColor(n)}` }, initials({ name: n })),
+      h('span', null, n), S.me && S.me.role === 'admin' ? h('span', { class: 'role' }, 'admin') : null].filter(Boolean));
     $('#bellBtn').replaceChildren(icon(S.notify ? 'bell' : 'belloff'));
     $('#bellBtn').title = S.notify ? 'Alerts on: sound + notification when a support customer waits more than 10 min' : 'Alerts off';
   }
@@ -477,6 +598,13 @@
     if (!window.DeskTeam) return toast('The team panel did not load; reload the page', 'error');
     window.DeskTeam.open({ h, icon, toast, api, avColor, initials, dur, ago, now, displayName, openChat, TZ }, { tab });
   }
+  // "My day": each person's own numbers, thank-yous and stars (js/myday.js). Private: nobody else's numbers.
+  function openMyDay() {
+    if (!window.DeskMyDay) return toast('My day did not load; reload the page', 'error');
+    if (!S.me) return;
+    closeSide();
+    window.DeskMyDay.open({ h, icon, api, now, openChat, TZ, me: S.me });
+  }
   // A newer desk was published: ask for a reload once (old pages miss new features).
   let versionAsked = false;
   function checkVersion() {
@@ -500,10 +628,14 @@
     const isAdmin = S.me && S.me.role === 'admin';
     if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
     // the sidebar is rebuilt only when something it shows changed (not on every 8 s poll)
-    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin, S.adminFlags]))) return;
-    $('#navMain').replaceChildren(...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))),
+    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin, S.adminFlags, S.kudosToday]))) return;
+    // replaceChildren() prints a null argument as the word "null" (staff saw it under My day), so drop empties
+    $('#navMain').replaceChildren(...[...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))),
+      h('button', { class: 'nav-item', title: 'My day: your own numbers, thank-yous and stars. Only you see them. (key M)', onclick: openMyDay }, icon('day'), h('span', { class: 'lbl' }, 'My day'),
+        S.kudosToday ? h('span', { class: 'n thx-n', title: `${S.kudosToday} thank-you${S.kudosToday > 1 ? 's' : ''} from customers today` }, `♥ ${S.kudosToday}`) : null,
+        h('kbd', { class: 'nav-key' }, 'M')),
       isAdmin ? h('button', { class: 'nav-item', title: S.adminFlags ? `Team activity: ${S.adminFlags} chat${S.adminFlags > 1 ? 's' : ''} marked solved that the AI thinks are not (only admins see this)` : 'Who worked when, what they did, and the AI check of solved chats (only admins see this)',
-        onclick: () => { closeSide(); openTracking(S.adminFlags ? 'ai' : null); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team & quality'), S.adminFlags ? h('span', { class: 'n hot' }, S.adminFlags > 99 ? '99+' : S.adminFlags) : null) : null);
+        onclick: () => { closeSide(); openTracking(S.adminFlags ? 'ai' : null); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team & quality'), S.adminFlags ? h('span', { class: 'n hot' }, S.adminFlags > 99 ? '99+' : S.adminFlags) : null) : null].filter(Boolean));
     // labels: BSB lists every custom label as a filter
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
@@ -703,7 +835,7 @@
         h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
           c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), rowLine(c.line)) : null,
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
-        h('div', { class: 'row-mid' }, preview(c),
+        h('div', { class: 'row-mid' }, preview(c), hereChip(c.contact),
           thanked(c) ? h('span', { class: 'row-heart', title: 'The customer said thanks', 'aria-label': 'The customer said thanks' }, '❤️') : null,
           rowDot(c)),
         sb || c.scheduled || c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
@@ -1004,7 +1136,7 @@
   function renderHead(c0) {
     const c = c0 || S.active.data.conv;
     const w = windowInfo(c);
-    if (same($('#chatHead'), JSON.stringify([c.contact, c.name, c.handle, c.channel, c.line, c.last_in_at, w.open, w.open ? dur(w.left) : 0, detailsOn(), S.metaVer]))) return;
+    if (same($('#chatHead'), JSON.stringify([c.contact, c.name, c.handle, c.channel, c.line, c.last_in_at, w.open, w.open ? dur(w.left) : 0, detailsOn(), S.metaVer, isAdmin()]))) return;
     let win;
     if (!c.last_in_at) win = h('span', { class: 'win closed', title: 'The customer has never written' }, icon('lock'), h('span', { class: 'wtxt' }, 'No window'));
     else if (!w.open) win = h('span', { class: 'win closed', title: isIg(c) ? 'Instagram allows replies up to 7 days after the last customer message' : 'WhatsApp allows free replies up to 24h after the last customer message' }, icon('lock'), h('span', { class: 'wtxt' }, 'Window closed'));
@@ -1016,11 +1148,15 @@
         h('div', { class: 'chat-name' }, displayName(c)),
         h('div', { class: 'chat-sub' }, h('span', null, subtitle(c)),
           !isIg(c) ? h('button', { class: 'copy-num', title: `Copy ${localNumber(c.contact)} (N)`, 'aria-label': 'Copy number', onclick: copyNumber }, icon('copy', 'xs'), 'Copy', h('kbd', { class: 'mini' }, 'N')) : null,
+          h('span', { class: 'chat-here', id: 'chatHere', role: 'status', hidden: true }),
           c.line ? h('span', { class: 'chan-badge', title: 'Channel this chat is on' }, lineIcon(c.line), lineName(c.line)) : null)),
       win,
       h('div', { class: 'chat-actions' },
+        isAdmin() ? h('button', { class: 'icon-btn praise-btn', title: 'Well handled (G): leaves a star in this chat for the team. The customer never sees it. Shift+G adds a note.', 'aria-label': 'Mark this chat as well handled',
+          onclick: (e) => praiseChat(e.shiftKey) }, icon('star')) : null,
         h('button', { class: 'icon-btn', title: 'Keyboard shortcuts (?)', 'aria-label': 'Keyboard shortcuts', onclick: openHelp }, icon('help')),
         h('button', { class: `icon-btn${detailsOn() ? ' on' : ''}`, title: 'Contact details (C)', 'aria-label': 'Contact details', onclick: toggleDetails }, icon('panel'))));
+    paintHereHead();
   }
   // The one big action, like BSB's "Mark complete": V = resolve.
   function completeButton() {
@@ -1182,8 +1318,8 @@
   function cancelPending(msg = 'Undone, nothing was sent') {
     if (!pending) return false;
     clearTimeout(pending.timer); pending.box.remove();
-    const back = pending.contact, restore = pending.restore; pending = null;
-    toast(msg);
+    const back = pending.contact, restore = pending.restore, own = pending.undoMsg; pending = null;
+    toast(own || msg);
     if (restore && !S.chats.some((x) => x.contact === restore.row.contact)) {
       S.chats.splice(Math.min(restore.index, S.chats.length), 0, restore.row);
       renderList(true);
@@ -1191,7 +1327,7 @@
     if (back) openChat(back);
     return true;
   }
-  function startPending({ text, sub, ms, run, contact }) {
+  function startPending({ text, sub, ms, run, contact, undoMsg }) {
     flushPending();
     const box = h('div', { class: 'undo', role: 'status' },
       h('div', { class: 'undo-bar' },
@@ -1203,7 +1339,7 @@
     document.body.append(box);
     const restore = lastRemoved && lastRemoved.row.contact === contact ? lastRemoved : null;
     lastRemoved = null;
-    pending = { box, run, contact, restore, timer: setTimeout(flushPending, ms) };
+    pending = { box, run, contact, restore, undoMsg, timer: setTimeout(flushPending, ms) };
   }
   function neighbour(contact) {
     const L = ordered();
@@ -1371,6 +1507,58 @@
     });
   }
 
+  // ---- "Well handled" (admins, G): a gold note in the chat's timeline for the team.
+  // It is never sent to the customer. Same 5 s undo as the other desk actions: Undo sends nothing.
+  function praiseChat(withNote) {
+    const a = S.active;
+    if (!isAdmin() || !a || !a.data) return;
+    let note = '';
+    if (withNote) {
+      const v = prompt('Note for the team (optional). It shows under the star; the customer never sees it.', '');
+      if (v === null) return;
+      note = v.trim().slice(0, 300);
+    }
+    const contact = a.contact;
+    const name = displayName(a.data.conv);
+    startPending({
+      ms: C.undoMs, undoMsg: 'Undone, no star added',
+      text: [h('b', null, '⭐ Well handled'), ` · ${name}`],
+      sub: note ? `Note: ${note}` : 'A star in the chat for the team. Nothing is sent to the customer.',
+      run: async () => {
+        try {
+          const r = await api.call('praise', { contact, ...(note ? { note } : {}) });
+          toast(r && r.staff ? `Star added for ${firstName(r.staff)}` : 'Star added', 'ok');
+        } catch (e) { toast(`Star not added: ${e.message}`, 'error'); }
+        if (S.active && S.active.contact === contact) { S.active.srvSig = null; pollChat(); }
+      },
+    });
+  }
+  async function praiseUndo(id) {
+    const a = S.active;
+    try {
+      const r = await api.call('praise_undo', { id });
+      if (r && r.ok === false) throw new Error(r.error || 'too late to remove');
+      toast('Star removed');
+    } catch (e) { toast(`Star not removed: ${e.message}`, 'error'); }
+    if (a && S.active === a) { a.srvSig = null; pollChat(); }
+  }
+  // The admin who gave a star can take it back for 10 minutes (the server checks the same).
+  const praiseMine = (e) => isAdmin() && e.detail && e.detail.id != null && e.actor === S.me.name && now() - Date.parse(e.at) < 10 * 60000;
+  // The short shine plays once per device, the first time the pill is actually on screen.
+  const praiseSeen = new Set(store('desk_praise_seen') || []);
+  function praiseShine(el, id) {
+    if (id == null || praiseSeen.has(id) || !window.IntersectionObserver) return;
+    const io = new IntersectionObserver((es) => {
+      if (!es.some((x) => x.isIntersecting)) return;
+      io.disconnect();
+      if (praiseSeen.has(id)) return;
+      praiseSeen.add(id);
+      store('desk_praise_seen', [...praiseSeen].slice(-300));
+      once(el, 'shine');
+    }, { threshold: 0.6 });
+    io.observe(el);
+  }
+
   // ---- keyboard shortcuts sheet (the ? / info button)
   const SHORTCUTS = [
     ['Move', [
@@ -1379,6 +1567,7 @@
       ['Esc', null, 'Leave the message box, then close the chat', ''],
       ['1', '2', 'Views: 1 Unresolved · 2 Sales · 3 All chats', ''],
       ['/', 'F', 'Search', 'Ctrl+K'],
+      ['M', null, 'My day: your own numbers, thank-yous and stars (only you see them)', ''],
     ]],
     ['Act on the open chat', [
       ['V', null, 'Solve / complete. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it is solved without a message. Sales: marks the chat complete (no message); it stays in Unresolved until you do, and comes back when the customer writes again', 'Ctrl+Shift+E'],
@@ -1392,6 +1581,7 @@
       ['Q', null, 'Quick replies (or type / in the message box)', ''],
       ['N', null, 'Copy the customer’s number, local format (e.g. 70123456)', ''],
       ['C', null, 'Contact details panel', ''],
+      ['G', null, 'Well handled: leaves a star in the chat for the team, never sent to the customer (5 s to undo). Shift+G adds a note', '', 'admin'],
     ]],
     ['While “Solving…” shows', [
       ['Z', null, 'Undo: nothing is sent', ''],
@@ -1409,7 +1599,7 @@
       h('div', { class: 'sheet-body' },
         h('p', { class: 'hint' }, 'Single letters work whenever you are not typing. The BSB shortcuts in grey work too.'),
         SHORTCUTS.map(([title, rows]) => h('div', { class: 'help-group' }, h('h5', null, title),
-          rows.map(([k1, k2, what, bsb]) => h('div', { class: 'help-row' },
+          rows.filter((r) => r[4] !== 'admin' || isAdmin()).map(([k1, k2, what, bsb]) => h('div', { class: 'help-row' },
             h('span', { class: 'help-keys' }, h('kbd', null, k1), k2 ? [h('span', { class: 'muted' }, k1 === '1' || k1 === 'Alt+1' ? '…' : ' or '), h('kbd', null, k2)] : null),
             h('span', { class: 'help-what' }, what),
             h('span', { class: 'help-bsb' }, bsb)))))),
@@ -1573,7 +1763,7 @@
         lastThread = it.m.thread_id;
       }
       if (it.kind === 'e') {
-        if (EVENT_KINDS.has(it.e.kind)) { put(`e:${it.e.at}|${it.e.kind}|${it.e.label}`, JSON.stringify(it.e), () => eventLine(it.e)); lastDir = ''; }
+        if (EVENT_KINDS.has(it.e.kind)) { put(`e:${it.e.at}|${it.e.kind}|${it.e.label}`, JSON.stringify(it.e) + (it.e.kind === 'praise' && praiseMine(it.e) ? '|mine' : ''), () => eventLine(it.e)); lastDir = ''; }
         continue;
       }
       const dir = it.kind === 'm' ? (it.m.dir === 'Outgoing' ? 'out' : 'in') : 'out';
@@ -1582,8 +1772,9 @@
       if (it.kind === 'm') {
         const m = it.m, rx = reactions.get(m.id);
         const src = api.mediaSource(m);
-        put(`m:${m.id}`, JSON.stringify([m.text, m.status, m.dir, m.ts, m.by, m.media_type, src ? (src.ours ? 'o' : 'r') : '', m.quoted, m.ad, m.ref, first, rx]),
+        put(`m:${m.id}`, JSON.stringify([m.text, m.status, m.dir, m.ts, m.by, m.media_type, src ? (src.ours ? 'o' : 'r') : '', m.quoted, m.ad, m.ref, first, rx, serverNew && isVoiceIn(m)]),
           () => bubble(m, first, rx), m.dir !== 'Outgoing');
+        if (m.transcript != null) trSync(m);
         if (src) noteSrc(`m:${m.id}`, src.url);
       } else if (it.kind === 's') {
         const s = it.s;
@@ -1601,6 +1792,7 @@
     for (const k of a.media.keys()) if (!used.has(k)) a.media.delete(k);
     const placed = inOrder(box, want);
     a.painted = true;
+    trPump();
     if (!dirty && placed) {
       if (scroll) box.scrollTop = box.scrollHeight;
       return;
@@ -1625,7 +1817,7 @@
       h('div', { class: 'sched-when' }, icon('clock', 'xs'), `Scheduled ${when}`),
       h('div', { class: 'sched-text' }, f.body));
   }
-  const EVENT_KINDS = new Set(['relabel', 'label_add', 'label_remove', 'sys_label', 'stage', 'resolved', 'reopened']);
+  const EVENT_KINDS = new Set(['relabel', 'label_add', 'label_remove', 'sys_label', 'stage', 'resolved', 'reopened', 'praise']);
 
   // a voice note player that works in every browser (js/voice.js); plain <audio> if that did not load
   function voicePlayer(url, latest, preload) {
@@ -1739,9 +1931,92 @@
         if (dd.audit) return h('div', { class: 'ev warn-ev' }, '↺ ', h('b', null, who), ' marked this unsolved after the AI check', dd.reason ? `: ${dd.reason}` : '', ' ', t);
         if (dd.kind === 'sales') return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ The customer wrote again: not complete any more' : ['↺ Put back in Unresolved by ', h('b', null, who)], ' ', t);
         return h('div', { class: 'ev warn-ev' }, e.actor === 'customer' ? '↺ Reopened: the customer wrote again' : ['↺ Reopened by ', h('b', null, who)], ' ', t);
+      case 'praise': {
+        // internal note: "⭐ Well handled, Charbel · Owner · 21 Nov, 00:41" (+ the note)
+        const to = firstName(dd.staff);
+        const at = new Date(e.at);
+        const el = h('div', { class: 'ev praise-ev', title: `${fmtFull.format(at)} · a note for the team; the customer does not see it` },
+          h('span', { class: 'praise-main' }, h('span', { class: 'praise-star', 'aria-hidden': 'true' }, '⭐'), h('b', null, to ? `Well handled, ${to}` : 'Well handled'),
+            who ? ` · ${who}` : '', ' · ', h('span', { class: 't' }, `${fmtDate.format(at)}, ${fmtTime.format(at)}`),
+            praiseMine(e) ? h('button', { class: 'link praise-undo', title: 'Take this star back', onclick: () => praiseUndo(dd.id) }, 'Remove') : null),
+          dd.note ? h('span', { class: 'praise-note', dir: 'auto' }, String(dd.note)) : null);
+        praiseShine(el, dd.id);
+        return el;
+      }
       default:
         return null;
     }
+  }
+
+  // ---- voice notes as text
+  // The server keeps the text of a voice note once somebody asked for it (`transcript` on the message).
+  // The page asks by itself for the voice notes of the last 24 h in the open chat (two at a time,
+  // newest first, each message once per page load); older ones get a small "Show text" button.
+  // The text sits in its own line under the player and is patched in place: the bubble and the
+  // player are never rebuilt for it, so a voice note keeps playing.
+  const transcripts = new Map();   // message id -> { state: 'loading' | 'ok' | 'failed', text }
+  const TR_AUTO_MS = 24 * 3600000;
+  let trBusy = 0;
+  const isVoiceIn = (m) => {
+    const t = String(m.media_type || '').toLowerCase();
+    return m.dir !== 'Outgoing' && /audio|voice|ptt/.test(t) && !/image|sticker|video|reel|document|file/.test(t);
+  };
+  const trStored = (m) => { const src = api.mediaSource(m); return !!(src && src.ours); };   // only our own copy can be read
+  function trSet(id, v) {
+    transcripts.delete(id);
+    transcripts.set(id, v);
+    if (transcripts.size > 600) transcripts.delete(transcripts.keys().next().value);
+    const el = S.active && S.active.tr && S.active.tr.get(id);
+    if (el) trPaint(el);
+  }
+  // what the server already knows goes straight into the cache
+  function trSync(m) {
+    if (typeof m.transcript !== 'string') return;
+    const t = transcripts.get(m.id);
+    if (!t || t.state !== 'ok' || t.text !== m.transcript.trim()) trSet(m.id, { state: 'ok', text: m.transcript.trim() });
+  }
+  function trNode(m) {
+    const a = S.active;
+    if (!a || !serverNew || !isVoiceIn(m)) return null;
+    trSync(m);
+    a.tr = a.tr || new Map();
+    let el = a.tr.get(m.id);
+    if (!el) { el = h('div', { class: 'tr-line' }); a.tr.set(m.id, el); }
+    el._m = m; el._c = a.contact;
+    trPaint(el);
+    return el;
+  }
+  function trPaint(el) {
+    const m = el._m, t = transcripts.get(m.id);
+    const key = t ? `${t.state}|${t.text || ''}` : trStored(m) ? 'ask' : 'none';
+    if (el._k === key) return;
+    el._k = key;
+    el.hidden = key === 'none';
+    el.classList.toggle('quiet', !t || t.state !== 'ok' || !t.text);
+    if (!t || t.state === 'failed') {
+      el.replaceChildren(...(key === 'none' ? [] : [h('button', { class: 'tr-ask', type: 'button', title: 'Write out what is said in this voice note', onclick: () => trAsk(el._c, m.id) }, 'Show text')]));
+    } else if (t.state === 'loading') el.replaceChildren('Writing it out…');
+    else el.replaceChildren(h('span', { dir: 'auto' }, t.text || '(no words heard)'));
+    const box = el.closest('.msgs');
+    if (box && box._stick) box.scrollTop = box.scrollHeight;
+  }
+  async function trAsk(contact, id) {
+    const t = transcripts.get(id);
+    if (t && t.state !== 'failed') return;
+    trSet(id, { state: 'loading' });
+    trBusy++;
+    try {
+      const r = await api.call('transcribe', { contact, id });
+      trSet(id, { state: 'ok', text: String((r && r.text) || '').trim() });
+    } catch (e) { trSet(id, { state: 'failed' }); }   // no toast: the line offers "Show text" again
+    finally { trBusy--; trPump(); }
+  }
+  function trPump() {
+    const a = S.active;
+    if (!serverNew || !a || !a.data || document.hidden || trBusy >= 2) return;
+    const fresh = a.data.messages.filter((m) => isVoiceIn(m) && !transcripts.has(m.id) && typeof m.transcript !== 'string' && trStored(m) && now() - Date.parse(m.ts) < TR_AUTO_MS)
+      .sort((x, y) => Date.parse(y.ts) - Date.parse(x.ts));
+    for (const m of fresh) { if (trBusy >= 2) break; trAsk(a.contact, m.id); }
   }
 
   function bubble(m, first, reacts) {
@@ -1777,7 +2052,7 @@
         h('small', null, 'From an ad'), m.ad.headline || m.ad.link, m.ad.description ? h('span', { class: 'muted' }, m.ad.description) : null)
       : null;
     const rx = reacts && reacts.length ? h('div', { class: 'reacts', title: reacts.map((r) => `${r.out ? 'You' : 'Customer'} ${r.emoji}`).join(', ') }, reacts.map((r) => r.emoji).join('')) : null;
-    return h('div', { class: `${cls}${rx ? ' has-react' : ''}`, dataset: { id: m.id } }, ad, quote, mediaEl,
+    return h('div', { class: `${cls}${rx ? ' has-react' : ''}`, dataset: { id: m.id } }, ad, quote, mediaEl, mediaEl ? trNode(m) : null,
       body || (!mediaEl ? h('em', { class: 'muted' }, media || 'message') : null), meta(m), rx);
   }
   function meta(m) {
@@ -1867,7 +2142,13 @@
 
   function renderComposer() {
     const ta = h('textarea', { id: 'reply', rows: 1, placeholder: 'Write a reply…  (/ for quick replies)', value: S.active.draft || '' });
-    ta.addEventListener('input', () => { autosize(ta); updateSend(); saveDraft(ta.value); if (ta.value === '/') { ta.value = ''; openQuick(); } });
+    ta.addEventListener('input', () => {
+      autosize(ta); updateSend(); saveDraft(ta.value); if (ta.value === '/') { ta.value = ''; openQuick(); }
+      // colleagues see "… is replying" (only the fact that this box is being typed in is sent)
+      const was = api.isTyping();
+      api.noteTyping(!!ta.value.trim());
+      if (!was && api.isTyping()) pollChat();
+    });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReply(); }
     });
@@ -1949,6 +2230,7 @@
     const p = { request_id: uuid(), text, status: 'sending', at: now() };
     S.active.pending.push(p);
     ta.value = ''; autosize(ta); saveDraft(''); updateSend();
+    api.noteTyping(false);
     renderMessages(true);
     deliver(p, S.active);
   }
@@ -2729,6 +3011,8 @@
       case 'q': case 'Q': if (S.active) { e.preventDefault(); openQuick(); } return;
       case 'c': case 'C': if (S.active) { e.preventDefault(); toggleDetails(); } return;
       case 'n': case 'N': if (S.active) { e.preventDefault(); copyNumber(); } return;
+      case 'g': case 'G': if (S.active && isAdmin()) { e.preventDefault(); praiseChat(e.shiftKey); } return;
+      case 'm': case 'M': e.preventDefault(); openMyDay(); return;
       case '/': case 'f': case 'F': e.preventDefault(); focusSearch(); return;
       case '?': case 'i': case 'I': e.preventDefault(); openHelp(); return;
       default:
