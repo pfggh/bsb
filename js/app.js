@@ -2267,44 +2267,91 @@
     const t = (a.data && a.data.conv && a.data.conv.sys) || (row && row.sys) || null;
     return !(t && t.kind === 'support');
   }
+  // A small hand-bell: a bright strike with overtones, then a rising three-note flourish.
   function chime() {
     if (!S.sounds) return;
     try {
       audioCtx = audioCtx || new AudioContext();
-      [988, 1319, 1760].forEach((f, i) => {
-        const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + i * 0.09;
-        o.type = 'sine'; o.frequency.value = f;
-        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.1, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
-        o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.5);
-      });
+      const t0 = audioCtx.currentTime;
+      const note = (f, at, len, vol, type = 'sine') => {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = type; o.frequency.value = f;
+        g.gain.setValueAtTime(0, t0 + at); g.gain.linearRampToValueAtTime(vol, t0 + at + 0.008);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + len);
+        o.connect(g); g.connect(audioCtx.destination); o.start(t0 + at); o.stop(t0 + at + len + 0.05);
+      };
+      [[1046.5, 0.13], [2093, 0.05], [2637, 0.03], [3520, 0.02]].forEach(([f, v]) => note(f, 0, 1.4, v)); // the strike
+      [[1318.5, 0.18], [1568, 0.30], [2093, 0.42]].forEach(([f, at]) => note(f, at, 0.7, 0.08, 'triangle')); // the flourish
     } catch (e) { /* no sound */ }
   }
+  // Sales this person rang today, on this device (resets at midnight).
+  function salesToday() {
+    const day = dayKey(new Date());
+    const st = store('desk_sales_today');
+    const n = st && st.day === day ? st.n + 1 : 1;
+    store('desk_sales_today', { day, n });
+    return n;
+  }
+  const ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
   function saleBell(a) {
     const row = S.chats.find((x) => x.contact === a.contact);
-    const name = row ? displayName(row) : (a.data && a.data.conv ? displayName(a.data.conv) : 'the customer');
+    const conv = row || (a.data && a.data.conv) || null;
+    const name = conv ? displayName(conv) : 'The customer';
+    const t = (a.data && a.data.conv && a.data.conv.sys) || (row && row.sys) || null;
+    const prod = t && (t.bought_product || t.product);
+    const n = salesToday();
     chime();
-    toast(`🔔 Sold! ${name} has their account`, 'sale');
-    const t = $('#toasts').getBoundingClientRect();
-    confetti(t.left + t.width / 2, t.bottom - 30, 40);
+    const old = $('#salePop'); if (old) old.remove();
+    const bell = h('div', { class: 'sp-bell' }, h('i', { class: 'sp-ring' }), h('i', { class: 'sp-ring r2' }), icon('bell'));
+    const pop = h('div', { class: 'sale-pop', id: 'salePop', role: 'status', 'aria-live': 'polite' },
+      bell,
+      h('div', { class: 'sp-text' },
+        h('b', { class: 'sp-title' }, 'Sold!'),
+        h('span', { class: 'sp-sub' }, `${name} has their ${prod && PRODUCTS[prod] ? PRODUCTS[prod] + ' ' : ''}account`)),
+      h('span', { class: `sp-streak${n >= 3 ? ' hot' : ''}` }, `${ordinal(n)} sale today${n >= 3 ? ' 🔥' : ''}`));
+    // centered over the conversation (or the window when no chat is open)
+    const host = $('#chat');
+    const r = host && host.getBoundingClientRect().width ? host.getBoundingClientRect() : { left: 0, top: 0, width: innerWidth, height: innerHeight };
+    pop.style.left = `${r.left + r.width / 2}px`;
+    pop.style.top = `${r.top + Math.min(r.height * 0.32, 260)}px`;
+    document.body.append(pop);
+    requestAnimationFrame(() => {
+      const b = bell.getBoundingClientRect();
+      const cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+      confetti(cx, cy, 70, { coins: 18 });
+      setTimeout(() => confetti(cx, cy, 30, { coins: 8, power: 0.7 }), 260);
+    });
+    setTimeout(() => pop.classList.add('out'), 2600);
+    setTimeout(() => pop.remove(), 3200);
   }
-  function confetti(x, y, n = 30) {
+  // Confetti and coins with a little gravity: each piece flies out, slows, then falls and fades.
+  function confetti(x, y, n = 30, opt = {}) {
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     const cs = getComputedStyle(document.documentElement);
     const cols = ['--accent', '--sales', '--label', '--support', '--ok'].map((v) => cs.getPropertyValue(v).trim()).filter(Boolean);
-    for (let i = 0; i < n; i++) {
-      const c = h('i', { class: 'conf' });
-      const ang = Math.random() * Math.PI * 2, d = 90 + Math.random() * 170;
+    const power = opt.power || 1;
+    const total = n + (opt.coins || 0);
+    for (let i = 0; i < total; i++) {
+      const coin = i >= n;
+      const c = h('i', { class: coin ? 'conf coin' : `conf${i % 3 === 0 ? ' round' : ''}` });
+      if (!coin) c.style.background = cols[i % cols.length];
       c.style.left = x + 'px'; c.style.top = y + 'px';
-      c.style.background = cols[i % cols.length];
-      c.style.setProperty('--cx', `${Math.cos(ang) * d}px`);
-      c.style.setProperty('--cy', `${Math.sin(ang) * d - 90}px`);
-      c.style.setProperty('--cr', `${Math.random() * 720 - 360}deg`);
       document.body.append(c);
-      setTimeout(() => c.remove(), 1300);
+      const ang = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5; // mostly upwards
+      const d = (110 + Math.random() * 190) * power;
+      const dx = Math.cos(ang) * d, dy = Math.sin(ang) * d;
+      const fall = 160 + Math.random() * 200, spin = (Math.random() * 2 - 1) * (coin ? 540 : 900);
+      const dur = 1300 + Math.random() * 700;
+      const anim = c.animate([
+        { transform: 'translate(-50%, -50%) rotate(0deg) scale(.6)', opacity: 1 },
+        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) rotate(${spin * 0.5}deg) scale(1)`, opacity: 1, offset: 0.35 },
+        { transform: `translate(calc(-50% + ${dx * 1.25}px), calc(-50% + ${dy + fall}px)) rotate(${spin}deg) scale(.9)`, opacity: 0 },
+      ], { duration: dur, easing: 'cubic-bezier(.15,.7,.35,1)', fill: 'forwards' });
+      anim.onfinish = () => c.remove();
+      setTimeout(() => c.remove(), dur + 200);
     }
   }
 
-  // Editor: add, change and delete quick replies (admins).
   function openQuickManage() {
     if (!isAdmin()) return toast('Only an admin can edit quick replies');
     const body = h('div', { class: 'sheet-body' });
