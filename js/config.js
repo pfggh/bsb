@@ -16,7 +16,7 @@
     // The local demo (demo/run.sh) serves this page and the API itself (same tokens, sending simulated).
     demo: local && !/[?&]prod\b/.test(location.search),
     supabaseUrl: 'https://kfgswynickhywzhneltu.supabase.co',
-    version: 202611202000, // same stamp as the ?v= in index.html; the desk asks for a reload when the server names a newer one
+    version: 202611202100, // same stamp as the ?v= in index.html; the desk asks for a reload when the server names a newer one
     pollMs: 8000,
     pollHiddenMs: 30000,
     threadPollMs: 4000,
