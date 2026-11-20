@@ -40,6 +40,7 @@
 
   const ICONS = {
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+    sort: '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
     inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
     unread: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
     all: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
@@ -234,6 +235,9 @@
     adminFlags: 0,      // admins: chats the AI check found and nobody answered yet
     metaVer: 0,         // bumps when labels / channel names change (rows and bars show them)
     listHover: false, listScrollAt: 0, listFrozen: false, listSig: null,
+    sortOld: store('desk_sort_old') === true,  // list order: oldest message first (the arrow in the list head)
+    sounds: store('desk_sounds') !== false,    // sale bell chime
+    listPainted: false, listHadRows: false, animRows: false,
   };
   const now = () => Date.now() + S.skew;
   const sys = () => S.counts.sys || {};
@@ -414,6 +418,11 @@
           isAdmin ? h('button', { class: 'btn block', onclick: openTeam }, icon('team', 'sm'), 'Team & access tokens') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openManage(); } }, icon('sliders', 'sm'), 'Labels & views') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openQuickManage(); } }, icon('zap', 'sm'), 'Quick replies') : null,
+          h('button', { class: 'btn block', onclick: (e) => {
+            S.sounds = !S.sounds; store('desk_sounds', S.sounds);
+            e.currentTarget.replaceChildren(icon(S.sounds ? 'bell' : 'belloff', 'sm'), S.sounds ? 'Sale bell sound: on' : 'Sale bell sound: off');
+            if (S.sounds) chime();
+          } }, icon(S.sounds ? 'bell' : 'belloff', 'sm'), S.sounds ? 'Sale bell sound: on' : 'Sale bell sound: off'),
           h('button', { class: 'btn block', onclick: () => { if (confirm('Sign out of the desk on this device?')) { api.signOut(); location.reload(); } } }, icon('logout', 'sm'), 'Sign out')))));
   }
   async function openTeam() {
@@ -539,6 +548,9 @@
   // ------------------------------------------------------------------ list
 
   function listArgs(extra = {}) { return { view: S.view, line: S.line || null, q: S.q, ...extra }; }
+  // S.chats is always newest first (the server's order, held still while someone works the list);
+  // what the list shows and J/K/V walk through is this, so the arrow only flips the view.
+  const ordered = () => (S.sortOld ? S.chats.slice().reverse() : S.chats);
   // The user is "on" the list while the pointer is over it or it was scrolled in the last 4 s.
   const listBusyUser = () => S.listHover || Date.now() - S.listScrollAt < 4000;
   // Stable order: a poll does not shuffle rows the user is looking at. Rows keep their place
@@ -602,7 +614,8 @@
     if (listBusy && !reset) { listAgain = listAgain === false ? false : poll; return; }
     const seq = ++S.listSeq;
     listBusy = true;
-    const limit = reset ? 60 : Math.min(200, Math.max(60, S.chats.length));
+    // oldest first needs the whole list at once (up to the server's 300), so nothing is missing on top
+    const limit = S.sortOld ? 300 : reset ? 60 : Math.min(200, Math.max(60, S.chats.length));
     // (no signature either when our order was held for the user and could now go back to the server's)
     const thaw = S.listFrozen && !S.active && !listBusyUser();
     const sentSig = poll && !reset && !thaw && S.listSig && S.listSig.limit === limit ? S.listSig.sig : null;
@@ -628,7 +641,7 @@
     }
   }
   async function loadMore() {
-    if (!S.more || S.loadingMore || !S.chats.length) return;
+    if (S.sortOld || !S.more || S.loadingMore || !S.chats.length) return;
     S.loadingMore = true;
     const seq = S.listSeq;
     try {
@@ -688,25 +701,48 @@
         h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
           c.line ? h('span', { class: 'row-line', title: `Channel: ${lineName(c.line)}` }, lineIcon(c.line), rowLine(c.line)) : null,
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
-        h('div', { class: 'row-mid' }, preview(c), rowDot(c)),
+        h('div', { class: 'row-mid' }, preview(c),
+          thanked(c) ? h('span', { class: 'row-heart', title: 'The customer said thanks', 'aria-label': 'The customer said thanks' }, '❤️') : null,
+          rowDot(c)),
         sb || c.scheduled || c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
           c.fu_alert === 'says_paid' ? h('span', { class: 'fu-chip paid', title: 'The customer says they paid. Check the payment and activate.' }, icon('warn', 'xs'), 'Says paid')
             : c.fu_alert === 'plan_chosen' ? h('span', { class: 'fu-chip', title: 'The customer chose a plan and is waiting for the payment details.' }, icon('check', 'xs'), 'Ready to pay') : null,
           c.scheduled ? h('span', { class: 'sched-chip', title: 'An automatic follow-up is scheduled for this chat' }, icon('clock', 'xs'), 'Message scheduled') : null,
           (c.labels || []).map((id) => labelChip(id))) : null));
   }
+  // The customer's last words are a thank-you or "it works" (and not "ma zabat" / "still not").
+  const THANKS_RE = /\b(thanks?|thank you|thx|tnx|merci+|shukran|shokran|tslm|yslmo|yislamo|ysalmo|ya3tik|appreciate|perfect|zabatet|zabat|it works|works now|worked)\b|🙏|❤|♥|😍|🥰|شكرا|يسلمو/iu;
+  const NOT_RE = /\b(ma|mesh|mish|msh|not|no|didn'?t|doesn'?t|dont|don'?t|still|ba3d|lesa|bas)\b|\?/i;
+  function thanked(c) {
+    if (c.last_dir === 'Outgoing') return false;
+    const t = cleanPreview(c.last_text);
+    return THANKS_RE.test(t) && !NOT_RE.test(t);
+  }
   function rowLine(l) { return lineShort(l); }
   function shortLine(l) { const n = (S.channelNames || {})[l]; return n ? n.slice(0, 12) : /^\d{8,}$/.test(l) ? '…' + l.slice(-3) : l.replace(/^Channel /, ''); }
   // Row nodes by contact. The list is patched, never rebuilt: unchanged rows are not touched,
   // changed rows are swapped in place, and the row under the user's eyes stays where it is.
   const rowEls = new Map();
-  let moreEl = null;
+  let moreEl = null, noteEl = null, partyN = 0;
+  // Plays a CSS entrance once (moving a node in the DOM would replay it, so the class goes away after).
+  function once(el, cls) {
+    if (!el) return;
+    el.classList.add(cls);
+    el.addEventListener('animationend', () => el.classList.remove(cls), { once: true });
+    setTimeout(() => el.classList.remove(cls), 1500);
+  }
   function rowEl(c) {
     const k = rowKey(c);
     let el = rowEls.get(c.contact);
     if (el && el._k === k) return el;
     const n = row(c);
-    n._k = k;
+    n._k = k; n._u = c.unread_n || 0;
+    if (S.animRows) {
+      if (!el) once(n, 'enter');
+      else if ((c.unread_n || 0) > (el._u || 0)) once(n.querySelector('.badge-n'), 'pop');
+      const heart = n.querySelector('.row-heart');
+      if (heart && !(el && el.querySelector('.row-heart'))) once(heart, 'pop');
+    }
     if (el && el.isConnected) el.replaceWith(n);
     rowEls.set(c.contact, n);
     return n;
@@ -740,6 +776,8 @@
   // noAnchor: the change is the user's own (V / undo): rows above stay, rows below slide.
   function renderList(noAnchor = false) {
     renderListHead();
+    const hadRows = S.listHadRows;
+    S.listHadRows = S.chats.length > 0;
     // BSB-style context: which channel and which view this list is
     if (!same($('#ctxBar'), `${S.line}|${S.metaVer}`)) {
       $('#ctxBar').replaceChildren(
@@ -749,9 +787,12 @@
     const list = $('#list');
     if (!S.chats.length) {
       const done = S.view === 'unresolved' && !S.q;
+      // the user's own V just emptied Unresolved: a small celebration, once
+      const party = done && noAnchor && hadRows;
       rowEls.clear();
-      if (same(list, `empty|${done}|${!!S.q}`)) return;
-      list.replaceChildren(h('li', { class: 'list-empty' }, done ? [h('div', { class: 'empty-big' }, '🎉'), h('b', null, 'All resolved'), h('div', { class: 'muted' }, 'Nothing to solve, nothing to complete, nothing unread.')]
+      if (same(list, `empty|${done}|${!!S.q}|${party ? ++partyN : ''}`)) return;
+      if (party) setTimeout(() => { const r = list.getBoundingClientRect(); confetti(r.left + r.width / 2, r.top + 120, 36); }, 60);
+      list.replaceChildren(h('li', { class: `list-empty${party ? ' party' : ''}` }, done ? [h('div', { class: 'empty-big' }, '🎉'), h('b', null, 'All resolved'), h('div', { class: 'muted' }, 'Nothing to solve, nothing to complete, nothing unread.')]
         : S.q ? 'Nothing matches your search.' : 'No chats here.'));
       return;
     }
@@ -759,15 +800,22 @@
     const stays = new Set();
     for (const c of S.chats) if (rowEls.get(c.contact)?.isConnected) stays.add(c.contact);
     // nothing to do? (same rows, same order, same content) -> no DOM writes, no layout reads
-    const fresh = S.chats.every((c) => { const el = rowEls.get(c.contact); return el && el._k === rowKey(c); });
+    const shown = ordered();
+    const fresh = shown.every((c) => { const el = rowEls.get(c.contact); return el && el._k === rowKey(c); });
     if (S.more && !moreEl) moreEl = h('li', { class: 'list-more' }, 'Scroll for more…');
-    const tail = S.more ? [moreEl] : [];
+    if (!noteEl) noteEl = h('li', { class: 'list-note' }, 'Oldest first shows the newest 300 chats of this list');
+    const head = S.sortOld && S.more ? [noteEl] : [];
+    const tail = !S.sortOld && S.more ? [moreEl] : [];
     if (fresh) {
-      const want = [...S.chats.map((c) => rowEls.get(c.contact)), ...tail];
+      const want = [...head, ...shown.map((c) => rowEls.get(c.contact)), ...tail];
       if (inOrder(list, want)) return;
     }
     const anchor = noAnchor ? null : listAnchor(list, stays);
-    const want = [...S.chats.map(rowEl), ...tail];
+    // rows that newly arrive slide in (not a whole page at once: a new view or a page of older chats just appears)
+    S.animRows = S.listPainted && !S.loadingMore && shown.filter((c) => !rowEls.has(c.contact)).length <= 3;
+    const want = [...head, ...shown.map(rowEl), ...tail];
+    S.animRows = false;
+    S.listPainted = true;
     reconcile(list, want);
     // forget rows that left the list
     if (rowEls.size > want.length + 50) { const live = new Set(S.chats.map((c) => c.contact)); for (const k of rowEls.keys()) if (!live.has(k)) rowEls.delete(k); }
@@ -826,8 +874,9 @@
     if (a.data && a.data.conv.unread) markRead(contact);
     loadCustomer(contact);
     // V and J usually go to the next row: fetch it now so it opens instantly too.
-    const i = S.chats.findIndex((x) => x.contact === contact);
-    const next = i >= 0 ? S.chats[i + 1] : null;
+    const L = ordered();
+    const i = L.findIndex((x) => x.contact === contact);
+    const next = i >= 0 ? L[i + 1] : null;
     if (next) setTimeout(() => { if (S.active === a) prefetchChat(next.contact); }, 600);
   }
   // Recently loaded chats (last payload per contact), for instant J/K/V.
@@ -866,7 +915,7 @@
       h('h3', null, 'Open a chat to start'),
       h('p', { class: 'muted' }, 'Work down ', h('b', null, 'Unresolved'), ': unsolved support, sales chats not yet complete, and everything unread. Reply, then press ', h('kbd', null, 'V'), ': it solves a support chat (the AI sends a fitting closing message if the customer wrote recently) and marks a sales chat complete.'),
       h('div', { class: 'empty-keys' }, k('J', 'next chat'), k('K', 'previous'), k('V', 'solve / complete'), k('R', 'reply'), k('L', 'labels'), k('U', 'unread'), k('/', 'search'), k('?', 'all shortcuts')),
-      h('button', { class: 'btn', onclick: () => { if (S.chats[0]) openChat(S.chats[0].contact); } }, 'Open the first chat', h('kbd', null, 'J')))];
+      h('button', { class: 'btn', onclick: () => { const f = ordered()[0]; if (f) openChat(f.contact); } }, 'Open the first chat', h('kbd', null, 'J')))];
   }
 
   async function markRead(contact, unread = false) {
@@ -1155,9 +1204,10 @@
     pending = { box, run, contact, restore, timer: setTimeout(flushPending, ms) };
   }
   function neighbour(contact) {
-    const i = S.chats.findIndex((x) => x.contact === contact);
-    if (i < 0) return S.chats[0] || null;
-    return S.chats[i + 1] || S.chats[i - 1] || null;
+    const L = ordered();
+    const i = L.findIndex((x) => x.contact === contact);
+    if (i < 0) return L[0] || null;
+    return L[i + 1] || L[i - 1] || null;
   }
   // Takes the solved chat out of the list (rows above it do not move; the ones below slide up
   // by one) and opens the row that took its place.
@@ -1490,7 +1540,7 @@
     const used = new Set();
     const want = [];
     let dirty = false;
-    const put = (key, sigv, build) => {
+    const put = (key, sigv, build, anim) => {
       while (used.has(key)) key += '+';
       used.add(key);
       let el = a.nodes.get(key);
@@ -1498,6 +1548,7 @@
         const n = build();
         n._s = sigv;
         dirty = true;
+        if (!el && anim && a.painted) once(n, 'enter');
         if (el && el.isConnected) el.replaceWith(n);
         a.nodes.set(key, n);
         el = n;
@@ -1530,7 +1581,7 @@
         const m = it.m, rx = reactions.get(m.id);
         const src = api.mediaSource(m);
         put(`m:${m.id}`, JSON.stringify([m.text, m.status, m.dir, m.ts, m.by, m.media_type, src ? (src.ours ? 'o' : 'r') : '', m.quoted, m.ad, m.ref, first, rx]),
-          () => bubble(m, first, rx));
+          () => bubble(m, first, rx), m.dir !== 'Outgoing');
         if (src) noteSrc(`m:${m.id}`, src.url);
       } else if (it.kind === 's') {
         const s = it.s;
@@ -1538,7 +1589,7 @@
         if (s.media && s.media.url) noteSrc(`s:${s.request_id}`, s.media.url);
       } else {
         const p = it.p;
-        put(`p:${p.request_id}`, JSON.stringify([p.status, p.error, p.text, first]), () => pendingBubble(p, first));
+        put(`p:${p.request_id}`, JSON.stringify([p.status, p.error, p.text, first]), () => pendingBubble(p, first), true);
       }
     }
     for (const f of d.scheduled || []) put(`f:${f.id}`, JSON.stringify([f.body, f.due_at]), () => scheduledLine(f));
@@ -1547,6 +1598,7 @@
     for (const k of a.nodes.keys()) if (!used.has(k)) a.nodes.delete(k);
     for (const k of a.media.keys()) if (!used.has(k)) a.media.delete(k);
     const placed = inOrder(box, want);
+    a.painted = true;
     if (!dirty && placed) {
       if (scroll) box.scrollTop = box.scrollHeight;
       return;
@@ -1905,6 +1957,7 @@
       if (p.media) await api.call('send_media', { contact: a.contact, request_id: p.request_id, ...p.media });
       else await api.call('send', { contact: a.contact, text: p.text, request_id: p.request_id });
       a.pending = a.pending.filter((x) => x !== p);
+      if (!p.media && isDelivery(p.text, a)) saleBell(a);
       if (S.active === a) await pollChat();
       refreshList();
     } catch (e) {
@@ -2061,43 +2114,194 @@
   // ---- quick replies (the staff's own, desk.quick_replies)
 
   const isAdmin = () => !!(S.me && S.me.role === 'admin');
+  // Big search: fuzzy match on name and text, the replies used most come first, the ones the
+  // customer's last message asks about are marked "suggested". Everything runs in the browser.
+  const QR_ALIASES = { gpt: 'chatgpt', openai: 'chatgpt', whish: 'pay', wish: 'pay', payment: 'pay', nf: 'netflix', shahed: 'shahid', 'شاهد': 'shahid',
+    crypto: 'usdt', binance: 'usdt', tether: 'usdt', google: 'gemini', photoshop: 'adobe' };
+  const qrNorm = (x) => String(x || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '');
+  function qrSubseq(hay, q) {
+    const idx = []; let j = 0;
+    for (let i = 0; i < hay.length && j < q.length; i++) if (hay[i] === q[j]) { idx.push(i); j++; }
+    return j === q.length ? idx : null;
+  }
+  function qrLastCustomerText() {
+    const ms = (S.active && S.active.data && S.active.data.messages) || [];
+    for (let i = ms.length - 1; i >= 0; i--) if (ms[i].dir !== 'Outgoing' && ms[i].text && !isReaction(ms[i])) return qrNorm(ms[i].text);
+    return '';
+  }
+  function qrSearch(qRaw) {
+    const q = qrNorm(qRaw.trim());
+    const last = qrLastCustomerText();
+    const alias = QR_ALIASES[q];
+    const out = [];
+    for (const c of S.canned) {
+      const t = qrNorm(c.title), body = qrNorm(c.body);
+      const said = t.length >= 3 && last && (last.includes(t) || Object.entries(QR_ALIASES).some(([k, v]) => v === t && new RegExp(`(^|[^a-z])${k}([^a-z]|$)`).test(last)));
+      let sc = null, tIdx = null, hit = null;
+      if (!q) sc = 0;
+      else if (t.startsWith(q)) { sc = 100 - (t.length - q.length) * 0.5; tIdx = [...Array(q.length).keys()]; }
+      else if (alias && alias === t) sc = 90;
+      else if (t.includes(q)) { const p0 = t.indexOf(q); sc = 75; tIdx = [...Array(q.length).keys()].map((i) => i + p0); }
+      else if (q.length >= 2 && (tIdx = qrSubseq(t, q))) sc = 45 - (tIdx[tIdx.length - 1] - tIdx[0] - q.length + 1);
+      else {
+        tIdx = null;
+        const p0 = body.indexOf(q);
+        if (p0 >= 0) { sc = 28 + Math.min(8, 60 / body.length); hit = q; }
+        else {
+          const w = q.split(/\s+/).filter(Boolean);
+          if (w.length > 1 && w.every((x) => body.includes(x))) sc = 18;
+          else if (q.length >= 4) { // typos: "whsh" finds "whish", "netflx" finds "netflix"
+            const word = body.split(/[^\p{L}\p{N}]+/u).find((x) => x.length <= q.length + 3 && qrSubseq(x, q));
+            if (word) { sc = 22 + Math.min(8, 60 / body.length); hit = word; }
+          }
+        }
+      }
+      if (sc == null) continue;
+      sc += Math.log2((c.uses || 0) + 2) * 3 + (said ? (q ? 6 : 40) : 0);
+      out.push({ c, sc, tIdx, hit, said });
+    }
+    out.sort((x, y) => y.sc - x.sc || (x.c.sort || 0) - (y.c.sort || 0));
+    return out;
+  }
+  function qrMarkTitle(t, idx) {
+    if (!idx || !idx.length) return [t];
+    const set = new Set(idx), parts = [];
+    let buf = '', on = false;
+    for (let i = 0; i < t.length; i++) {
+      const m = set.has(i);
+      if (m !== on) { if (buf) parts.push(on ? h('mark', null, buf) : buf); buf = ''; on = m; }
+      buf += t[i];
+    }
+    if (buf) parts.push(on ? h('mark', null, buf) : buf);
+    return parts;
+  }
+  function qrSnippet(c, hit) {
+    const flat = String(c.body).replace(/\s+/g, ' ');
+    if (!hit) return [flat];
+    const p0 = qrNorm(flat).indexOf(hit);
+    if (p0 < 0) return [flat];
+    const st = Math.max(0, p0 - 18);
+    return [(st ? '…' : '') + flat.slice(st, p0), h('mark', null, flat.substr(p0, hit.length)), flat.slice(p0 + hit.length)];
+  }
   function openQuick() {
-    if (!S.active || $('#qr')) return;
-    const input = h('input', { type: 'search', placeholder: 'Search quick replies…' });
-    const ul = h('ul');
-    let sel = 0, items = [];
-    const draw = () => {
-      const q = input.value.trim().toLowerCase();
-      items = S.canned.filter((c) => !q || `${c.title} ${c.body}`.toLowerCase().includes(q)).slice(0, 80);
-      sel = Math.min(sel, Math.max(0, items.length - 1));
+    if (!S.active || $('#qp')) return;
+    const input = h('input', { type: 'text', placeholder: 'Search quick replies: gpt, whish, netflix…', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Search quick replies' });
+    const speed = h('span', { class: 'qp-speed' });
+    const ul = h('ul', { class: 'qp-list', role: 'listbox', 'aria-label': 'Quick replies' });
+    const prev = h('div', { class: 'qp-prev' });
+    let sel = 0, results = [];
+    const MAX = 9;
+    const draw = (animate) => {
+      const t0 = performance.now();
+      results = qrSearch(input.value).slice(0, MAX);
+      const ms = performance.now() - t0;
+      sel = Math.min(sel, Math.max(0, results.length - 1));
+      speed.textContent = S.canned.length ? `${results.length} shown · ${ms < 1 ? ms.toFixed(2) : ms.toFixed(1)} ms` : '';
       if (!S.canned.length) {
-        ul.replaceChildren(h('li', { class: 'qr-empty' }, h('span', { class: 'muted' }, 'No quick replies yet.'),
-          isAdmin() ? h('button', { class: 'btn sm primary', onmousedown: (e) => { e.preventDefault(); close(); openQuickManage(); } }, icon('plus', 'sm'), 'Add your own') : h('span', { class: 'muted' }, ' Ask an admin to add some.')));
+        ul.replaceChildren(h('li', { class: 'qp-empty' }, h('span', null, 'No quick replies yet.'),
+          isAdmin() ? h('button', { class: 'btn sm primary', onmousedown: (e) => { e.preventDefault(); close(); openQuickManage(); } }, icon('plus', 'sm'), 'Add your own') : h('span', null, 'Ask an admin to add some.')));
+        prev.replaceChildren();
         return;
       }
-      ul.replaceChildren(...(items.length ? items.map((c, i) => h('li', { class: i === sel ? 'on' : '', onmousedown: (e) => { e.preventDefault(); pick(c); } },
-        h('b', null, c.title), h('span', null, c.body))) : [h('li', null, h('span', { class: 'muted' }, 'No quick replies match.'))]));
-      const on = ul.children[sel]; if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
+      if (!results.length) {
+        ul.replaceChildren(h('li', { class: 'qp-empty' }, `Nothing matches “${input.value.trim()}”. Try a product name or a word from the message.`));
+        prev.replaceChildren();
+        return;
+      }
+      ul.replaceChildren(...results.map((x, i) => {
+        const li = h('li', { class: `qp-item${i === sel ? ' on' : ''}${animate ? ' enter' : ''}`, role: 'option', 'aria-selected': String(i === sel), style: animate ? `--i:${i}` : null,
+          onmousemove: () => { if (sel !== i) { sel = i; draw(false); } },
+          onmousedown: (e) => { e.preventDefault(); sel = i; choose(false); } },
+          h('span', { class: 'qp-n' }, String(i + 1)),
+          h('span', { class: 'qp-t' }, ...qrMarkTitle(x.c.title, x.tIdx), x.said ? h('span', { class: 'qp-sug' }, 'suggested') : null),
+          h('span', { class: 'qp-u', title: 'Times sent in the last 14 days' }, x.c.uses ? `${x.c.uses}×` : ''),
+          h('span', { class: 'qp-s' }, ...qrSnippet(x.c, x.hit)));
+        return li;
+      }));
+      const cur = results[sel];
+      prev.replaceChildren(h('span', { class: 'cap' }, `Will insert “${cur.c.title}”`), h('div', { class: 'qp-bubble' }, cur.c.body));
+      const on = ul.children[sel];
+      if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
     };
-    const close = () => { box.remove(); const ta = $('#reply'); if (ta) ta.focus(); };
-    const pick = (c) => {
+    const close = () => { wrap.remove(); const ta = $('#reply'); if (ta) ta.focus(); };
+    const choose = (sendNow) => {
+      const x = results[sel];
+      if (!x) return;
       const ta = $('#reply');
-      if (ta) { ta.value = ta.value ? ta.value.replace(/\s*$/, '\n') + c.body : c.body; autosize(ta); updateSend(); saveDraft(ta.value); }
       close();
+      if (!ta) return;
+      ta.value = ta.value.trim() ? ta.value.replace(/\s*$/, '\n') + x.c.body : x.c.body;
+      autosize(ta); updateSend(); saveDraft(ta.value);
+      if (sendNow) { sendReply(); return; }
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.classList.remove('flash'); void ta.offsetWidth; ta.classList.add('flash');
     };
-    input.addEventListener('input', () => { sel = 0; draw(); });
+    input.addEventListener('input', () => { sel = 0; draw(false); });
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowDown') { sel = Math.min(items.length - 1, sel + 1); draw(); e.preventDefault(); }
-      else if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); }
-      else if (e.key === 'Enter' || e.key === 'Tab') { if (items[sel]) pick(items[sel]); e.preventDefault(); }
-      else if (e.key === 'Escape') { close(); e.stopPropagation(); }
+      const n = results.length;
+      if (e.key === 'ArrowDown') { if (n) { sel = (sel + 1) % n; draw(false); } e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { if (n) { sel = (sel - 1 + n) % n; draw(false); } e.preventDefault(); }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { choose(true); e.preventDefault(); }
+      else if (e.key === 'Enter' || e.key === 'Tab') { choose(false); e.preventDefault(); }
+      else if (e.key === 'Escape') { close(); e.preventDefault(); e.stopPropagation(); }
+      else if (/^[1-9]$/.test(e.key) && !input.value && +e.key <= n) { sel = +e.key - 1; choose(false); e.preventDefault(); }
     });
-    input.addEventListener('blur', () => setTimeout(() => { if (box.isConnected) box.remove(); }, 150));
-    const foot = isAdmin() && S.canned.length ? h('div', { class: 'qr-foot' }, h('button', { class: 'link', onmousedown: (e) => { e.preventDefault(); close(); openQuickManage(); } }, 'Edit quick replies')) : null;
-    const box = h('div', { class: 'qr', id: 'qr' }, input, ul, foot);
-    $('#composerWrap').append(box);
-    draw();
+    const foot = h('div', { class: 'qp-foot' },
+      h('span', null, h('kbd', null, '↑'), h('kbd', null, '↓'), ' move'), h('span', null, h('kbd', null, '↵'), ' insert'),
+      h('span', null, h('kbd', null, navigator.platform && /mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'), h('kbd', null, '↵'), ' send now'),
+      h('span', null, h('kbd', null, '1'), '–', h('kbd', null, '9'), ' pick'), h('span', null, h('kbd', null, 'Esc'), ' close'),
+      h('span', { class: 'sp' }),
+      isAdmin() && S.canned.length ? h('button', { class: 'link', onmousedown: (e) => { e.preventDefault(); close(); openQuickManage(); } }, 'Edit quick replies') : null);
+    const box = h('div', { class: 'qp', id: 'qp', role: 'dialog', 'aria-label': 'Quick replies' },
+      h('div', { class: 'qp-top' }, icon('search'), input, speed), ul, prev, foot);
+    const wrap = h('div', { class: 'qp-wrap', onmousedown: (e) => { if (e.target === wrap) { e.preventDefault(); close(); } } }, box);
+    document.body.append(wrap);
+    draw(true);
     input.focus();
+  }
+  // Sale bell: account details went out on a sales chat (portal link, invite, email + password, expiry).
+  const DELIVERY_RE = /teshrij\.xyz\/\?id=[0-9a-f-]{36}|code\.ostories\.me\/\?subscription=|open\.anghami\.com\/|\bpassword\s*:|\*expiry\*\s*:/i;
+  function isDelivery(text, a) {
+    if (!DELIVERY_RE.test(String(text || ''))) return false;
+    const row = S.chats.find((x) => x.contact === a.contact);
+    const t = (a.data && a.data.conv && a.data.conv.sys) || (row && row.sys) || null;
+    return !(t && t.kind === 'support');
+  }
+  function chime() {
+    if (!S.sounds) return;
+    try {
+      audioCtx = audioCtx || new AudioContext();
+      [988, 1319, 1760].forEach((f, i) => {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + i * 0.09;
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.1, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+        o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.5);
+      });
+    } catch (e) { /* no sound */ }
+  }
+  function saleBell(a) {
+    const row = S.chats.find((x) => x.contact === a.contact);
+    const name = row ? displayName(row) : (a.data && a.data.conv ? displayName(a.data.conv) : 'the customer');
+    chime();
+    toast(`🔔 Sold! ${name} has their account`, 'sale');
+    const t = $('#toasts').getBoundingClientRect();
+    confetti(t.left + t.width / 2, t.bottom - 30, 40);
+  }
+  function confetti(x, y, n = 30) {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const cs = getComputedStyle(document.documentElement);
+    const cols = ['--accent', '--sales', '--label', '--support', '--ok'].map((v) => cs.getPropertyValue(v).trim()).filter(Boolean);
+    for (let i = 0; i < n; i++) {
+      const c = h('i', { class: 'conf' });
+      const ang = Math.random() * Math.PI * 2, d = 90 + Math.random() * 170;
+      c.style.left = x + 'px'; c.style.top = y + 'px';
+      c.style.background = cols[i % cols.length];
+      c.style.setProperty('--cx', `${Math.cos(ang) * d}px`);
+      c.style.setProperty('--cy', `${Math.sin(ang) * d - 90}px`);
+      c.style.setProperty('--cr', `${Math.random() * 720 - 360}deg`);
+      document.body.append(c);
+      setTimeout(() => c.remove(), 1300);
+    }
   }
 
   // Editor: add, change and delete quick replies (admins).
@@ -2350,9 +2554,24 @@
     renderStaff();
     $('#helpBtn').replaceChildren(icon('help'));
     $('#helpBtn').onclick = openHelp;
+    const sortBtn = h('button', { id: 'sortBtn', class: 'sort-btn', type: 'button' }, icon('sort'));
+    $('#helpBtn').before(sortBtn);
+    const paintSort = () => {
+      const t = S.sortOld ? 'Oldest first. Click for newest first' : 'Newest first. Click for oldest first';
+      sortBtn.classList.toggle('old', S.sortOld);
+      sortBtn.title = t; sortBtn.setAttribute('aria-label', t); sortBtn.setAttribute('aria-pressed', String(S.sortOld));
+    };
+    sortBtn.onclick = () => {
+      S.sortOld = !S.sortOld; store('desk_sort_old', S.sortOld); paintSort();
+      $('#list').scrollTop = 0;
+      renderList(true);
+      if (S.sortOld && S.more) refreshList(true);
+    };
+    paintSort();
     let qTimer;
     $('#search').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && S.chats[0]) { e.preventDefault(); e.target.blur(); openChat(S.chats[0].contact); }
+      const f = ordered()[0];
+      if (e.key === 'Enter' && f) { e.preventDefault(); e.target.blur(); openChat(f.contact); }
     });
     $('#search').addEventListener('input', (e) => {
       clearTimeout(qTimer);
@@ -2391,9 +2610,10 @@
   }
 
   function moveChat(dir) {
-    if (!S.chats.length) return;
-    const i = S.active ? S.chats.findIndex((x) => x.contact === S.active.contact) : -1;
-    const next = S.chats[Math.max(0, Math.min(S.chats.length - 1, i < 0 ? 0 : i + dir))];
+    const L = ordered();
+    if (!L.length) return;
+    const i = S.active ? L.findIndex((x) => x.contact === S.active.contact) : -1;
+    const next = L[Math.max(0, Math.min(L.length - 1, i < 0 ? 0 : i + dir))];
     if (next) { openChat(next.contact); scrollRowIntoView(next.contact); }
   }
   function focusSearch() { const el = $('#search'); el.focus(); el.select(); }
