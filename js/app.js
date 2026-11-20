@@ -256,10 +256,12 @@
     return h('span', { class: `chip${xs ? ' xs' : ''}`, style: `--c:${l.color}` }, l.name);
   }
 
-  // Two views only: Unresolved (unsolved support + sales not marked complete + everything unread) and All.
+  // Three views: Unresolved (unsolved support + sales not marked complete + everything unread), Sales (every
+  // chat labelled sales, whatever its state) and All.
   // Labels and channels below them filter like in BSB. The number is the keyboard shortcut.
   const MAIN_VIEWS = [
     ['unresolved', 'inbox', 'Unresolved', () => S.counts.uncomplete, true, 'Unsolved support chats, sales chats not marked complete, and everything unread. Press V to solve / complete a chat.'],
+    ['sales', 'dollar', 'Sales', () => null, false, 'Every chat labelled Sales: open, complete or closed'],
     ['all', 'all', 'All chats', () => null, false, 'Every conversation'],
   ];
   const ALL_VIEWS = MAIN_VIEWS;
@@ -349,7 +351,7 @@
     // the voice recorder's scripts, ahead of the first mic click
     setTimeout(() => { if (window.DeskVoice && window.DeskVoice.support().engines.includes('wasm')) window.DeskVoice.preload().catch(() => {}); }, 3000);
     try {
-      const b = await api.call('boot', { view: /^(all|unresolved|l\d+)$/.test(S.view) ? S.view : 'unresolved', line: S.line || null });
+      const b = await api.call('boot', { view: /^(all|sales|unresolved|l\d+)$/.test(S.view) ? S.view : 'unresolved', line: S.line || null });
       S.me = b.me;
       if (b.admin) S.adminFlags = b.admin.flags || 0;
       setMeta(b.meta);
@@ -1375,7 +1377,7 @@
       ['J', '↓', 'Next chat', 'Tab · Alt+↓'],
       ['K', '↑', 'Previous chat', 'Shift+Tab · Alt+↑'],
       ['Esc', null, 'Leave the message box, then close the chat', ''],
-      ['1', '2', 'Views: 1 Unresolved · 2 All chats', ''],
+      ['1', '2', 'Views: 1 Unresolved · 2 Sales · 3 All chats', ''],
       ['/', 'F', 'Search', 'Ctrl+K'],
     ]],
     ['Act on the open chat', [
