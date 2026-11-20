@@ -43,12 +43,27 @@
     window.addEventListener(ev, () => { const n = Date.now(); if (n - moveAt > 1500) { moveAt = n; noteInput(); } }, { passive: true, capture: true });
   }
   let chatOnScreen = null;            // for the admin's live board: which chat this desk is showing
-  function setChat(c) { chatOnScreen = c || null; }
+  // Presence for colleagues ("Charbel is replying…"): t = 1 while this person typed in the message box of
+  // the chat on screen during the last 6 seconds. Only that fact is sent, never what was typed.
+  const TYPING_MS = 6000;
+  let typedAt = 0;
+  function setChat(c) { if ((c || null) !== chatOnScreen) typedAt = 0; chatOnScreen = c || null; }
+  function noteTyping(on = true) { typedAt = on ? Date.now() : 0; }
+  const isTyping = () => !!chatOnScreen && !document.hidden && Date.now() - typedAt < TYPING_MS;
   function activity() {
     const now = serverMinute();
     const m = [...pendingMinutes].filter((x) => x >= now - 10 && x <= now);
-    return { v: !document.hidden, m, c: document.hidden ? null : chatOnScreen };
+    const a = { v: !document.hidden, m, c: document.hidden ? null : chatOnScreen };
+    if (isTyping()) a.t = 1;
+    return a;
   }
+  // Thank-yous: the id of the last one this page has seen goes out with every inbox request (_k), so the
+  // server answers only with newer ones. null = not known yet (nothing is sent).
+  let kudosSeen = null;
+  function setKudos(id) { const n = Number(id); kudosSeen = Number.isFinite(n) && n >= 0 ? n : null; }
+  // The page can listen to every answer (presence and thank-yous ride on boot / inbox / chat answers).
+  let onAnswer = null;
+  function listen(fn) { onAnswer = typeof fn === 'function' ? fn : null; }
 
   class ApiError extends Error {
     constructor(status, message, body) { super(message); this.status = status; this.body = body || {}; }
@@ -63,7 +78,7 @@
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-desk-token': token },
-        body: JSON.stringify({ op, ...body, _a: act }),
+        body: JSON.stringify({ op, ...body, _a: act, ...(op === 'inbox' && kudosSeen !== null ? { _k: kudosSeen } : {}) }),
         credentials: 'omit',
       });
     } catch (e) {
@@ -74,6 +89,7 @@
     // delivered: these minutes need not be sent again (the current minute is re-added by the next input)
     for (const x of act.m) pendingMinutes.delete(x);
     if (data && typeof data.now === 'string') { const t = Date.parse(data.now); if (Number.isFinite(t)) skew = t - Date.now(); }
+    if (onAnswer && data) { try { onAnswer(op, data); } catch (e) { /* a listener never breaks a request */ } }
     return data;
   }
 
@@ -96,5 +112,5 @@
     return null;
   }
 
-  window.DeskApi = { call, signIn, signOut, hasToken, ApiError, mediaSource, setChat };
+  window.DeskApi = { call, signIn, signOut, hasToken, ApiError, mediaSource, setChat, noteTyping, isTyping, setKudos, listen };
 })();
