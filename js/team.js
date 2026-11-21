@@ -23,14 +23,16 @@
 
   const TZ = 'Asia/Beirut';
   const fDay = new Intl.DateTimeFormat('en-CA', { timeZone: TZ });
-  const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+  const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
   const fShort = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' });
-  const fDateTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const fDateTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
   const today = () => fDay.format(new Date(U.now()));
   const addDays = (day, n) => new Date(Date.parse(day + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
   const dayName = (day) => fShort.format(new Date(day + 'T00:00:00Z'));
   const hm = (min) => { const m = Math.max(0, Math.round(min)); return m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`; };
-  const clock = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  // 12-hour times everywhere: "5 pm", "5:30 pm".
+  const hr = (x) => { const k = ((x % 24) + 24) % 24; return `${k % 12 || 12} ${k < 12 ? 'am' : 'pm'}`; };
+  const clock = (m) => { const k = Math.floor(m / 60) % 24; return `${k % 12 || 12}:${String(m % 60).padStart(2, '0')} ${k < 12 ? 'am' : 'pm'}`; };
   const secs = (s) => s == null ? '–' : s < 90 ? `${Math.round(s)} sec` : s < 3600 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)}h ${String(Math.round((s % 3600) / 60)).padStart(2, '0')}m`;
   const num = (n) => Number(n || 0).toLocaleString('en-US');
   const pct = (a, b) => b ? `${Math.round((a / b) * 100)}%` : '–';
@@ -138,7 +140,7 @@
     return svg;
   }
   function stripAxis() {
-    return h('div', { class: 'tm-axis', 'aria-hidden': 'true' }, [0, 3, 6, 9, 12, 15, 18, 21, 24].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, `${String(x).padStart(2, '0')}:00`)));
+    return h('div', { class: 'tm-axis', 'aria-hidden': 'true' }, [0, 3, 6, 9, 12, 15, 18, 21, 24].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, hr(x))));
   }
   function legend() {
     return h('span', { class: 'tm-legend' }, h('i', { class: 'on' }), 'Working', h('i', { class: 'idle' }), 'Desk open, not touching it', h('i', { class: 'off' }), 'Away');
@@ -182,9 +184,9 @@
     return h('div', { class: 'tm-heat' },
       h('div', { class: 'tm-heat-row' }, vals.map((v, i) => {
         const lvl = v ? 1 + Math.min(4, Math.floor((v / max) * 4.999)) : 0;
-        return h('span', { class: `tm-cell l${lvl}`, dataset: { tip: `${String(i).padStart(2, '0')}:00 – ${String(i + 1).padStart(2, '0')}:00\n${v ? hm(v) + ' working' : 'Not working'}` } });
+        return h('span', { class: `tm-cell l${lvl}`, dataset: { tip: `${hr(i)} – ${hr(i + 1)}\n${v ? hm(v) + ' working' : 'Not working'}` } });
       })),
-      h('div', { class: 'tm-heat-axis', 'aria-hidden': 'true' }, [0, 6, 12, 18].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, `${String(x).padStart(2, '0')}:00`))));
+      h('div', { class: 'tm-heat-axis', 'aria-hidden': 'true' }, [0, 6, 12, 18].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, hr(x)))));
   }
   // Horizontal bars comparing employees on one measure.
   function compare(title, sub, rows, fmt, wide = false) {
@@ -791,11 +793,11 @@
     const rows = Array.from({ length: 24 }, (_, i) => by.get(i) || { h: i, turns: 0, median_s: null, in_5: 0 });
     const max = Math.max(...rows.map((r) => r.turns), 1);
     const lvl = (sv) => (sv == null ? 0 : sv <= 120 ? 1 : sv <= 300 ? 2 : sv <= 900 ? 3 : sv <= 1800 ? 4 : 5);
-    const tipOf = (r) => `${String(r.h).padStart(2, '0')}:00 – ${String(r.h + 1).padStart(2, '0')}:00\n${plural(r.turns, 'customer message')} to answer\n${r.median_s == null ? 'No answers measured' : `Typical answer after ${secs(r.median_s)} · ${pct(r.in_5, r.turns)} within 5 min`}`;
+    const tipOf = (r) => `${hr(r.h)} – ${hr(r.h + 1)}\n${plural(r.turns, 'customer message')} to answer\n${r.median_s == null ? 'No answers measured' : `Typical answer after ${secs(r.median_s)} · ${pct(r.in_5, r.turns)} within 5 min`}`;
     return h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Hour by hour'), h('span', { class: 'muted' }, 'bars: customers writing · strip: how long they waited (darker = longer)')),
       h('div', { class: 'tm-hours' }, rows.map((r) => h('span', { class: 'tm-hr', dataset: { tip: tipOf(r) } }, h('i', { style: `height:${Math.max(r.turns ? 4 : 0, (r.turns / max) * 100)}%` })))),
       h('div', { class: 'tm-heat-row' }, rows.map((r) => h('span', { class: `tm-cell l${lvl(r.median_s)}`, dataset: { tip: tipOf(r) } }))),
-      h('div', { class: 'tm-heat-axis', 'aria-hidden': 'true' }, [0, 6, 12, 18].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, `${String(x).padStart(2, '0')}:00`))));
+      h('div', { class: 'tm-heat-axis', 'aria-hidden': 'true' }, [0, 6, 12, 18].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, hr(x)))));
   }
   function funnelCard(q) {
     const f = q.cur.funnel || {}, pf = q.prev.funnel || {};
