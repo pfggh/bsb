@@ -824,12 +824,18 @@
     const unsolved = todo(c.sys);
     const late = unsolved && c.sys.kind === 'support' && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
     return JSON.stringify([unsolved, c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
-      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled, c.fu_alert || '']);
+      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled, c.fu_alert || '', heldBy(c) || '', c.sys && c.sys.hold ? c.sys.hold.reason || '' : '']);
+  }
+  // An admin sent this chat back and nobody has replied to the customer since.
+  function heldBy(c) {
+    const x = c.sys && c.sys.hold;
+    return x && !x.replied ? x.by || 'An admin' : null;
   }
   function row(c) {
     const on = S.active && S.active.contact === c.contact;
     const sb = c.sys && c.sys.kind === 'sales' ? sysBadge(c.sys) : null;
-    return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}`, dataset: { contact: c.contact } },
+    const held = heldBy(c);
+    return h('li', { class: `row${c.unread ? ' unread' : ''}${on ? ' on' : ''}${held ? ' held' : ''}`, dataset: { contact: c.contact } },
       avatar(c),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-top' }, h('span', { class: 'row-name' }, displayName(c)),
@@ -838,6 +844,8 @@
         h('div', { class: 'row-mid' }, preview(c), hereChip(c.contact),
           thanked(c) ? h('span', { class: 'row-heart', title: 'The customer said thanks', 'aria-label': 'The customer said thanks' }, '❤️') : null,
           rowDot(c)),
+        held ? h('div', { class: 'row-held', title: `${held} sent this chat back. Reply to the customer before completing it again.` },
+          icon('warn', 'xs'), h('b', null, `Sent back by ${held}`), c.sys.hold.reason ? h('span', null, c.sys.hold.reason) : null) : null,
         sb || c.scheduled || c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
           c.fu_alert === 'says_paid' ? h('span', { class: 'fu-chip paid', title: 'The customer says they paid. Check the payment and activate.' }, icon('warn', 'xs'), 'Says paid')
             : c.fu_alert === 'plan_chosen' ? h('span', { class: 'fu-chip', title: 'The customer chose a plan and is waiting for the payment details.' }, icon('check', 'xs'), 'Ready to pay') : null,
@@ -1238,8 +1246,8 @@
     const x = t && t.hold;
     if (!x) return null;
     return h('div', { class: `holdbar${x.replied ? ' replied' : ''}`, role: 'alert' },
-      h('div', { class: 'holdbar-h' }, icon('warn', 'sm'), h('b', null, `${x.by || 'An admin'} marked this chat unsolved`), h('span', { class: 'muted' }, ago(x.at))),
-      x.reason ? h('div', null, x.reason) : null,
+      h('div', { class: 'holdbar-h' }, icon('warn', 'sm'), h('b', null, `${x.by || 'An admin'} sent this chat back`), h('span', { class: 'muted' }, ago(x.at))),
+      x.reason ? h('div', { class: 'holdbar-why' }, x.reason) : null,
       x.todo ? h('div', null, h('b', null, 'To do: '), x.todo) : null,
       h('div', { class: 'holdbar-f' }, x.replied ? 'You replied since. Solve it once the customer is really sorted.' : 'It cannot be solved again until someone replies to the customer.'));
   }
