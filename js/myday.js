@@ -13,7 +13,7 @@
   const h = (...a) => U.h(...a);
   const TZ = 'Asia/Beirut';
   const fDay = new Intl.DateTimeFormat('en-CA', { timeZone: TZ });
-  const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+  const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
   const fDate = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short' });
   const fLong = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' });
   const n0 = (v) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : 0; };

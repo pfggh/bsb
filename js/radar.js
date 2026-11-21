@@ -26,7 +26,7 @@
   const nameOf = (c) => (c.name && /[\p{L}\p{N}]/u.test(c.name) ? c.name : c.handle ? '@' + c.handle : /^\d+$/.test(c.contact) ? '+' + c.contact : 'Instagram user');
   const reasonOf = (c) => REASONS[c.reason] || c.reason || 'Not checked yet';
   const draw = () => { if (st.active) redraw(); };
-  const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+  const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
   const fDay = new Intl.DateTimeFormat('en-CA', { timeZone: TZ });
   const fLong = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' });
   const since = (ts) => {
