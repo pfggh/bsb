@@ -6,8 +6,10 @@
  *            AudioWorklet or a Worker). Needs 'wasm-unsafe-eval' in the page CSP.
  *   mr-webm  the browser's own MediaRecorder (WebM/Opus), remuxed to Ogg by DeskOgg — no re-encoding.
  *   mr-ogg   MediaRecorder writing Ogg/Opus itself (Firefox).
- * While wasm records, a MediaRecorder runs on the same microphone as a backup: if the WASM file
- * comes out broken or starved (audio engine suspended mid-way), the backup is used instead.
+ * wasm and the first MediaRecorder kind start together on the same microphone, and the recording
+ * begins as soon as either one runs (the browser's own recorder is there at once; the WASM encoder
+ * needs its files first, which used to hold "Starting the microphone…" on screen for seconds on a
+ * slow line). On stop the WASM file is sent unless it is broken, starved or missed the beginning.
  *
  * DeskVoice.create(opts) -> { start(), stop(), cancel() }; see the bottom of the file. Needs js/ogg.js first.
  */
@@ -110,8 +112,11 @@
     const o = Object.assign({ maxMs: 5 * 60 * 1000, base: BASE }, opts || {});
     let phase = 'idle';
     let stream = null, ctx = null, meterSrc = null, analyser = null, sink = null, meterTimer = null, maxTimer = null;
-    let primary = null, backup = null, startedAt = 0, peak = 0, meterLive = false;
-    let startP = null, stopP = null, cancelled = false, released = false;
+    let startedAt = 0, peak = 0, meterLive = false;
+    let startP = null, stopP = null, cancelled = false, released = false, closed = false, wake = null;
+    const live = [];                 // engines that are recording
+    // what happened, for the desk's own log (times in ms; never any sound)
+    const stats = { micMs: null, firstMs: null, engines: {}, errors: {}, picked: null };
     const state = (p) => { phase = p; try { if (o.onState) o.onState(p); } catch (e) { log(e); } };
 
     // ---- engines: each returns { engine, stop(): Promise<Uint8Array>, cancel() }
@@ -209,16 +214,16 @@
           if (phase !== 'recording' || !ctx || ctx.state === 'running' || ctx.state === 'closed') return;
           ctx.resume().catch(() => {});
           // a WASM-only recording gets no sound while the engine is stopped: keep what we have
-          setTimeout(() => { if (ctx && ctx.state !== 'running' && primary && primary.engine === 'wasm' && !backup) autoStop('audio interrupted'); }, 1500);
+          setTimeout(() => { if (ctx && ctx.state !== 'running' && live.length && live.every((e) => e.engine === 'wasm')) autoStop('audio interrupted'); }, 1500);
         };
       }
     }
 
     function release() {
       if (released) return;
-      released = true;
+      released = true; closed = true;
       clearInterval(meterTimer); clearTimeout(maxTimer);
-      for (const e of [primary, backup]) if (e) e.cancel();
+      for (const e of live) e.cancel();
       try { if (meterSrc) meterSrc.disconnect(); if (analyser) analyser.disconnect(); if (sink) sink.disconnect(); } catch (e) { /* gone */ }
       if (stream) stream.getTracks().forEach((t) => { try { t.stop(); } catch (e) { /* gone */ } });
       if (ctx) { ctx.onstatechange = null; if (ctx.state !== 'closed') ctx.close().catch(() => {}); }
@@ -242,22 +247,39 @@
       const pre = engines.includes('wasm') ? preload(o.base).then(() => null, (e) => e) : null;
       startP = (async () => {
         try {
+          const t0 = Date.now();
           stream = await mic;
+          stats.micMs = Date.now() - t0;
           if (cancelled) throw fail('failed', 'cancelled');
           if (!stream.getAudioTracks().length) throw fail('no-mic');
           meter();
+          const t1 = Date.now();
           let lastErr = null;
-          for (const engine of engines) {
-            try { primary = await startEngine(engine, pre); break; } catch (e) { lastErr = e; log(engine, 'did not start:', e && e.message); }
-            if (cancelled) throw fail('failed', 'cancelled');
-          }
-          if (!primary) throw fail(o.engine ? 'unsupported' : 'failed', lastErr && lastErr.message);
-          if (primary.engine === 'wasm' && !o.engine) {
-            const b = engines.find((e) => e !== 'wasm');
-            if (b) { try { backup = await startEngine(b); } catch (e) { log('backup', b, 'did not start:', e && e.message); } }
-          }
+          // one engine: null when it did not start; an engine that arrives after the end is closed again
+          const tryStart = (engine) => startEngine(engine, pre).then((e) => {
+            if (closed) { e.cancel(); return null; }
+            e.at = Date.now(); stats.engines[engine] = e.at - t1; live.push(e);
+            return e;
+          }, (e) => {
+            lastErr = e; stats.errors[engine] = String((e && e.message) || e).slice(0, 120);
+            log(engine, 'did not start:', e && e.message);
+            return null;
+          });
+          const jobs = [];
+          if (engines.includes('wasm')) jobs.push(tryStart('wasm'));
+          const mrs = engines.filter((e) => e !== 'wasm');
+          if (mrs.length) jobs.push((async () => { for (const m of mrs) { const e = await tryStart(m); if (e || closed) return e; } return null; })());
+          // the first one that runs starts the recording; the other joins when it is ready
+          const first = await new Promise((res) => {
+            let left = jobs.length;
+            wake = () => res(null);   // cancel() does not wait for an engine that is still starting
+            if (!left) res(null);
+            for (const j of jobs) j.then((e) => { if (e) res(e); else if (--left === 0) res(null); });
+          });
           if (cancelled) throw fail('failed', 'cancelled');
-          startedAt = Date.now();
+          if (!first) throw fail(o.engine ? 'unsupported' : 'failed', lastErr && lastErr.message);
+          startedAt = first.at;
+          stats.firstMs = startedAt - t0;
           maxTimer = setTimeout(() => autoStop('maximum length'), o.maxMs);
           watch();
           state('recording');
@@ -275,31 +297,39 @@
       stopP = (async () => {
         if (!startP) throw fail('failed', 'not recording');
         await startP;
+        if (cancelled) throw fail('failed', 'cancelled');
         state('stopping');
         clearTimeout(maxTimer);
         const wallSec = (Date.now() - startedAt) / 1000;
         if (wallSec * 1000 < MIN_MS) { release(); throw fail('too-short'); }
+        closed = true;               // an engine still starting is not waited for
+        const list = live.slice();
         const attempt = (e) => e.stop().then(
           (bytes) => ({ engine: e.engine, bytes, info: inspect(bytes) }),
           (err) => ({ engine: e.engine, info: { ok: false, error: err && err.message } }));
         const dur = (t) => (t.info.durationSec == null ? wallSec : t.info.durationSec);
         const usable = (t) => t.info.ok && dur(t) >= 0.4;
-        // Both recorders stop at once and the microphone is released right away; the backup's
-        // file is only built when the primary one is broken or clearly short (encoder starved).
-        const backHalt = backup && backup.halt ? backup.halt().catch(() => {}) : null;
-        const tried = [await attempt(primary)];
-        if (backHalt) await backHalt;
+        // All recorders stop at once. With the browser's own recording in hand, a WASM encoder
+        // that does not hand over its file within 3 s is not waited for any longer.
+        const others = list.length > 1;
+        const tried = await Promise.all(list.map((e) => (e.engine === 'wasm' && others
+          ? Promise.race([attempt(e), new Promise((res) => setTimeout(() => res({ engine: e.engine, info: { ok: false, error: 'slow to finish' } }), 3000))])
+          : attempt(e))));
         release();
-        if (backup && (!usable(tried[0]) || dur(tried[0]) < wallSec * 0.7)) tried.push(await attempt(backup));
-        for (const t of tried) if (!t.info.ok) log(t.engine, 'output rejected:', t.info.error);
+        for (const t of tried) if (!t.info.ok) { log(t.engine, 'output rejected:', t.info.error); stats.errors[t.engine] = String(t.info.error || '').slice(0, 120); }
         const good = tried.filter(usable);
         if (!good.length) throw fail('failed', tried.map((t) => `${t.engine}: ${t.info.error || 'too short'}`).join('; '));
-        let pick = good[0];
-        if (good.length > 1 && dur(good[1]) > dur(pick)) pick = good[1];
+        // WASM first (the file WhatsApp has always taken from us), unless another recording holds
+        // clearly more of what was said: the encoder started late or was starved.
+        let pick = good.find((t) => t.engine === 'wasm') || good[0];
+        for (const t of good) if (dur(t) > dur(pick) + 0.25) pick = t;
+        stats.picked = pick.engine;
+        stats.durations = Object.fromEntries(tried.map((t) => [t.engine, t.info.ok ? Math.round(dur(t) * 10) / 10 : null]));
+        stats.wallSec = Math.round(wallSec * 10) / 10;
         state('ready');
         return {
           blob: new Blob([pick.bytes], { type: 'audio/ogg' }), bytes: pick.bytes, mime: 'audio/ogg', engine: pick.engine,
-          durationSec: dur(pick), peak: meterLive ? peak : null, silent: meterLive && peak < 0.01,
+          durationSec: dur(pick), peak: meterLive ? peak : null, silent: meterLive && peak < 0.01, stats,
         };
       })();
       stopP.catch(() => { if (phase !== 'ready') state('idle'); });
@@ -309,10 +339,11 @@
     function cancel() {
       cancelled = true;
       try { release(); } catch (e) { log(e); }
+      if (wake) wake();
       if (phase !== 'idle') state('idle');
     }
 
-    return { start, stop, cancel, get phase() { return phase; } };
+    return { start, stop, cancel, get phase() { return phase; }, get stats() { return stats; } };
   }
 
   // Can this browser play our Ogg/Opus preview? (Safari before 17/18 cannot; sending still works.)

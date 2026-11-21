@@ -605,14 +605,34 @@
     closeSide();
     window.DeskMyDay.open({ h, icon, api, now, openChat, TZ, me: S.me });
   }
-  // A newer desk was published: ask for a reload once (old pages miss new features).
-  let versionAsked = false;
+  // A newer desk was published: ask for a reload (old pages miss new features).
+  // "Reload now" asks for a fresh copy of the page (?r=<version> in the address, so no cache can answer
+  // with the old one) and notes which version it went for. If the page that comes back is still older
+  // (the release has not reached this network yet), the bar stays away for VERSION_WAIT_MS instead of
+  // coming straight back after every reload. "Later" hides it for the same time.
+  const VERSION_WAIT_MS = 20 * 60 * 1000;
+  let versionBar = null, versionLater = 0, versionStuckSaid = false;
   function checkVersion() {
-    const web = Number(S.counts && S.counts.web) || 0;
-    if (versionAsked || !web || web <= (C.version || 0)) return;
-    versionAsked = true;
-    document.body.append(h('div', { class: 'update-bar', role: 'status' }, h('span', null, 'A new version of the desk is ready.'),
-      h('button', { class: 'btn sm primary', onclick: () => location.reload() }, 'Reload now')));
+    const web = Number(S.counts && S.counts.web) || 0, have = Number(C.version) || 0;
+    const hide = () => { if (versionBar) { versionBar.remove(); versionBar = null; } };
+    if (!web || !have || web <= have) return hide();
+    const tried = store('desk_reload_try');
+    if (tried && tried.web === web && Date.now() - tried.at < VERSION_WAIT_MS) {
+      if (!versionStuckSaid) { versionStuckSaid = true; api.report('version', 'still old after reload', { have, web }); }
+      return hide();
+    }
+    if (versionBar || Date.now() - versionLater < VERSION_WAIT_MS) return;
+    api.report('version', 'bar shown', { have, web });
+    versionBar = h('div', { class: 'update-bar', role: 'status' }, h('span', null, 'A new version of the desk is ready.'),
+      h('button', { class: 'btn sm primary', type: 'button', onclick: () => {
+        if (voice.phase !== 'idle' && !voiceMayLeave()) return;
+        store('desk_reload_try', { web, at: Date.now() });
+        api.report('version', 'reload', { have, web });
+        const go = () => { const u = new URL(location.href); u.searchParams.set('r', String(web)); location.replace(u.href); };
+        Promise.race([api.flushDiag(), new Promise((r) => setTimeout(r, 600))]).then(go, go);
+      } }, 'Reload now'),
+      h('button', { class: 'btn sm ghost', type: 'button', title: 'Ask me again in 20 minutes', onclick: () => { versionLater = Date.now(); hide(); } }, 'Later'));
+    document.body.append(versionBar);
   }
 
   // ------------------------------------------------------------------ sidebar
@@ -2254,6 +2274,7 @@
       refreshList();
     } catch (e) {
       p.status = 'failed'; p.error = e.message;
+      api.report('send', p.media ? `${p.media.kind} not sent` : 'text not sent', { status: e.status, err: String(e.message).slice(0, 200) });
       if (S.active === a) renderMessages(false);
       toast(`Not sent: ${e.message}`, 'error');
     }
@@ -2330,24 +2351,42 @@
   // Must stay synchronous up to rec.start(): Safari only allows the microphone / audio engine
   // from inside the click.
   function voiceStart() {
-    if (voice.phase !== 'idle' || !S.active || !S.active.data) return;
-    if (isIg(S.active.data.conv)) return toast('Voice notes can only be sent on WhatsApp', 'error');
-    if (!window.DeskVoice) return toast('The voice recorder did not load — reload the page', 'error');
+    if (!S.active) return;
+    if (voice.phase !== 'idle') {
+      api.report('voice', 'mic pressed while busy', { phase: voice.phase, for: Date.now() - voice.started });
+      return toast(voice.phase === 'ready' ? 'Send or discard the voice note you recorded first' : voice.phase === 'recording' ? 'Already recording' : 'One moment…');
+    }
+    // the chat itself may still be loading: the list row already says which channel it is on
+    const conv = S.active.data ? S.active.data.conv : S.chats.find((x) => x.contact === S.active.contact) || { contact: S.active.contact };
+    if (isIg(conv)) return toast('Voice notes can only be sent on WhatsApp', 'error');
+    if (!window.DeskVoice) { api.report('voice', 'recorder script missing'); return toast('The voice recorder did not load — reload the page', 'error'); }
     const sup = window.DeskVoice.support();
-    if (!sup.ok) return toast(sup.reason === 'insecure' ? 'The microphone needs https' : 'This browser cannot record voice notes — update it, or use Chrome, Edge, Firefox or Safari', 'error');
+    if (!sup.ok) { api.report('voice', 'not supported', { reason: sup.reason }); return toast(sup.reason === 'insecure' ? 'The microphone needs https' : 'This browser cannot record voice notes — update it, or use Chrome, Edge, Firefox or Safari', 'error'); }
     const rec = window.DeskVoice.create({
       onLevel: (v) => { voice.level = v; },
       onAutoStop: (why) => { if (voice.rec === rec) { voice.note = why === 'maximum length' ? 'Stopped at 5 minutes' : `Stopped: ${why}`; voiceStop(); } },
     });
     Object.assign(voice, { phase: 'starting', rec, chat: S.active, result: null, url: null, started: Date.now(), stopped: 0, level: 0, note: '' });
     voiceUi();
+    const pressed = Date.now();
+    // still "Starting the microphone…" after 6 s: say why it may be waiting (the browser's permission question)
+    const slow = setTimeout(() => {
+      if (voice.rec !== rec || voice.phase !== 'starting') return;
+      voice.note = 'Waiting for the microphone — allow it if the browser asks';
+      voiceUi();
+      api.report('voice', 'start slow', { ms: Date.now() - pressed, ...rec.stats });
+    }, 6000);
     rec.start().then(() => {
+      clearTimeout(slow);
+      api.report('voice', 'started', { ms: Date.now() - pressed, ...rec.stats });
       if (voice.rec !== rec) return;
-      voice.phase = 'recording'; voice.started = Date.now();
+      voice.phase = 'recording'; voice.started = Date.now(); voice.note = '';
       clearInterval(voice.tick);
       voice.tick = setInterval(voiceTick, 150);
       voiceUi();
     }, (e) => {
+      clearTimeout(slow);
+      api.report('voice', 'start failed', { ms: Date.now() - pressed, code: e && e.code, err: String((e && e.message) || e).slice(0, 200), ...rec.stats });
       if (voice.rec !== rec) return;
       voiceReset();
       toast(e.message || 'Cannot record', 'error');
@@ -2359,7 +2398,9 @@
     voice.phase = 'stopping'; voice.stopped = Date.now();
     clearInterval(voice.tick); voice.tick = null;
     voiceUi();
+    const stopAt = Date.now();
     rec.stop().then((r) => {
+      api.report('voice', 'recorded', { ms: Date.now() - stopAt, sec: Math.round(r.durationSec * 10) / 10, engine: r.engine, silent: !!r.silent, ...r.stats });
       if (voice.rec !== rec) return;
       voice.result = r;
       voice.url = URL.createObjectURL(r.blob);
@@ -2367,6 +2408,7 @@
       voice.phase = 'ready';
       voiceUi();
     }, (e) => {
+      if (e.code !== 'too-short') api.report('voice', 'recording failed', { ms: Date.now() - stopAt, code: e && e.code, err: String((e && e.message) || e).slice(0, 200), ...rec.stats });
       if (voice.rec !== rec) return;
       voiceReset();
       toast(e.code === 'too-short' ? 'Too short' : e.message || 'Recording failed', e.code === 'too-short' ? undefined : 'error');

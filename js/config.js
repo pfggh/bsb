@@ -12,11 +12,15 @@
   }
 
   const local = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+  const me = document.currentScript && document.currentScript.src;
+  const stamp = Number((String(me || '').match(/[?&]v=(\d{12})\b/) || [])[1]) || 0;
   window.DESK = Object.freeze({
     // The local demo (demo/run.sh) serves this page and the API itself (same tokens, sending simulated).
     demo: local && !/[?&]prod\b/.test(location.search),
     supabaseUrl: 'https://kfgswynickhywzhneltu.supabase.co',
-    version: 202611210100, // same stamp as the ?v= in index.html; the desk asks for a reload when the server names a newer one
+    // The page's version = the ?v= stamp index.html loads this file with (one place to change on a release, so
+    // the two can never disagree again). The desk asks for a reload when the server names a newer one.
+    version: stamp,
     pollMs: 8000,
     pollHiddenMs: 30000,
     threadPollMs: 4000,

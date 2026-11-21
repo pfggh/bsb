@@ -65,6 +65,70 @@
   let onAnswer = null;
   function listen(fn) { onAnswer = typeof fn === 'function' ? fn : null; }
 
+  // ---- what goes wrong on this device (desk.client_log, read by the admin's helper, never shown to staff).
+  // Short technical notes only: script errors, a page that stopped answering, slow or failed requests,
+  // the steps of a voice recording, the "new version" bar. Never message text, never audio.
+  const POLL_OPS = new Set(['inbox', 'chat']);
+  const POLL_TIMEOUT_MS = 25000;
+  const SLOW_MS = 4000;
+  const DIAG_PER_PAGE = 400;
+  const diagQ = [];
+  let diagCount = 0, diagBusy = false;
+  const seenMsgs = new Map();
+  function report(kind, msg, detail) {
+    try {
+      if (diagCount >= DIAG_PER_PAGE) return;
+      const m = String(msg == null ? '' : msg).slice(0, 300);
+      if (kind === 'error') { const n = (seenMsgs.get(m) || 0) + 1; seenMsgs.set(m, n); if (n > 3) return; }
+      diagCount++;
+      diagQ.push({ k: String(kind).slice(0, 24), m, d: detail && typeof detail === 'object' ? detail : undefined, t: Date.now() + skew });
+      if (diagQ.length >= 20) flushDiag();
+    } catch (e) { /* reporting never breaks the page */ }
+  }
+  async function flushDiag() {
+    if (diagBusy || !diagQ.length || !TOKEN_RE.test(getToken())) return;
+    diagBusy = true;
+    const items = diagQ.splice(0, 20);
+    try {
+      await call('client_log', { items, page: C.version || 0, ua: String(navigator.userAgent || '').slice(0, 300) });
+    } catch (e) {
+      if (e && e.status === 0 && diagQ.length < 80) diagQ.unshift(...items); // offline: try again later
+    } finally { diagBusy = false; }
+  }
+  setInterval(flushDiag, 20000);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushDiag(); });
+  window.addEventListener('pagehide', flushDiag);
+  const short = (u) => String(u || '').replace(/^.*\//, '').replace(/[?#].*$/, '').slice(0, 60);
+  window.addEventListener('error', (e) => {
+    const t = e && e.target;
+    if (t && t !== window && t.tagName) { // a script, stylesheet, image or sound that did not load
+      if (/^(SCRIPT|LINK)$/.test(t.tagName)) report('error', `${t.tagName.toLowerCase()} did not load: ${short(t.src || t.href)}`);
+      return;
+    }
+    report('error', (e && e.message) || 'error', { at: `${short(e && e.filename)}:${(e && e.lineno) || 0}:${(e && e.colno) || 0}`,
+      stack: e && e.error && e.error.stack ? String(e.error.stack).replace(/https?:\/\/[^\s)]*\//g, '').slice(0, 600) : undefined });
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    if (r instanceof ApiError) return; // already counted as a request
+    report('error', `promise: ${(r && r.message) || r}`, { stack: r && r.stack ? String(r.stack).replace(/https?:\/\/[^\s)]*\//g, '').slice(0, 600) : undefined });
+  });
+  // The page stopped answering (clicks and keys wait): a one-second timer that fires late while the tab is
+  // in front. Plus, where the browser tells us, a count of every block over a quarter second.
+  let beatAt = Date.now(), beatFront = !document.hidden, stallAt = 0;
+  setInterval(() => {
+    const n = Date.now(), late = n - beatAt - 1000, front = !document.hidden;
+    if (front && beatFront && late > 1500 && late < 120000 && n - stallAt > 10000) { stallAt = n; report('stall', 'page did not answer', { ms: late, chat: !!chatOnScreen }); }
+    beatAt = n; beatFront = front;
+  }, 1000);
+  try {
+    let n = 0, max = 0, total = 0;
+    new PerformanceObserver((list) => {
+      for (const x of list.getEntries()) if (x.duration >= 250) { n++; total += x.duration; if (x.duration > max) max = x.duration; }
+    }).observe({ entryTypes: ['longtask'] });
+    setInterval(() => { if (n) { report('stall', 'blocks in 5 min', { n, max: Math.round(max), total: Math.round(total) }); n = 0; max = 0; total = 0; } }, 300000);
+  } catch (e) { /* not in this browser */ }
+
   class ApiError extends Error {
     constructor(status, message, body) { super(message); this.status = status; this.body = body || {}; }
   }
@@ -73,18 +137,30 @@
     if (!TOKEN_RE.test(token)) throw new ApiError(401, 'Signed out');
     const url = C.demo ? '/api/desk' : `${C.supabaseUrl}/functions/v1/desk`;
     const act = activity();
-    let resp;
+    // The two polls give up after POLL_TIMEOUT_MS: a request that never answers used to hold the list
+    // and the open chat still for good (each waits for its previous poll). Nothing that changes
+    // data is ever cut off: a slow send must not look like a failed one.
+    const ctl = POLL_OPS.has(op) && typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), POLL_TIMEOUT_MS) : null;
+    const t0 = Date.now();
+    let resp, data;
     try {
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-desk-token': token },
         body: JSON.stringify({ op, ...body, _a: act, ...(op === 'inbox' && kudosSeen !== null ? { _k: kudosSeen } : {}) }),
         credentials: 'omit',
+        ...(ctl ? { signal: ctl.signal } : {}),
+        ...(op === 'client_log' ? { keepalive: true } : {}),
       });
+      data = await resp.json().catch(() => ({}));
     } catch (e) {
-      throw new ApiError(0, 'No connection');
-    }
-    const data = await resp.json().catch(() => ({}));
+      const timedOut = !!(ctl && ctl.signal.aborted);
+      if (op !== 'client_log') report('api', op, { ms: Date.now() - t0, status: 0, why: timedOut ? 'timeout' : String((e && e.message) || e).slice(0, 80), online: navigator.onLine !== false });
+      throw new ApiError(0, timedOut ? 'The server took too long to answer' : 'No connection');
+    } finally { clearTimeout(timer); }
+    const ms = Date.now() - t0;
+    if (op !== 'client_log' && (ms > SLOW_MS || resp.status >= 500)) report('api', op, { ms, status: resp.status });
     if (!resp.ok) throw new ApiError(resp.status, data.error || `HTTP ${resp.status}`, data);
     // delivered: these minutes need not be sent again (the current minute is re-added by the next input)
     for (const x of act.m) pendingMinutes.delete(x);
@@ -112,5 +188,5 @@
     return null;
   }
 
-  window.DeskApi = { call, signIn, signOut, hasToken, ApiError, mediaSource, setChat, noteTyping, isTyping, setKudos, listen };
+  window.DeskApi = { call, signIn, signOut, hasToken, ApiError, mediaSource, setChat, noteTyping, isTyping, setKudos, listen, report, flushDiag };
 })();
