@@ -457,6 +457,10 @@
     if (Array.isArray(d.here)) { serverNew = true; setHere(d.here); }
     if (op === 'chat' && Array.isArray(d.messages) && d.messages.some((m) => m && m.transcript !== undefined)) serverNew = true;
     if (op !== 'chat' && d.kudos && typeof d.kudos === 'object') takeKudos(d.kudos, op === 'boot');
+    if (op === 'inbox' && d.sales && Array.isArray(d.sales.list)) {
+      const first = Math.max(1, (Number(d.sales.n) || d.sales.list.length) - d.sales.list.length + 1);
+      d.sales.list.forEach((x, i) => setTimeout(() => saleBell(x.contact, { product: x.product, n: first + i }), i * 3400));
+    }
   }
 
   // ------------------------------------------------------------------ boot
@@ -2266,10 +2270,11 @@
   function deliver(p, a) { p.done = deliverNow(p, a); return p.done; }
   async function deliverNow(p, a) {
     try {
+      let r = null;
       if (p.media) await api.call('send_media', { contact: a.contact, request_id: p.request_id, ...p.media });
-      else await api.call('send', { contact: a.contact, text: p.text, request_id: p.request_id });
+      else r = await api.call('send', { contact: a.contact, text: p.text, request_id: p.request_id });
       a.pending = a.pending.filter((x) => x !== p);
-      if (!p.media && isDelivery(p.text, a)) saleBell(a);
+      if (r && r.sale) saleBell(a.contact, r.sale);
       if (S.active === a) await pollChat();
       refreshList();
     } catch (e) {
@@ -2593,14 +2598,9 @@
     draw(true);
     input.focus();
   }
-  // Sale bell: account details went out on a sales chat (portal link, invite, email + password, expiry).
-  const DELIVERY_RE = /teshrij\.xyz\/\?id=[0-9a-f-]{36}|code\.ostories\.me\/\?subscription=|open\.anghami\.com\/|\bpassword\s*:|\*expiry\*\s*:/i;
-  function isDelivery(text, a) {
-    if (!DELIVERY_RE.test(String(text || ''))) return false;
-    const row = S.chats.find((x) => x.contact === a.contact);
-    const t = (a.data && a.data.conv && a.data.conv.sys) || (row && row.sys) || null;
-    return !(t && t.kind === 'support');
-  }
+  // Sale bell: the server decides. Adding a subscription (addgpt, addanghami, tvleb, ...) arms it for that
+  // customer; the message that sends them the account rings it, once (answer of `send`: sale {contact, product, n}).
+  // Sales that reach the system after the account was sent (tvleb) arrive with the list refresh instead.
   // A small hand-bell: a bright strike with overtones, then a rising three-note flourish.
   function chime() {
     if (!S.sounds) return;
@@ -2618,22 +2618,13 @@
       [[1318.5, 0.18], [1568, 0.30], [2093, 0.42]].forEach(([f, at]) => note(f, at, 0.7, 0.08, 'triangle')); // the flourish
     } catch (e) { /* no sound */ }
   }
-  // Sales this person rang today, on this device (resets at midnight).
-  function salesToday() {
-    const day = dayKey(new Date());
-    const st = store('desk_sales_today');
-    const n = st && st.day === day ? st.n + 1 : 1;
-    store('desk_sales_today', { day, n });
-    return n;
-  }
   const ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
-  function saleBell(a) {
-    const row = S.chats.find((x) => x.contact === a.contact);
-    const conv = row || (a.data && a.data.conv) || null;
+  function saleBell(contact, sale) {
+    const a = S.active && S.active.contact === contact ? S.active : null;
+    const conv = S.chats.find((x) => x.contact === contact) || (a && a.data && a.data.conv) || null;
     const name = conv ? displayName(conv) : 'The customer';
-    const t = (a.data && a.data.conv && a.data.conv.sys) || (row && row.sys) || null;
-    const prod = t && (t.bought_product || t.product);
-    const n = salesToday();
+    const prod = sale && sale.product;
+    const n = Math.max(1, Number(sale && sale.n) || 1);   // my sales today, counted by the server
     chime();
     const old = $('#salePop'); if (old) old.remove();
     const bell = h('div', { class: 'sp-bell' }, h('i', { class: 'sp-ring' }), h('i', { class: 'sp-ring r2' }), icon('bell'));
