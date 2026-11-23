@@ -1525,3 +1525,58 @@ p.md-none + .md-open { margin-top: 14px; }
   .md-cols { grid-template-columns: minmax(0, 1fr); }
   .md-wrow { grid-template-columns: minmax(0, 1fr) 58px 58px 58px; padding-left: 12px; padding-right: 12px; }
 }
+
+/* =====================================================================================
+   2026-11-23 interface pass
+   ===================================================================================== */
+/* Notifications (toasts, the undo bar, "new version") sit over the bottom of the chat LIST, never over the
+   conversation or the message box: right after V the next chat is open and staff start typing there. */
+:root { --note-x: calc(var(--side-w) + var(--list-w) / 2); --note-w: calc(var(--list-w) - 20px); }
+@media (max-width: 1180px) { :root { --note-x: calc(var(--list-w) / 2); } }
+.toasts { left: var(--note-x); bottom: 14px; width: var(--note-w); justify-items: center; }
+.toast { max-width: 100%; }
+.toast.thanks { max-width: 100%; }
+.undo { left: var(--note-x); bottom: 14px; width: var(--note-w); }
+.undo-bar { align-items: center; gap: 10px; padding: 9px 10px 9px 12px; }
+.undo-text { flex: 1; min-width: 0; }
+.undo-btns { flex: none; display: grid; gap: 6px; }
+.undo-btns .btn { justify-content: space-between; }
+.undo-sub { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.undo .btn.sm { flex: none; }
+/* while the server checks a V: a moving stripe instead of the countdown */
+.undo-progress i.checking { width: 35%; background: var(--accent); animation: undoCheck 1.1s ease-in-out infinite alternate; transform: none; }
+@keyframes undoCheck { from { margin-left: 0; } to { margin-left: 65%; } }
+@media (prefers-reduced-motion: reduce) { .undo-progress i.checking { animation: none; width: 100%; opacity: .5; } }
+/* the toasts stack above the undo bar while both show */
+body:has(.undo) .toasts { bottom: 116px; }
+.update-bar { left: var(--note-x); top: 10px; bottom: auto; width: var(--note-w); flex-wrap: wrap; justify-content: center; font-size: 13px; }
+@media (max-width: 760px) {
+  :root { --note-x: 50%; --note-w: calc(100% - 24px); }
+  .toasts { top: 10px; bottom: auto; }
+  body:has(.undo) .toasts { bottom: auto; }
+  .undo { top: 10px; bottom: auto; }
+  body:has(.undo) .toasts { top: 118px; }
+}
+
+/* chat rows: two lines for most chats (the Sales tag and the "scheduled" clock moved onto the preview line) */
+.row { padding: 9px 14px 9px 13px; gap: 11px; }
+.row-mid .sys { flex: none; height: 18px; padding: 0 5px; font-size: 10.5px; }
+.row-mid .sys svg.i { width: 11px; height: 11px; }
+.row-sched { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.row-sched svg.i { width: 11px; height: 11px; }
+.row-chips { margin-top: 3px; }
+
+/* conversation: status lines take less room between the messages */
+.ev { margin: 3px 0; padding: 3px 10px; font-size: 11.5px; }
+.ev + .ev { margin-top: 0; }
+.episode { margin: 10px 0 4px; }
+
+/* sidebar foot: the name gives way, never the "admin" badge */
+.staff-btn span:last-child { overflow: visible; }
+.staff-btn > span:not(.role) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.staff-btn .role { flex: none; }
+
+/* a photo that did not load: Retry */
+.media-missing .link { font-size: inherit; font-weight: 600; }
+.staff-btn { gap: 6px; padding: 6px 4px; }
