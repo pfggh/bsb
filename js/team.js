@@ -3,7 +3,8 @@
  * Five tabs, in plain words:
  *   Live      who is doing what this minute, which customers are waiting, the latest actions (refreshes itself)
  *   Quality   how well customers are served: answer speed, missed customers, solved for real, sales results
- *   People    how long each person worked and when, what they got done, their day action by action
+ *   People    js/people.js (op people_report): working time split into on-chats / no-action / open-unused,
+ *             typed messages apart from automatic closers, solves as distinct chats with / without a reply
  *   AI check  chats that were marked solved / complete but were not (the AI scanner's findings),
  *             per employee, with the conversation one click away and a yes / no for the admin
  *   Compare   the same numbers side by side, and per day
@@ -126,25 +127,6 @@
     for (const kid of kids.flat()) if (kid != null) el.append(kid);
     return el;
   }
-  // One day as a 24 h strip: working minutes dark, desk open without input light.
-  function strip(day, label) {
-    const svg = s('svg', { class: 'tm-strip', viewBox: '0 0 1440 20', preserveAspectRatio: 'none', role: 'img',
-      'aria-label': `${label}: working ${hm(day.active_min)}, desk open ${hm(day.online_min)}` });
-    svg.append(s('rect', { x: 0, y: 0, width: 1440, height: 20, class: 'tm-track' }));
-    for (const [a, b, on] of day.segs || []) {
-      const w = Math.max(b - a, 2.5);
-      const r = s('rect', { x: Math.min(a, 1440 - w), y: 0, width: w, height: 20, class: on ? 'tm-on' : 'tm-idle' });
-      r.dataset.tip = `${clock(a)} – ${clock(b)}\n${on ? 'Working' : 'Desk open, not touching it'} · ${hm(b - a)}`;
-      svg.append(r);
-    }
-    return svg;
-  }
-  function stripAxis() {
-    return h('div', { class: 'tm-axis', 'aria-hidden': 'true' }, [0, 3, 6, 9, 12, 15, 18, 21, 24].map((x) => h('span', { style: `left:${(x / 24) * 100}%` }, hr(x))));
-  }
-  function legend() {
-    return h('span', { class: 'tm-legend' }, h('i', { class: 'on' }), 'Working', h('i', { class: 'idle' }), 'Desk open, not touching it', h('i', { class: 'off' }), 'Away');
-  }
   // Columns: one value per day. opts: {value(d), tip(d), unit: 'h'|'n'}
   function columns(days, opts) {
     const W = Math.max(260, days.length * 30 + 44), H = 132, padL = 34, padB = 20, padT = 8;
@@ -199,150 +181,15 @@
         h('span', { class: 'tm-hbar-v' }, fmt(r.v))))) : h('p', { class: 'muted' }, 'Nothing in this period.'));
   }
 
-  // ---------------------------------------------------------------- people
-
-  // Work sessions of one day: stretches of presence with no gap longer than 10 minutes.
-  function sessions(day) {
-    const out = [];
-    for (const [a, b, on] of day.segs || []) {
-      const last = out[out.length - 1];
-      if (last && a - last.end <= 10) { last.end = b; if (on) last.active += b - a; }
-      else out.push({ start: a, end: b, active: on ? b - a : 0 });
-    }
-    return out.filter((x) => x.end - x.start >= 2 || x.active > 0);
-  }
-  function presence(p) {
-    const n = U.now();
-    const act = p.last_active_at ? n - Date.parse(p.last_active_at) : Infinity;
-    const open = p.last_open_at ? n - Date.parse(p.last_open_at) : Infinity;
-    if (act < 180000) return { cls: 'on', text: 'Working now' };
-    if (open < 180000) return { cls: 'idle', text: act === Infinity ? 'Desk open, not touching it' : `Desk open, not touching it for ${U.dur(act)}` };
-    const last = p.last_active_at || p.last_open_at || p.last_seen_at;
-    return { cls: '', text: last ? `Away · last here ${fDay.format(new Date(last)) === today() ? 'at ' + fTime.format(new Date(last)) : U.ago(last)}` : 'Has not opened the desk yet' };
-  }
-  function presenceEl(p) { const x = presence(p); return h('span', { class: `tm-pres ${x.cls}` }, h('i'), x.text); }
-  // The period in one sentence.
-  function story(p, single, d) {
-    const t = p.totals;
-    if (!t.active_min && !t.online_min) return single ? 'Did not work on the desk this day.' : 'Did not work on the desk in this period.';
-    if (!single) return `Worked ${hm(t.active_min)} over ${plural(t.days_active, 'day')} — about ${hm(t.active_min / Math.max(1, t.days_active))} a day.`;
-    const ss = sessions(d);
-    if (!ss.length) return `Worked ${hm(t.active_min)}.`;
-    const breaks = [];
-    for (let i = 1; i < ss.length; i++) breaks.push(ss[i].start - ss[i - 1].end);
-    const longest = breaks.length ? Math.max(...breaks) : 0;
-    return `Worked ${hm(t.active_min)}, between ${clock(ss[0].start)} and ${clock(ss[ss.length - 1].end)}`
-      + (breaks.length ? `, with ${plural(breaks.length, 'break')} (longest ${hm(longest)}).` : ', without a break.');
-  }
-  function big(value, label, tipText, cls = '') {
-    return h('div', { class: `tm-n ${cls}`, dataset: tipText ? { tip: `${label}\n${tipText}` } : null }, h('b', null, value), h('span', null, label));
-  }
-  function findingsPill(t, onclick) {
-    const n = t.flagged + t.doubt;
-    if (n) return h('button', { class: `tm-flag${t.flagged ? '' : ' soft'}`, title: 'See these chats', onclick }, U.icon('warn', 'xs'), `${plural(n, 'problem')} found`);
-    if (t.pending) return h('span', { class: 'tm-okpill' }, `AI still checking ${num(t.pending)}`);
-    return h('span', { class: 'tm-okpill good' }, U.icon('check', 'xs'), t.checked ? 'No problems found' : 'Nothing to check');
-  }
-  function statGroup(title, rows) {
-    return h('div', { class: 'tm-sg' }, h('h5', null, title), rows.map(([label, value, tipText]) => h('div', { class: 'tm-stat', dataset: tipText ? { tip: `${label}\n${tipText}` } : null }, h('span', null, label), h('b', null, value))));
-  }
+  // ---------------------------------------------------------------- shared by Compare / Live (People lives in js/people.js)
   function fillDays(days) {
     const by = new Map(days.map((d) => [d.day, d]));
     const out = [];
     for (let d = st.data.from; d <= st.data.to; d = addDays(d, 1)) out.push(by.get(d) || { day: d, active_min: 0, online_min: 0, sent: 0, solved: 0, sales_done: 0, flagged: 0, segs: [] });
     return out;
   }
-  function employee(p, single, maxActive) {
-    const t = p.totals;
-    const isOpen = st.open.has(p.id);
-    const day0 = single ? (p.days[0] || { active_min: 0, online_min: 0, segs: [] }) : null;
-    const toggle = () => { if (isOpen) st.open.delete(p.id); else st.open.add(p.id); draw(); };
-    const head = h('div', { class: 'tm-emp-h' },
-      h('div', { class: 'av', style: `background:${U.avColor(p.name)}` }, U.initials({ name: p.name })),
-      h('div', { class: 'tm-emp-who' },
-        h('b', null, p.name, p.role === 'admin' ? h('span', { class: 'role' }, 'admin') : null, p.active ? null : h('span', { class: 'role' }, 'access removed')),
-        presenceEl(p)),
-      h('div', { class: 'tm-emp-nums' },
-        h('div', { class: 'tm-n main', dataset: { tip: 'Working time\nMinutes in which this person used the keyboard, mouse or touch screen on the desk, or did something (sent, solved, labelled).' } },
-          h('b', null, hm(t.active_min)), h('span', null, 'working time'),
-          h('span', { class: 'tm-meter' }, h('i', { style: `width:${maxActive ? (t.active_min / maxActive) * 100 : 0}%` }))),
-        big(num(t.sent), 'messages sent', `To ${plural(t.chats, 'customer')}.`),
-        big(num(t.solved), 'support solved', `${num(t.solved_msg)} with a closing message, ${num(t.solved - t.solved_msg)} without.`),
-        big(num(t.sales_done), 'sales completed', 'Sales chats marked complete.'),
-        big(secs(t.reply_median_s), 'typical reply time', t.reply_n ? `Half of the replies were faster than this (${num(t.reply_n)} replies). The slowest 10% took longer than ${secs(t.reply_p90_s)}.` : 'No replies to a waiting customer in this period.'),
-        findingsPill(t, () => { st.tab = 'ai'; st.person = p.id; st.filter = 'open'; st.sel = null; draw(); })),
-      h('button', { class: 'btn sm ghost tm-more', 'aria-expanded': String(isOpen), onclick: toggle }, isOpen ? 'Less' : 'Details', h('span', { class: `tm-chev${isOpen ? ' up' : ''}` }, U.icon('chev'))));
-
-    const body = [h('p', { class: 'tm-story' }, story(p, single, day0))];
-    if (single && (day0.segs || []).length) body.push(h('div', { class: 'tm-day pad' }, strip(day0, p.name), stripAxis()));
-    if (isOpen) {
-      const days = fillDays(p.days);
-      const ss = single ? sessions(day0) : [];
-      body.push(h('div', { class: 'tm-detail' },
-        single && ss.length ? h('div', { class: 'tm-sessions' }, h('h5', null, 'The day, step by step'),
-          h('ol', null, ss.flatMap((x, i) => [
-            i ? h('li', { class: 'brk' }, `${clock(ss[i - 1].end)} – ${clock(x.start)}`, h('span', null, `away ${hm(x.start - ss[i - 1].end)}`)) : null,
-            h('li', null, `${clock(x.start)} – ${clock(x.end)}`, h('span', null, `at the desk ${hm(x.end - x.start)} · working ${hm(x.active)}`))]))) : null,
-        single ? h('div', { class: 'tm-sessions' }, h('h5', null, 'Everything they did, in order'), dayLog(p, st.data.from)) : null,
-        h('div', { class: 'tm-sgs' },
-          statGroup('Time', [
-            ['Working time', hm(t.active_min), 'Minutes with keyboard, mouse or touch input, or an action.'],
-            ['Desk open', hm(t.online_min), 'Minutes the desk was open in a browser, used or not.'],
-            ['Days worked', String(t.days_active)]]),
-          statGroup('Messages', [
-            ['Customers messaged', num(t.chats)], ['Text replies', num(t.replies)], ['Photos, files, voice notes', num(t.media)],
-            ['Closing messages', num(t.closers)], ['Messages that failed to send', num(t.failed)]]),
-          statGroup('Speed', [
-            ['Typical reply time', secs(t.reply_median_s), 'Half of the replies were faster than this.'],
-            ['Slow replies', secs(t.reply_p90_s), 'The slowest 10% of replies took longer than this.'],
-            ['Replies measured', num(t.reply_n), 'Replies sent straight after a customer message.']]),
-          statGroup('Quality', [
-            ['Chats checked by the AI', `${num(t.checked)} of ${num(t.audited)}`],
-            ['Not solved', num(t.flagged), 'The AI is sure these were marked solved / complete too early.'],
-            ['Please check', num(t.doubt), 'The AI suspects these, but is not sure.'],
-            ['Customer came back', `${num(t.reopened)} of ${num(t.audited)}`, 'The customer wrote again within 48 hours of the solve.'],
-            ['Solved despite a warning', num(t.overrides), 'The desk said "this does not look solved" and they solved it anyway.'],
-            ['You agreed / disagreed', `${num(t.confirmed)} / ${num(t.dismissed)}`, 'Findings you confirmed, and findings you marked as fine.']])),
-        h('div', { class: 'tm-charts' },
-          days.length > 1 ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Working time per day')),
-            columns(days, { unit: 'h', label: `${p.name}: working time per day`, value: (d) => d.active_min,
-              tip: (d) => `${dayName(d.day)}\nWorking ${hm(d.active_min)} · desk open ${hm(d.online_min)}\n${d.first_at ? `${fTime.format(new Date(d.first_at))} – ${fTime.format(new Date(d.last_at))}` : 'Not at the desk'}` })) : null,
-          days.length > 1 ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Chats solved and completed per day')),
-            columns(days, { unit: 'n', label: `${p.name}: chats solved and completed per day`, value: (d) => d.solved + d.sales_done,
-              tip: (d) => `${dayName(d.day)}\n${d.solved} solved · ${d.sales_done} sales completed\n${d.sent} messages sent${d.flagged ? ` · ${d.flagged} problems found` : ''}` })) : null,
-          h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Usual working hours'), h('span', { class: 'muted' }, 'darker = more work')), hourHeat(p.hours || {}))),
-        !single && p.days.length ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Day by day'), legend()),
-          h('div', { class: 'tm-daylist' }, [...p.days].reverse().map((d) => h('div', { class: 'tm-dayrow' },
-            h('span', { class: 'tm-dayrow-d' }, dayName(d.day)), h('div', { class: 'tm-day' }, strip(d, `${p.name} ${d.day}`)),
-            h('span', { class: 'tm-dayrow-v' }, hm(d.active_min))))), h('div', { class: 'tm-dayrow' }, h('span', { class: 'tm-dayrow-d' }), stripAxis(), h('span', { class: 'tm-dayrow-v' }))) : null));
-    }
-    return h('section', { class: `tm-emp${isOpen ? ' open' : ''}` }, head, body);
-  }
   function tile(label, value, sub, cls = '', onclick = null) {
     return h(onclick ? 'button' : 'div', { class: `tm-tile ${cls}`, onclick }, h('span', { class: 'tm-tile-l' }, label), h('b', { class: 'tm-tile-v' }, value), sub ? h('span', { class: 'tm-tile-s' }, sub) : null);
-  }
-  function peopleTab(d, staff, single) {
-    const sum = (k) => staff.reduce((n, p) => n + Number(p.totals[k] || 0), 0);
-    const maxActive = Math.max(...staff.map((p) => p.totals.active_min), 0);
-    const problems = sum('flagged') + sum('doubt');
-    const since = d.tracking_since ? Date.parse(d.tracking_since) : null;
-    const partial = !since || since > Date.parse(d.from + 'T00:00:00Z');
-    return [
-      h('div', { class: 'tm-tiles' },
-        tile('Working time', hm(sum('active_min')), `${staff.filter((p) => p.totals.active_min > 0).length} of ${staff.filter((p) => p.active).length} people worked`),
-        tile('Messages sent', num(sum('sent')), `to ${plural(sum('chats'), 'customer')}`),
-        tile('Support chats solved', num(sum('solved'))),
-        tile('Sales chats completed', num(sum('sales_done'))),
-        tile('Typical reply time', secs(d.team && d.team.reply_n ? d.team.reply_median_s : null), 'customer message → our reply'),
-        tile('Problems found by the AI', num(problems), problems ? 'Click to see them' : sum('pending') ? `still checking ${plural(sum('pending'), 'chat')}` : 'none', problems ? 'bad click' : '', problems ? () => { st.tab = 'ai'; st.person = 0; st.filter = 'open'; st.sel = null; draw(); } : null)),
-      partial ? h('p', { class: 'tm-note warn' }, since
-        ? `Exact minute-by-minute tracking started ${fDateTime.format(new Date(since))}. Before that, working time only counts the minutes in which someone sent, solved or labelled something, so it reads lower than the truth.`
-        : 'Exact minute-by-minute tracking starts as people use the desk; until then working time only counts minutes with a sent message, a solve or a label.') : null,
-      h('section', { class: 'tm-sec' },
-        h('div', { class: 'tm-sec-h' }, h('div', null, h('h3', null, 'Each person'),
-          h('p', { class: 'muted' }, single ? 'The bar is the day from midnight to midnight. Move the mouse over it to see exact times.' : 'Press Details for charts and the day-by-day timeline.')), single ? legend() : null),
-        staff.map((p) => employee(p, single, maxActive))),
-    ];
   }
 
   // ---------------------------------------------------------------- AI check: a review desk
@@ -949,7 +796,7 @@
         st.tab === 'live' ? h('span', { class: 'tm-livedot' }, h('i'), 'Live · updates every 10 seconds') : st.tab === 'ai' ? null : h('div', { class: 'tm-range', role: 'group', 'aria-label': 'Period' },
           PRESETS.map(([k, l]) => h('button', { class: `tm-tab${st.preset === k ? ' on' : ''}`, onclick: () => { setPreset(k); st.logMore = false; load(); } }, l)),
           h('span', { class: 'tm-dates' }, from, h('span', { class: 'muted' }, 'to'), to)),
-        h('button', { class: 'icon-btn', title: 'Refresh', 'aria-label': 'Refresh', onclick: () => { if (st.tab === 'live') loadLive(); else { load(); if (st.tab === 'quality') loadQuality(false, true); } } }, U.icon('refresh'))),
+        h('button', { class: 'icon-btn', title: 'Refresh', 'aria-label': 'Refresh', onclick: () => { if (st.tab === 'live') loadLive(); else { load(); if (st.tab === 'quality') loadQuality(false, true); if (st.tab === 'people') window.DeskPeople.refresh(); } } }, U.icon('refresh'))),
       h('nav', { class: 'tm-tabs', role: 'tablist' }, [['live', 'clock', 'Live'], ['quality', 'check', 'Quality'], ['people', 'team', 'People'], ['ai', 'warn', 'Radar'], ['compare', 'chart', 'Compare']].map(([k, ic, l]) =>
         h('button', { class: `tm-maintab${st.tab === k ? ' on' : ''}`, role: 'tab', 'aria-selected': String(st.tab === k), onclick: () => { st.tab = k; if (k === 'live') loadLive(); draw(); } },
           U.icon(ic, 'sm'), l, k === 'ai' && window.DeskRadar.count() ? h('span', { class: 'tm-badge' }, num(window.DeskRadar.count())) : null))));
@@ -957,11 +804,14 @@
     let body;
     if (st.tab === 'live') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' }, liveTab().flat(Infinity)));
     else if (st.tab === 'ai') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' }, window.DeskRadar.view()));
+    else if (st.tab === 'people') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' },
+      h('p', { class: 'tm-period' }, st.from === st.to ? dayName(st.from) : `${dayName(st.from)} – ${dayName(st.to)}`, h('span', { class: 'muted' }, ' · Beirut time')),
+      window.DeskPeople.view({ U, from: st.from, to: st.to, redraw: draw, dayLog, hourHeat }).flat(Infinity)));
     else if (!d) body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-empty' }, st.error ? [h('b', null, 'Could not load the report.'), h('div', null, st.error), h('button', { class: 'btn', onclick: () => load() }, 'Try again')] : 'Loading…'));
     else {
       const single = d.from === d.to;
       const staff = [...d.staff].sort((a, b) => (b.totals.active_min - a.totals.active_min) || (b.totals.sent - a.totals.sent) || a.name.localeCompare(b.name));
-      const parts = st.tab === 'people' ? peopleTab(d, staff, single) : st.tab === 'ai' ? aiTab(d, staff) : st.tab === 'quality' ? qualityTab(d) : compareTab(d, staff, single);
+      const parts = st.tab === 'ai' ? aiTab(d, staff) : st.tab === 'quality' ? qualityTab(d) : compareTab(d, staff, single);
       body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' },
         st.error ? h('p', { class: 'tm-note warn' }, `Could not refresh (${st.error}). Showing the last numbers.`) : null,
         h('p', { class: 'tm-period' }, single ? dayName(d.from) : `${dayName(d.from)} – ${dayName(d.to)}`, h('span', { class: 'muted' }, ' · Beirut time')),
@@ -992,6 +842,7 @@
     e.stopPropagation();
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     if (st.tab === 'ai' && window.DeskRadar.key(e)) e.preventDefault();
+    else if (st.tab === 'people' && window.DeskPeople.key(e)) e.preventDefault();
   }
   function open(helpers, opts = {}) {
     U = helpers;
