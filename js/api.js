@@ -69,6 +69,7 @@
   // Short technical notes only: script errors, a page that stopped answering, slow or failed requests,
   // the steps of a voice recording, the "new version" bar. Never message text, never audio.
   const POLL_OPS = new Set(['inbox', 'chat']);
+  const READS = new Set(['inbox', 'chat', 'boot', 'customer', 'complete_plan', 'quick_replies', 'staff_list']);
   const POLL_TIMEOUT_MS = 25000;
   const SLOW_MS = 4000;
   const DIAG_PER_PAGE = 400;
@@ -133,6 +134,7 @@
     constructor(status, message, body) { super(message); this.status = status; this.body = body || {}; }
   }
 
+  const BAD = Object.freeze({}); // marks a body that was not readable JSON
   async function call(op, body = {}, token = getToken()) {
     if (!TOKEN_RE.test(token)) throw new ApiError(401, 'Signed out');
     const url = C.demo ? '/api/desk' : `${C.supabaseUrl}/functions/v1/desk`;
@@ -153,7 +155,7 @@
         ...(ctl ? { signal: ctl.signal } : {}),
         ...(op === 'client_log' ? { keepalive: true } : {}),
       });
-      data = await resp.json().catch(() => ({}));
+      data = await resp.json().catch(() => BAD);
     } catch (e) {
       const timedOut = !!(ctl && ctl.signal.aborted);
       if (op !== 'client_log') report('api', op, { ms: Date.now() - t0, status: 0, why: timedOut ? 'timeout' : String((e && e.message) || e).slice(0, 80), online: navigator.onLine !== false });
@@ -161,7 +163,14 @@
     } finally { clearTimeout(timer); }
     const ms = Date.now() - t0;
     if (op !== 'client_log' && (ms > SLOW_MS || resp.status >= 500)) report('api', op, { ms, status: resp.status });
-    if (!resp.ok) throw new ApiError(resp.status, data.error || `HTTP ${resp.status}`, data);
+    if (!resp.ok) throw new ApiError(resp.status, (data && data !== BAD && data.error) || `HTTP ${resp.status}`, data && data !== BAD ? data : {});
+    // A 200 whose body did not arrive whole (a dropped connection): a read fails (it is simply asked again);
+    // a write did reach the server, so it still counts as done (a "failed" send would be sent twice on retry).
+    if (data === BAD) {
+      if (op !== 'client_log') report('api', op, { ms, status: resp.status, why: 'unreadable answer' });
+      if (READS.has(op)) throw new ApiError(0, 'The answer did not arrive whole: try again');
+      data = {};
+    }
     // delivered: these minutes need not be sent again (the current minute is re-added by the next input)
     for (const x of act.m) pendingMinutes.delete(x);
     if (data && typeof data.now === 'string') { const t = Date.parse(data.now); if (Number.isFinite(t)) skew = t - Date.now(); }

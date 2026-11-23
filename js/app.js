@@ -498,6 +498,7 @@
     }
     const m = location.hash.match(/^#c=([0-9a-z_]+)$/i);
     if (m) openChat(m[1]);
+    window.addEventListener('hashchange', () => { const x = location.hash.match(/^#c=([0-9a-z_]+)$/i); if (x) openChat(x[1]); });
     loopList();
     loopChat();
   }
@@ -748,7 +749,7 @@
     checkVersion();
     if (b.now) S.skew = Date.parse(b.now) - Date.now();
     // a chat being completed (undo bar showing) is already gone from the list
-    const rows = (b.chats || []).filter((x) => !(pending && pending.contact === x.contact));
+    const rows = (b.chats || []).filter((x) => !hiding.has(x.contact));
     if (replace) {
       const keep = S.active ? S.chats.find((x) => x.contact === S.active.contact) : null;
       S.chats = reset ? rows : mergeOrder(S.chats, rows);
@@ -867,13 +868,13 @@
           h('span', { class: 'row-time', title: fmtFull.format(new Date(c.last_at)) }, listTime(c.last_at))),
         h('div', { class: 'row-mid' }, preview(c), hereChip(c.contact),
           thanked(c) ? h('span', { class: 'row-heart', title: 'The customer said thanks', 'aria-label': 'The customer said thanks' }, '❤️') : null,
-          rowDot(c)),
+          c.scheduled ? h('span', { class: 'row-sched', title: 'An automatic follow-up is scheduled for this chat', 'aria-label': 'Message scheduled' }, icon('clock', 'xs')) : null,
+          sb, rowDot(c)),
         held ? h('div', { class: 'row-held', title: `${held} sent this chat back. Reply to the customer before completing it again.` },
           icon('warn', 'xs'), h('b', null, `Sent back by ${held}`), c.sys.hold.reason ? h('span', null, c.sys.hold.reason) : null) : null,
-        sb || c.scheduled || c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' }, sb,
+        c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' },
           c.fu_alert === 'says_paid' ? h('span', { class: 'fu-chip paid', title: 'The customer says they paid. Check the payment and activate.' }, icon('warn', 'xs'), 'Says paid')
             : c.fu_alert === 'plan_chosen' ? h('span', { class: 'fu-chip', title: 'The customer chose a plan and is waiting for the payment details.' }, icon('check', 'xs'), 'Ready to pay') : null,
-          c.scheduled ? h('span', { class: 'sched-chip', title: 'An automatic follow-up is scheduled for this chat' }, icon('clock', 'xs'), 'Message scheduled') : null,
           (c.labels || []).map((id) => labelChip(id))) : null));
   }
   // The customer's last words are a thank-you or "it works" (and not "ma zabat" / "still not").
@@ -1057,7 +1058,7 @@
     const hit = chatCache.get(contact);
     if (prefetching.has(contact) || (hit && Date.now() - hit.at < 30000) || document.hidden) return;
     prefetching.add(contact);
-    try { const d = await api.call('chat', { contact, limit: 80 }); if (!d.unchanged) cachePut(contact, d, sig(d), d.sig ? { sig: d.sig, limit: 80 } : null); } catch (e) { /* only a head start */ }
+    try { const d = await api.call('chat', { contact, limit: 80 }); if (!d.unchanged && d.conv && Array.isArray(d.messages)) cachePut(contact, d, sig(d), d.sig ? { sig: d.sig, limit: 80 } : null); } catch (e) { /* only a head start */ }
     finally { prefetching.delete(contact); }
   }
   function showChatPane() { $('#app').classList.add('chat-open'); }
@@ -1119,6 +1120,7 @@
         if (sent && a.data) { const hit = chatCache.get(a.contact); if (hit) hit.at = Date.now(); return; }
         a.srvSig = null; return; // unexpected: ask for the full chat next time
       }
+      if (!d || !d.conv || !Array.isArray(d.messages)) { a.srvSig = null; return; }
       a.srvSig = d.sig ? { sig: d.sig, limit } : null;
       const s = sig(d);
       const prev = a.data;
@@ -1166,7 +1168,8 @@
     return { open: left > 30000, left };
   }
   function renderHead(c0) {
-    const c = c0 || S.active.data.conv;
+    const c = c0 || (S.active && S.active.data && S.active.data.conv);
+    if (!c) return;
     const w = windowInfo(c);
     if (same($('#chatHead'), JSON.stringify([c.contact, c.name, c.handle, c.channel, c.line, c.last_in_at, w.open, w.open ? dur(w.left) : 0, detailsOn(), S.metaVer, isAdmin()]))) return;
     let win;
@@ -1247,15 +1250,14 @@
     } else if (t.kind === 'sales') {
       if (t.status !== 'open') right.push(h('span', { class: 'muted' }, 'Sales'));
       else if (t.done_at) right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Complete${t.done_by && t.done_by !== 'system' ? ' by ' + t.done_by : ''}`),
-        h('span', { class: 'muted' }, ago(t.done_at)), h('button', { class: 'btn sm', onclick: () => reopen(t) }, 'Reopen'));
-      else right.push(h('span', { class: 'unsolved' }, 'Not complete'), h('span', { class: 'v-hint ok' }, h('kbd', null, 'V'), ' marks it complete · no message is sent'));
+        h('span', { class: 'muted' }, ago(t.done_at)));
+      else right.push(h('span', { class: 'unsolved', title: 'V marks it complete. No message is sent.' }, 'Not complete'));
     } else if (t.kind === 'support') {
       const g = d.gate || {};
       if (t.status !== 'open') {
         const c = S.closers.find((x) => x.key === t.resolution);
         right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Solved${t.resolved_by ? ' by ' + t.resolved_by : ''}`),
-          h('span', { class: 'muted' }, `${c ? '“' + c.title + '” sent' : 'no message'} · ${ago(t.status_at)}`),
-          h('button', { class: 'btn sm', onclick: () => reopen(t) }, 'Reopen'));
+          h('span', { class: 'muted' }, `${c ? '“' + c.title + '” sent' : 'no message'} · ${ago(t.status_at)}`));
       } else {
         right.push(h('span', { class: 'unsolved' }, 'Unsolved'), resolveHint(g),
           g.can_send ? h('button', { class: 'link', title: 'Choose the closing message yourself instead of the AI', onclick: openResolve }, 'Pick message myself') : null);
@@ -1343,35 +1345,67 @@
       h('div', { class: 'sheet-foot' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Cancel'), go)), true);
   }
   // ---- complete (V) and the undo bar
-  // One pending action at a time: a new one sends the previous one straight away.
+  // V answers at once: the chat leaves the list and the next one opens while the server checks it
+  // (complete_plan asks the AI and can take seconds, longer on a slow connection). Until the check is
+  // back the bar says "checking…"; then it counts down as before. Undo works the whole time. If the
+  // server refuses (an admin sent the chat back) or shows the red stop, the row comes back.
+  // One bar at a time: a new action sends the previous one straight away (once its check is back).
   let pending = null;
   let lastRemoved = null; // the row goNext took out, so Undo can put it back in the same place
-  function flushPending() { if (pending) { const p = pending; pending = null; clearTimeout(p.timer); p.box.remove(); p.run(); } }
-  function cancelPending(msg = 'Undone, nothing was sent') {
-    if (!pending) return false;
-    clearTimeout(pending.timer); pending.box.remove();
-    const back = pending.contact, restore = pending.restore, own = pending.undoMsg; pending = null;
-    toast(own || msg);
-    if (restore && !S.chats.some((x) => x.contact === restore.row.contact)) {
-      S.chats.splice(Math.min(restore.index, S.chats.length), 0, restore.row);
+  const hiding = new Set(); // contacts an action took out of the list: polls keep them out until it is done
+  function flushPending() {
+    if (!pending) return;
+    const p = pending; pending = null;
+    clearTimeout(p.timer); p.box.remove();
+    if (p.checking) { p.fast = true; return; } // runs the moment its check is back
+    p.run();
+  }
+  function restoreRow(p) {
+    if (p.contact) hiding.delete(p.contact);
+    const r = p.restore;
+    if (r && !S.chats.some((x) => x.contact === r.row.contact)) {
+      S.chats.splice(Math.min(r.index, S.chats.length), 0, r.row);
       renderList(true);
     }
-    if (back) openChat(back);
+  }
+  function cancelPending(msg = 'Undone, nothing was sent') {
+    if (!pending) return false;
+    const p = pending; pending = null;
+    clearTimeout(p.timer); p.box.remove(); p.cancelled = true;
+    toast(p.undoMsg || msg);
+    restoreRow(p);
+    if (p.contact) openChat(p.contact);
     return true;
   }
-  function startPending({ text, sub, ms, run, contact, undoMsg }) {
+  function paintPending(p) {
+    // (replaceChildren prints a null argument as the word "null")
+    p.textEl.replaceChildren(...[h('div', null, p.text), p.sub ? h('div', { class: 'undo-sub' }, p.sub) : null].filter(Boolean));
+    p.prog.replaceChildren(p.checking ? h('i', { class: 'checking' }) : h('i', { style: `animation-duration:${p.ms}ms` }));
+  }
+  function startPending({ text, sub, ms, run, contact, undoMsg, check }) {
     flushPending();
-    const box = h('div', { class: 'undo', role: 'status' },
-      h('div', { class: 'undo-bar' },
-        h('div', { class: 'undo-text' }, h('div', null, text), sub ? h('div', { class: 'undo-sub' }, sub) : null),
-        h('button', { class: 'btn sm', title: 'Undo (Z)', onclick: () => cancelPending() }, 'Undo', h('kbd', null, 'Z')),
-        h('button', { class: 'btn sm primary', title: 'Do it now (Enter)', onclick: flushPending }, 'Now', h('kbd', null, '↵'))),
-      h('div', { class: 'undo-progress' }, h('i', { style: `animation-duration:${ms}ms` })));
-    document.querySelectorAll('.undo').forEach((x) => x.remove());
-    document.body.append(box);
-    const restore = lastRemoved && lastRemoved.row.contact === contact ? lastRemoved : null;
+    const p = { text, sub, ms, job: run, contact, undoMsg, checking: !!check, timer: null };
+    p.run = async () => {
+      try { if (p.job) await p.job(); }
+      finally { if (p.contact) hiding.delete(p.contact); }
+    };
+    p.restore = lastRemoved && lastRemoved.row.contact === contact ? lastRemoved : null;
     lastRemoved = null;
-    pending = { box, run, contact, restore, undoMsg, timer: setTimeout(flushPending, ms) };
+    if (contact) hiding.add(contact);
+    p.textEl = h('div', { class: 'undo-text' });
+    p.prog = h('div', { class: 'undo-progress' });
+    p.box = h('div', { class: 'undo', role: 'status' },
+      h('div', { class: 'undo-bar' }, p.textEl,
+        h('div', { class: 'undo-btns' },
+          h('button', { class: 'btn sm', title: 'Undo (Z)', onclick: () => cancelPending() }, 'Undo', h('kbd', null, 'Z')),
+          h('button', { class: 'btn sm primary', title: 'Do it now (Enter)', onclick: flushPending }, 'Now', h('kbd', null, '↵')))),
+      p.prog);
+    paintPending(p);
+    document.querySelectorAll('.undo').forEach((x) => x.remove());
+    document.body.append(p.box);
+    pending = p;
+    if (!p.checking) p.timer = setTimeout(flushPending, ms);
+    return p;
   }
   function neighbour(contact) {
     const L = ordered();
@@ -1391,6 +1425,12 @@
     if (n && n.contact !== contact) { openChat(n.contact); scrollRowIntoView(n.contact); }
     else closeChat();
   }
+  // Back to a chat the server would not solve, unless the user is already typing a reply somewhere else.
+  function backTo(contact) {
+    if (S.active && S.active.contact === contact) { pollChat(); return; }
+    if (api.isTyping()) return;
+    openChat(contact); scrollRowIntoView(contact);
+  }
   function scrollRowIntoView(contact) {
     const el = rowEls.get(contact);
     if (!el || !el.isConnected) return;
@@ -1405,46 +1445,87 @@
     if (!l) return;
     try { await api.call('label', { contact, label_id: l.id, on: true }); } catch (e) { /* the label is a convenience */ }
   }
-  let planning = false;
-  async function completeChat() {
+  function completeChat() {
     const a = S.active;
-    if (!a || !a.data || planning) return;
-    flushPending();
+    if (!a || !a.data) return;
     const contact = a.contact;
+    if (hiding.has(contact)) return; // V pressed twice: the first one is on its way
     const name = displayName(a.data.conv);
-    const btn = $('#completeBtn');
-    planning = true;
-    if (btn) { btn.disabled = true; btn.replaceChildren(icon('check', 'sm'), todo(a.data.thread) && a.data.thread.kind !== 'support' ? 'Completing…' : 'Solving…'); }
-    // a reply still being sent must reach the server first, or the solve check would not see it
+    const t = a.data.thread;
     const inflight = a.pending.filter((x) => x.status === 'sending' && x.done).map((x) => x.done);
-    if (inflight.length) await Promise.all(inflight);
-    let plan;
-    try { plan = await api.call('complete_plan', { contact }); } catch (e) { toast(`Not solved: ${e.message}`, 'error'); return; } finally { planning = false; if (btn && btn.isConnected && S.active && S.active.data) renderLabelbar(null, true); }
-    if (plan.action === 'blocked') {
-      toast(plan.message ? `Not solved — ${plan.message}` : `Can't solve ${name}: ${(plan.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')}`, 'error');
-      if (plan.hold && S.active && S.active.contact === contact) pollChat();
+    // An admin sent this chat back and nobody replied since: the server refuses, so say it right here.
+    if (t && t.status === 'open' && t.hold && !t.hold.replied && !isAdmin() && !inflight.length) {
+      toast(`Not solved — ${t.hold.by || 'An admin'} sent this chat back: reply to the customer first`, 'error');
       return;
     }
-    const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
-    if (plan.stop) {
-      stopWarning(plan, contact, name);
-    } else if (plan.action === 'resolve') {
-      sendCloserPending(plan, contact, name, after);
-    } else if (plan.action === 'resolve_silent' && plan.kind === 'sales') {
-      silentPending(contact, name, plan.thread_id, 'no message is sent', { sales: true, expect: plan.expect_in });
-    } else if (plan.action === 'resolve_silent') {
-      const quiet = plan.why === 'customer_quiet';
-      if (plan.why === 'closer_sent') { silentPending(contact, name, plan.thread_id, 'no message: a closing message was already sent in this chat', { expect: plan.expect_in }); return; }
-      silentPending(contact, name, plan.thread_id, quiet
-        ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
-        : 'no message: the reply window is closed', { expect: plan.expect_in });
-    } else {
-      goNext(contact);
-      startPending({
-        contact, ms: 1800, text: [h('b', null, `${name}`), ' marked done'],
-        run: async () => { try { await api.call('read', { contact }); } catch (e) { /* next poll */ } after(); },
-      });
+    const verb = !todo(t) ? 'Closing' : t.kind === 'support' ? 'Solving' : 'Completing';
+    // a reply still being sent must reach the server first, or the check would not see it
+    const plan = (async () => { if (inflight.length) await Promise.all(inflight); return api.call('complete_plan', { contact }); })();
+    goNext(contact);
+    const p = startPending({ contact, check: true, ms: 0, text: [h('b', null, `${verb} ${name}`), ' · checking…'],
+      sub: inflight.length ? 'Waiting for your reply to be sent first' : null });
+    plan.then((r) => planArrived(p, r, contact, name), (e) => planArrived(p, { error: e }, contact, name));
+  }
+  function planArrived(p, res, contact, name) {
+    if (p.cancelled) return;
+    const drop = (msg) => { // nothing is done: the chat stays to do
+      if (pending === p) { pending = null; clearTimeout(p.timer); p.box.remove(); }
+      p.cancelled = true;
+      restoreRow(p);
+      if (msg) toast(msg, 'error');
+    };
+    if (res.error) { drop(`${name} not solved: ${res.error.message}`); return; }
+    if (res.action === 'blocked') {
+      drop(res.message ? `${name} not solved — ${res.message}` : `Can't solve ${name}: ${(res.reasons || []).map((r) => GATE_TEXT[r] || r).join(' ')}`);
+      backTo(contact);
+      return;
     }
+    if (res.stop) { drop(null); stopWarning(res, contact, name); return; }
+    const act = planAction(res, contact, name);
+    Object.assign(p, { checking: false, text: act.text, sub: act.sub || null, ms: act.ms, job: act.run });
+    if (p.fast || pending !== p) { p.run(); return; } // "Now" was pressed, or the next action took the bar
+    paintPending(p);
+    p.timer = setTimeout(flushPending, p.ms);
+  }
+  // What the undo bar says and does for a plan from the server.
+  function planAction(plan, contact, name) {
+    const after = () => { if (S.active && S.active.contact === contact) pollChat(); refreshList(); };
+    const failed = (e, what) => {
+      const wrote = e.body && e.body.customer_wrote;
+      toast(wrote ? `${name} wrote again just now — read it first` : `${name} not ${what}: ${e.message}`, 'error');
+      if (wrote) openChat(contact);
+    };
+    if (plan.action === 'resolve') {
+      const c = plan.closer, request_id = uuid();
+      return {
+        ms: C.undoMs, text: [h('b', null, `Solving ${name}`), ' · sending “', c.body, '”'],
+        sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
+        run: async () => {
+          try { await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, expect_in: plan.expect_in ?? null }); await labelComplete(contact); }
+          catch (e) { failed(e, 'solved'); }
+          after();
+        },
+      };
+    }
+    if (plan.action === 'resolve_silent') {
+      const sales = plan.kind === 'sales';
+      const why = sales ? 'no message is sent'
+        : plan.why === 'closer_sent' ? 'no message: a closing message was already sent in this chat'
+        : plan.why === 'customer_quiet' ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
+        : 'no message: the reply window is closed';
+      return {
+        ms: sales ? 2000 : 3000, text: [h('b', null, `${sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`],
+        run: async () => {
+          try { await api.call('resolve_silent', { thread_id: plan.thread_id, expect_in: plan.expect_in ?? null }); await labelComplete(contact); }
+          catch (e) { failed(e, sales ? 'completed' : 'solved'); }
+          after();
+        },
+      };
+    }
+    return {
+      ms: 1800, text: [h('b', null, name), ' marked done'],
+      run: async () => { try { await api.call('read', { contact }); } catch (e) { /* next poll */ } after(); },
+    };
   }
   // The red stop. Shown ONLY when it is certain the customer was left without help: they wrote last, nobody
   // answered, and their own words say it (checked by two AI models on the server, with the exact quote).
@@ -1455,7 +1536,7 @@
     const KIND = { still_broken: 'The customer says it is still not working', unanswered_question: 'The customer asked something and nobody answered', waiting_delivery: 'The customer is waiting for something they paid for or were promised' };
     const HOLD_MS = 3000;
     let timer = null;
-    const back = h('button', { class: 'btn primary sw-back', onclick: () => { closeModal(); toast(`${name} stays in Unresolved`); } }, 'Go back and help the customer', h('kbd', null, 'Esc'));
+    const back = h('button', { class: 'btn primary sw-back', onclick: () => { closeModal(); toast(`${name} stays in Unresolved`); backTo(contact); } }, 'Go back and help the customer', h('kbd', null, 'Esc'));
     const fill = h('i', { class: 'sw-fill' });
     const hold = h('button', { class: 'btn sw-hold', type: 'button', 'aria-label': 'Hold 3 seconds to approve' }, fill, h('span', null, 'Hold 3 seconds to approve'));
     const stop = () => { clearTimeout(timer); timer = null; hold.classList.remove('holding'); };
@@ -1487,26 +1568,6 @@
     openModal(box, true);
     setTimeout(() => back.focus(), 40);
   }
-  function sendCloserPending(plan, contact, name, after, warned) {
-    {
-      const c = plan.closer;
-      const request_id = uuid();
-      goNext(contact);
-      startPending({
-        contact, ms: C.undoMs,
-        text: [h('b', null, `Solving ${name}`), ' · sending “', c.body, '”'],
-        sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
-        run: async () => {
-          try {
-            await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, expect_in: plan.expect_in ?? null, ...(warned ? { warned } : {}) });
-            await labelComplete(contact);
-            toast(`${name}: solved · “${c.title}” sent`, 'ok');
-          } catch (e) { toast(e.body && e.body.customer_wrote ? `${name} wrote again just now — read it first` : `${name} not solved: ${e.message}`, 'error'); if (e.body && e.body.customer_wrote) openChat(contact); }
-          after();
-        },
-      });
-    }
-  }
   function silentPending(contact, name, threadId, why, opt = {}) {
     goNext(contact);
     startPending({
@@ -1515,7 +1576,6 @@
         try {
           await api.call('resolve_silent', { thread_id: threadId, expect_in: opt.expect ?? null, ...(opt.warned ? { warned: opt.warned } : {}) });
           await labelComplete(contact);
-          toast(opt.sales ? `${name}: complete` : `${name}: solved (no message)`, 'ok');
         }
         catch (e) { toast(e.body && e.body.customer_wrote ? `${name} wrote again just now — read it first` : `${name} not ${opt.sales ? 'completed' : 'solved'}: ${e.message}`, 'error'); if (e.body && e.body.customer_wrote) openChat(contact); }
         if (S.active && S.active.contact === contact) pollChat();
@@ -1532,7 +1592,7 @@
     startPending({
       contact, ms: C.undoMs, text: [h('b', null, `Solving ${name}`), ' · sending “', c.body, '”'],
       run: async () => {
-        try { await api.call('resolve', { thread_id: t.id, closer: c.key, request_id }); if (contact) await labelComplete(contact); toast(`${name}: solved · “${c.title}” sent`, 'ok'); }
+        try { await api.call('resolve', { thread_id: t.id, closer: c.key, request_id }); if (contact) await labelComplete(contact); }
         catch (e) { toast(`${name} not solved: ${e.message}`, 'error'); }
         refreshList();
       },
@@ -1641,7 +1701,8 @@
   // ---- manual labels
 
   function renderLabelbar(c0, force = false) {
-    const c = c0 || S.active.data.conv;
+    const c = c0 || (S.active && S.active.data && S.active.data.conv);
+    if (!c) return;
     const t = S.active && S.active.data ? S.active.data.thread : null;
     const bar = $('#labelbar');
     if (force && bar) bar._k = null;
@@ -1795,7 +1856,7 @@
         lastThread = it.m.thread_id;
       }
       if (it.kind === 'e') {
-        if (EVENT_KINDS.has(it.e.kind)) { put(`e:${it.e.at}|${it.e.kind}|${it.e.label}`, JSON.stringify(it.e) + (it.e.kind === 'praise' && praiseMine(it.e) ? '|mine' : ''), () => eventLine(it.e)); lastDir = ''; }
+        if (EVENT_KINDS.has(it.e.kind) && !quietEvent(it.e)) { put(`e:${it.e.at}|${it.e.kind}|${it.e.label}`, JSON.stringify(it.e) + (it.e.kind === 'praise' && praiseMine(it.e) ? '|mine' : ''), () => eventLine(it.e)); lastDir = ''; }
         continue;
       }
       const dir = it.kind === 'm' ? (it.m.dir === 'Outgoing' ? 'out' : 'in') : 'out';
@@ -1850,6 +1911,17 @@
       h('div', { class: 'sched-text' }, f.body));
   }
   const EVENT_KINDS = new Set(['relabel', 'label_add', 'label_remove', 'sys_label', 'stage', 'resolved', 'reopened', 'praise']);
+  // Lines left out of the conversation (the Activity panel still lists them): h-complete / h-uncomplete move
+  // with every solve and every customer message, and "Resolved by" / "Reopened" already say that; a system
+  // label set by the rules or the AI is what the episode divider above shows.
+  const autoLabel = (n) => /^h-?(un)?complete$/i.test(String(n || ''));
+  function quietEvent(e) {
+    const d = e.detail || {};
+    if (e.kind === 'label_add' || e.kind === 'label_remove') return autoLabel(e.label);
+    if (e.kind === 'relabel') return autoLabel(e.label) && (!d.to || autoLabel(d.to));
+    if (e.kind === 'sys_label') return e.actor === 'rule' || e.actor === 'ai' || e.actor === 'system';
+    return false;
+  }
 
   // a voice note player that works in every browser (js/voice.js); plain <audio> if that did not load
   function voicePlayer(url, latest, preload) {
@@ -2136,8 +2208,11 @@
     const isVid = /video|reel/.test(media);
     const isDoc = /document|file/.test(media);
     if (!src) {
-      return h('div', { class: 'media-missing', title: 'Not copied into our storage yet; the media job copies it within a few minutes' },
-        isImg ? '🖼 Photo' : isVid ? '🎬 Video' : isDoc ? '📄 Document' : '🎤 Voice note', h('span', { class: 'muted' }, ' · copying…'));
+      const what = isImg ? '🖼 Photo' : isVid ? '🎬 Video' : isDoc ? '📄 Document' : '🎤 Voice note';
+      // the media job copies new files within ~10 minutes; one still missing hours later never will be
+      const old = now() - Date.parse(m.ts) > 6 * 3600000;
+      return h('div', { class: 'media-missing', title: old ? 'This file was never saved on our side (BSB no longer has it)' : 'Not copied into our storage yet; the media job copies it within a few minutes' },
+        what, h('span', { class: 'muted' }, old ? ' · not available' : ' · copying…'));
     }
     const kind = `${isImg ? 'img' : isVid ? 'vid' : isDoc ? 'doc' : 'aud'}|${src.ours ? 'o' : 'r'}|${media}`;
     // the same element for this message id across polls (see keepMedia)
@@ -2146,7 +2221,16 @@
       if (isImg) {
         const img = h('img', { src: src.url, loading: 'lazy', decoding: 'async', alt: 'photo', class: `media-img${/sticker/.test(media) ? ' sticker' : ''}`, referrerpolicy: 'no-referrer', onclick: () => lightbox(img.getAttribute('src')) });
         ent.media = img;
-        retryMedia(ent, () => img.replaceWith(h('div', { class: 'media-missing' }, '🖼 Photo unavailable')));
+        retryMedia(ent, () => {
+          api.report('media', 'photo did not load', { ours: !!src.ours, tries: ent.retries || 0 });
+          const box = h('div', { class: 'media-missing' }, '🖼 Photo did not load · ',
+            h('button', { class: 'link', type: 'button', onclick: () => {
+              ent.failed = false; ent.retries = 0; ent.url = ent.latest || ent.url;
+              img.src = ent.url + (ent.url.includes('?') ? '&' : '?') + 'r=' + Date.now();
+              box.replaceWith(img);
+            } }, 'Retry'));
+          if (img.isConnected) img.replaceWith(box);
+        });
         // a photo that finishes loading while the chat is at the bottom keeps it at the bottom
         img.addEventListener('load', () => { const box = img.closest('.msgs'); if (box && box._stick) box.scrollTop = box.scrollHeight; }, { once: true });
         ent.el = h('div', { class: 'media' }, img, badge);
