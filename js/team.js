@@ -5,8 +5,9 @@
  *   Quality   how well customers are served: answer speed, missed customers, solved for real, sales results
  *   People    js/people.js (op people_report): working time split into on-chats / no-action / open-unused,
  *             typed messages apart from automatic closers, solves as distinct chats with / without a reply
- *   AI check  chats that were marked solved / complete but were not (the AI scanner's findings),
- *             per employee, with the conversation one click away and a yes / no for the admin
+ *   Radar     js/radar.js: the owner's manual review of every solved / completed chat. The AI solve checker
+ *             was removed on 2026-11-24; every "solved for real" number now comes from the owner's Radar answers
+ *             (server: checked = reviewed, flagged = sent back).
  *   Compare   the same numbers side by side, and per day
  * All numbers come from the server (op team_report); this file only draws them. Times are Beirut time.
  */
@@ -18,7 +19,7 @@
   const st = {
     live: null, liveError: '', liveBusy: false, q: null, qKey: '', qBusy: false, qError: '',
     tab: 'live', preset: 'today', from: '', to: '', data: null, loading: false, error: '',
-    open: new Set(), filter: 'open', person: 0, logMore: false, scanning: false, scanLeft: null, stopScan: false,
+    open: new Set(), filter: 'open', person: 0, logMore: false,
     sel: null, selScroll: false, threadTop: null,
   };
 
@@ -48,11 +49,6 @@
     else if (p === 'yesterday') { st.from = st.to = addDays(t, -1); }
     else { st.from = addDays(t, -(Number(p) - 1)); st.to = t; }
   }
-  const CATEGORY = {
-    still_broken: 'It was still not working', unanswered_question: 'A question was left unanswered', promise_not_kept: 'A promise was not kept',
-    customer_waiting: 'The customer was left waiting', no_reply_at_all: 'Nobody replied to the customer', none: 'It was not finished',
-  };
-  const isFinding = (c) => c.status === 'flagged' || c.status === 'doubt';
   const custName = (c) => c.name && /[\p{L}\p{N}]/u.test(c.name) ? c.name : c.handle ? '@' + c.handle : /^\d+$/.test(c.contact) ? '+' + c.contact : 'Instagram user';
 
   // ---------------------------------------------------------------- data
@@ -68,38 +64,11 @@
     draw();
     schedule();
   }
-  // While the scanner still has chats to read the screen refreshes every 15 s, otherwise every minute.
+  // The report refreshes itself every minute.
   function schedule() {
     clearTimeout(timer);
     if (!root) return;
-    const busy = st.data && st.data.scanner && st.data.scanner.queued > 0;
-    timer = setTimeout(() => { if (document.hidden || st.scanning || pendingAns) schedule(); else load(true); }, busy ? 20000 : 60000);
-  }
-  // "Check now": batch after batch until nothing is left (or the admin stops it).
-  async function scanNow() {
-    if (st.scanning) { st.stopScan = true; return; }
-    st.scanning = true; st.stopScan = false; st.scanLeft = st.data ? st.data.scanner.queued : null; draw();
-    let total = 0, found = 0, idle = 0;
-    const wait = (ms) => new Promise((res) => setTimeout(res, ms));
-    try {
-      while (root && !st.stopScan) {
-        const r = await U.api.call('audit_run');
-        if (r.off) { U.toast('The AI check is switched off (no AI key on the server)', 'error'); break; }
-        if (r.busy) { if (++idle > 20) break; await wait(4000); continue; }
-        total += r.checked || 0; found += (r.flagged || 0) + (r.doubt || 0);
-        st.scanLeft = r.left;
-        draw();
-        if (!r.left) break;
-        if (!r.checked) { if (++idle > 3) break; await wait(5000); } else idle = 0;
-      }
-      U.toast(total ? `Checked ${plural(total, 'chat')}${found ? ` · ${plural(found, 'problem')} found` : ' · no problems found'}` : 'Nothing new to check', found ? '' : 'ok');
-    } catch (e) { U.toast(`The check stopped: ${e.message}`, 'error'); }
-    st.scanning = false; st.scanLeft = null;
-    load(true);
-  }
-  async function retryErrors() {
-    try { const r = await U.api.call('audit_retry'); U.toast(`Trying ${plural(r.retried || 0, 'chat')} again`); load(true); }
-    catch (e) { U.toast(e.message, 'error'); }
+    timer = setTimeout(() => { if (document.hidden) schedule(); else load(true); }, 60000);
   }
   // ---------------------------------------------------------------- tooltip (one for every chart)
 
@@ -190,272 +159,6 @@
   }
   function tile(label, value, sub, cls = '', onclick = null) {
     return h(onclick ? 'button' : 'div', { class: `tm-tile ${cls}`, onclick }, h('span', { class: 'tm-tile-l' }, label), h('b', { class: 'tm-tile-v' }, value), sub ? h('span', { class: 'tm-tile-s' }, sub) : null);
-  }
-
-  // ---------------------------------------------------------------- AI check: a review desk
-  // Left: the chats to look at. Right: what the AI found and the conversation it read.
-  // Keys: J / K (or arrows) move, V = it was fine, C = mark unsolved (the chat goes back to Unresolved),
-  // Z undoes the last answer, O opens the chat in the desk.
-
-  function factChips(c) {
-    const g = c.signals || {}, out = [];
-    if (c.reopened_at) out.push(['warn', `Customer wrote again ${g.reopened_after_s != null && g.reopened_after_s < 5400 ? (g.reopened_after_s < 90 ? 'within a minute' : `${Math.round(g.reopened_after_s / 60)} min later`) : fDateTime.format(new Date(c.reopened_at))}`]);
-    if (g.unanswered) out.push(['warn', 'Customer’s last message got no reply']);
-    if (g.staff_replies === 0) out.push(['warn', 'Nobody replied in this chat']);
-    if (g.after_admin) out.push(['warn', 'Marked finished again after you marked it unsolved']);
-    if (g.warned) out.push(['warn', 'The desk warned “not solved” — solved anyway']);
-    if (g.bulk) out.push(['', `One of ${g.bulk} chats solved within a minute`]);
-    if (g.earlier_solves) out.push(['', `Marked finished ${g.earlier_solves}× before this week`]);
-    if (c.still_open) out.push(['', 'Open again now']);
-    const m = c.media || {};
-    const read = [m.messages ? `read ${plural(m.messages, 'message')}` : '', m.voice ? `heard ${plural(m.voice, 'voice note')}` : '', m.images ? `saw ${plural(m.images, 'photo')}` : ''].filter(Boolean);
-    if (read.length) out.push(['quiet', `AI ${read.join(', ')}`]);
-    if (m.voice_failed) out.push(['quiet', `${plural(m.voice_failed, 'voice note')} could not be heard`]);
-    return out.map(([cls, text]) => h('span', { class: `tm-chip ${cls}` }, text));
-  }
-  const RESULT = {
-    ok: ['good', 'Looks solved'], flagged: ['sure', 'Not solved'], doubt: ['maybe', 'Please check'], queued: ['wait', 'Waiting for the AI'],
-    error: ['err', 'Could not be checked'], skipped: ['wait', 'Taken back by staff'],
-  };
-  const REVIEWED = { confirmed: 'You marked it unsolved', dismissed: 'You said it was fine' };
-  const NEED = { done: ['good', '✓'], not_done: ['sure', '✗'], customer_dropped_it: ['wait', '–'], unknown: ['wait', '?'] };
-
-  // which chats the list shows
-  function reviewRows(d) {
-    const checks = d.checks || [];
-    const mine = (c) => !st.person || c.staff_id === st.person;
-    const sets = {
-      open: checks.filter((c) => isFinding(c) && !c.review),
-      confirmed: checks.filter((c) => c.review === 'confirmed'),
-      dismissed: checks.filter((c) => c.review === 'dismissed'),
-      all: checks,
-    };
-    // One case per chat: a chat that was marked finished several times is one row (its latest mark),
-    // and the answer covers all of them. "Every marked chat" stays a plain log.
-    const cases = (list) => {
-      const by = new Map();
-      for (const c of list) { const g = by.get(c.contact); if (g) g.push(c); else by.set(c.contact, [c]); }
-      return [...by.values()].map((g) => {
-        g.sort((a, b) => Date.parse(b.solved_at) - Date.parse(a.solved_at));
-        const head = g.find(mine) || g[0];
-        head._group = g;
-        return head;
-      }).filter((c) => c._group.some(mine));
-    };
-    const grouped = { open: cases(sets.open), confirmed: cases(sets.confirmed), dismissed: cases(sets.dismissed), all: sets.all.filter(mine) };
-    for (const c of grouped.all) c._group = [c];
-    const sure = (c) => c._group.some((x) => x.status === 'flagged');
-    const order = (a, b) => (st.filter === 'open' ? sure(b) - sure(a) : 0) || Date.parse(b.solved_at) - Date.parse(a.solved_at);
-    const counts = Object.fromEntries(Object.entries(grouped).map(([k, v]) => [k, v.length]));
-    const perPerson = new Map();
-    for (const c of cases(sets.open)) for (const id of new Set(c._group.map((x) => x.staff_id))) perPerson.set(id, (perPerson.get(id) || 0) + 1);
-    return { rows: [...(grouped[st.filter] || grouped.open)].sort(order), counts, checks, perPerson };
-  }
-  let rvRows = [];             // the list as drawn (the keyboard moves through it)
-  const details = new Map();   // audit id -> {key, data | error | loading}
-  function loadDetail(c, then) {
-    const key = `${c.id}|${c.checked_at}|${c.status}`;
-    const hit = details.get(c.id);
-    if (hit && hit.key === key) return hit;
-    const entry = { key, loading: true };
-    details.set(c.id, entry);
-    if (details.size > 40) details.delete(details.keys().next().value);
-    U.api.call('audit_detail', { id: c.id }).then((data) => { entry.data = data; }, (e) => { entry.error = e.message; })
-      .finally(() => { entry.loading = false; if (then) then(); });
-    return entry;
-  }
-  function select(id, scroll = true) {
-    if (st.sel === id) return;
-    st.sel = id; st.selScroll = scroll; st.threadTop = null;
-    draw();
-  }
-  function move(dir) {
-    if (!rvRows.length) return;
-    const i = rvRows.findIndex((c) => c.id === st.sel);
-    const n = rvRows[Math.max(0, Math.min(rvRows.length - 1, i < 0 ? 0 : i + dir))];
-    if (n) select(n.id);
-  }
-  // An answer is shown at once and sent 5 seconds later, so Z can take it back before anything changes.
-  let pendingAns = null;
-  function flushAnswer() {
-    if (!pendingAns) return;
-    const p = pendingAns; pendingAns = null;
-    clearTimeout(p.timer); p.bar.remove();
-    (p.value === 'unsolved' ? U.api.call('audit_unsolve', { id: p.c.id }) : U.api.call('audit_review', { id: p.c.id, review: p.value }))
-      .then((r) => { if (p.value === 'unsolved' && r && r.how === 'already') U.toast(`${custName(p.c)} is already back in Unresolved`); load(true); },
-        (e) => { p.group.forEach((x, k) => { x.review = p.was[k]; }); draw(); U.toast(`Not saved: ${e.message}`, 'error'); });
-  }
-  function undoAnswer() {
-    if (!pendingAns) return false;
-    const p = pendingAns; pendingAns = null;
-    clearTimeout(p.timer); p.bar.remove();
-    p.group.forEach((x, k) => { x.review = p.was[k]; });
-    st.sel = p.c.id; st.selScroll = true; st.threadTop = null;
-    draw();
-    return true;
-  }
-  function answer(c, value) {            // value: 'dismissed' (V) | 'unsolved' (C) | null (change my answer)
-    if (!c) return;
-    flushAnswer();
-    const group = c._group && c._group.length ? c._group : [c];
-    const was = group.map((x) => x.review);
-    const i = rvRows.findIndex((x) => x.id === c.id);
-    const next = rvRows[i + 1] || rvRows[i - 1] || null;
-    for (const x of group) x.review = value === 'unsolved' ? 'confirmed' : value;
-    const text = value === 'unsolved' ? [h('b', null, custName(c)), ' marked unsolved · it goes back to Unresolved']
-      : value === 'dismissed' ? [h('b', null, custName(c)), ' was fine'] : [h('b', null, custName(c)), ' · answer removed'];
-    const bar = h('div', { class: 'undo tm-undo', role: 'status' },
-      h('div', { class: 'undo-bar' }, h('div', { class: 'undo-text' }, h('div', null, text)),
-        h('button', { class: 'btn sm', onclick: undoAnswer }, 'Undo', h('kbd', null, 'Z'))),
-      h('div', { class: 'undo-progress' }, h('i', { style: 'animation-duration:5000ms' })));
-    root.append(bar);
-    pendingAns = { c, group, value, was, bar, timer: setTimeout(flushAnswer, 5000) };
-    // the answered chat leaves the "to review" list: go on with the next one
-    if (st.filter === 'open' && next) { st.sel = next.id; st.selScroll = true; st.threadTop = null; }
-    draw();
-  }
-  function openInDesk(c) { if (!c) return; flushAnswer(); close(); U.openChat(c.contact); }
-  function reviewKey(e) {
-    const el = document.activeElement;
-    if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return false;
-    if (e.ctrlKey || e.metaKey || e.altKey) return false;
-    const cur = rvRows.find((c) => c.id === st.sel);
-    switch (e.key) {
-      case 'j': case 'J': case 'ArrowDown': move(1); return true;
-      case 'k': case 'K': case 'ArrowUp': move(-1); return true;
-      case 'v': case 'V': if (cur) answer(cur, 'dismissed'); return true;
-      case 'c': case 'C': if (cur) answer(cur, 'unsolved'); return true;
-      case 'z': case 'Z': undoAnswer(); return true;
-      case 'o': case 'O': case 'Enter': openInDesk(cur); return true;
-      default: return false;
-    }
-  }
-
-  function listRow(c) {
-    const [cls, label] = RESULT[c.status] || RESULT.queued;
-    return h('li', { class: `tm-rv-row${c.id === st.sel ? ' on' : ''}${c.review ? ' done' : ''}`, dataset: { id: c.id }, onclick: () => select(c.id, false) },
-      h('span', { class: `tm-dot ${cls}`, title: label }),
-      h('div', { class: 'tm-rv-main' },
-        h('div', { class: 'tm-rv-top' }, h('b', null, custName(c)), h('span', { class: 'muted' }, fDay.format(new Date(c.solved_at)) === today() ? fTime.format(new Date(c.solved_at)) : fDateTime.format(new Date(c.solved_at)))),
-        h('div', { class: 'tm-rv-sub' }, h('span', { class: 'tm-rv-who' }, c.actor), ` · ${c.kind === 'sales' ? 'sales' : 'support'}`,
-          c._group && c._group.length > 1 ? h('span', { class: 'tm-chip', title: 'This chat was marked finished several times; one answer covers them all' }, `marked ${c._group.length}×`) : null,
-          c.review ? h('span', { class: `tm-chip ${c.review === 'confirmed' ? 'bad' : 'quiet'}` }, c.review === 'confirmed' ? 'unsolved' : 'fine') : null),
-        h('div', { class: 'tm-rv-why' }, isFinding(c) ? (c.reason || CATEGORY[c.category] || '') : c.status === 'ok' ? (c.summary || c.reason || label) : label)));
-  }
-  function bubble(m, d) {
-    const mine = m.dir !== 'customer';
-    const kids = [];
-    const text = String(m.text || '').replace(/^🎤 \*Voice Message\*$|^📎 \*Media Received\*$/u, '').trim();
-    if (m.hidden) kids.push(h('em', null, 'Reply sent from the BSB phone app (text not visible here)'));
-    else if (text) kids.push(h('span', { dir: 'auto' }, text));
-    const url = m.media_ref && d.urls ? d.urls[m.media_ref] : null;
-    const safe = typeof url === 'string' && (/^https:\/\//.test(url) || /^\/media\/[\w.-]+$/.test(url));
-    if (/image/i.test(m.media || '') && safe) kids.push(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, h('img', { src: url, alt: 'Photo', loading: 'lazy' })));
-    else if (/audio|voice/i.test(m.media || '')) {
-      const tr = m.media_ref && d.transcripts ? d.transcripts[m.media_ref] : null;
-      kids.push(h('span', { class: 'tm-voice' }, U.icon('mic', 'xs'), tr ? h('i', { dir: 'auto' }, `“${tr}”`) : h('i', null, 'Voice note')));
-      if (safe) kids.push(h('audio', { src: url, controls: true, preload: 'none' }));
-    } else if (m.media && !['text', 'None', 'reaction'].includes(String(m.media).replace(/^instagram_/, ''))) kids.push(h('em', null, `[${String(m.media).replace(/^instagram_/, '')}]`));
-    if (!kids.length) kids.push(h('em', null, '[empty]'));
-    return h('div', { class: `tm-b ${mine ? 'out' : 'in'}${m.closer ? ' closer' : ''}${m.cur === false ? ' old' : ''}` }, kids,
-      h('span', { class: 'tm-b-t' }, `${m.closer ? 'closing message · ' : ''}${mine ? (m.by || 'Staff') + ' · ' : ''}${fDay.format(new Date(m.ts)) === today() ? '' : fShortTz(m.ts) + ' '}${fTime.format(new Date(m.ts))}`));
-  }
-  const fShortTz = (ts) => new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short' }).format(new Date(ts));
-  function thread(d) {
-    const a = d.audit, inp = d.input || {};
-    const before = inp.before || [], after = inp.after || [];
-    const marks = (inp.marks || []).map((k) => ({ ts: k.at, el: h('div', { class: 'tm-markline quiet' }, h('span', null,
-      `${k.kind === 'resolved' ? `${k.actor} marked it ${k.sales ? 'complete' : 'solved'}` : k.actor === 'customer' ? 'The customer wrote again' : `${k.actor} reopened it`} · ${fDateTime.format(new Date(k.at))}`)) }));
-    const items = [...before.map((m) => ({ ts: m.ts, el: bubble(m, d), cur: m.cur })), ...after.map((m) => ({ ts: m.ts, el: bubble(m, d), cur: true })), ...marks];
-    const firstCur = before.find((m) => m.cur);
-    if (firstCur && before[0] !== firstCur) items.push({ ts: firstCur.ts, first: true, el: h('div', { class: 'tm-markline ep' }, h('span', null, 'The episode that was marked starts here')) });
-    const mark = h('div', { class: 'tm-markline' }, h('span', null, `${a.actor} marked this ${a.kind === 'sales' ? 'complete' : 'solved'} here · ${fDateTime.format(new Date(a.solved_at))}`),
-      h('small', null, inp.closer_body ? `with the closing message “${inp.closer}”` : 'no closing message'));
-    items.push({ ts: a.solved_at, mark: true, el: mark });
-    items.sort((x, y) => (Date.parse(x.ts) - Date.parse(y.ts)) || ((x.first ? -1 : x.mark ? 1 : 0) - (y.first ? -1 : y.mark ? 1 : 0)));
-    const box = h('div', { class: 'tm-thread' },
-      before.length >= 120 ? h('div', { class: 'tm-markline quiet' }, h('span', null, 'Older messages are not shown')) : null,
-      items.map((x) => x.el),
-      !after.length ? h('div', { class: 'tm-markline quiet' }, h('span', null, 'The customer did not write again')) : null);
-    box._mark = mark;
-    return box;
-  }
-  function detailPane(c) {
-    if (!c) return h('div', { class: 'tm-rv-empty' }, h('div', { class: 'empty-big' }, '✓'), h('b', null, st.filter === 'open' ? 'Nothing left to review' : 'Nothing here'),
-      h('div', { class: 'muted' }, st.filter === 'open' ? 'New findings appear here as the AI checks chats.' : 'Pick another list above.'));
-    const entry = loadDetail(c, () => { if (root && st.sel === c.id) draw(); });
-    const [cls, label] = RESULT[c.status] || RESULT.queued;
-    const a = entry.data ? entry.data.audit : null;
-    const det = a && a.detail ? a.detail : {};
-    const needs = (det.needs || []).filter((n) => n.need);
-    const verdict = h('div', { class: `tm-verdict ${cls}` },
-      h('div', { class: 'tm-verdict-h' }, h('span', { class: `tm-res ${cls}` }, label),
-        isFinding(c) ? h('b', null, CATEGORY[c.category] || CATEGORY.none) : null,
-        c.review ? h('span', { class: `tm-chip ${c.review === 'confirmed' ? 'bad' : 'quiet'}` }, REVIEWED[c.review]) : null),
-      (det.summary || c.summary) ? h('p', { class: 'tm-sum' }, det.summary || c.summary) : c.reason ? h('p', { class: 'tm-sum' }, c.reason)
-        : c.status === 'queued' ? h('p', { class: 'tm-sum' }, 'The AI has not read this chat yet.') : c.status === 'error' ? h('p', { class: 'tm-sum' }, `The AI could not check it: ${c.last_error || 'no answer'}`) : null,
-      needs.length ? h('ul', { class: 'tm-needs' }, needs.map((n) => { const [nc, sym] = NEED[n.status] || NEED.unknown; return h('li', { class: nc }, h('span', { class: 'tm-need-s' }, sym), h('div', null, h('b', null, n.need), h('span', null, n.how))); })) : null,
-      c.evidence ? h('blockquote', { class: 'tm-fc-q', dir: 'auto' }, h('span', null, 'The customer said'), c.evidence) : null,
-      (det.missing_action || c.missing) && isFinding(c) ? h('p', { class: 'tm-todo' }, h('b', null, 'Should have been done: '), det.missing_action || c.missing) : null,
-      a && a.note && isFinding(c) ? h('p', { class: 'tm-second muted' }, h('b', null, c.status === 'flagged' ? 'Second check agreed: ' : 'Second check was not sure: '), a.note) : null,
-      h('div', { class: 'tm-fc-chips' }, factChips(a ? { ...c, signals: a.signals, media: a.media } : c)));
-    let conv;
-    if (entry.data) { conv = thread(entry.data); }
-    else conv = h('div', { class: 'tm-thread' }, h('div', { class: 'tm-markline quiet' }, h('span', null, entry.error ? `Could not load the conversation: ${entry.error}` : 'Loading the conversation…')));
-    const grp = c._group && c._group.length > 1 ? c._group : null;
-    const again = grp ? h('p', { class: 'tm-again' }, U.icon('refresh', 'xs'), h('span', null, h('b', null, `This chat was marked finished ${grp.length} times`), ': ',
-      [...grp].reverse().map((x) => `${x.actor} ${fDay.format(new Date(x.solved_at)) === today() ? fTime.format(new Date(x.solved_at)) : fDateTime.format(new Date(x.solved_at))}`).join(' · '),
-      '. You are looking at the latest one; your answer covers all of them.')) : null;
-    const scroller = h('div', { class: 'tm-rv-scroll' }, again, verdict, conv);
-    scroller._conv = conv;
-    const i = rvRows.findIndex((x) => x.id === c.id);
-    return h('div', { class: 'tm-rv-detail' },
-      h('div', { class: 'tm-rv-head' },
-        h('div', null, h('h3', null, custName(c)), h('span', { class: 'muted' }, `${c.kind === 'sales' ? 'Sales chat, marked complete' : 'Support chat, marked solved'} by `, h('b', null, c.actor), ` · ${fDateTime.format(new Date(c.solved_at))}`)),
-        h('span', { class: 'muted tm-rv-pos' }, `${i + 1} of ${rvRows.length}`)),
-      scroller,
-      h('div', { class: 'tm-rv-foot' },
-        h('div', { class: 'tm-rv-nav' },
-          h('button', { class: 'btn sm', disabled: i <= 0, title: 'Previous (K or ↑)', onclick: () => move(-1) }, h('kbd', null, 'K'), 'Previous'),
-          h('button', { class: 'btn sm', disabled: i >= rvRows.length - 1, title: 'Next (J or ↓)', onclick: () => move(1) }, h('kbd', null, 'J'), 'Next'),
-          h('button', { class: 'btn sm ghost', title: 'Open this chat in the desk (O)', onclick: () => openInDesk(c) }, h('kbd', null, 'O'), 'Open chat')),
-        h('div', { class: 'tm-rv-act' },
-          c.review ? h('button', { class: 'btn ghost', onclick: () => answer(c, null) }, 'Change my answer') : null,
-          h('button', { class: `btn fine${c.review === 'dismissed' ? ' on' : ''}`, title: 'The chat was handled properly. It stops counting against the employee.', onclick: () => answer(c, 'dismissed') }, h('kbd', null, 'V'), 'It’s fine'),
-          h('button', { class: `btn unsolve${c.review === 'confirmed' ? ' on' : ''}`, title: 'Not solved: remove the solved status and put the chat back in Unresolved.', onclick: () => answer(c, 'unsolved') }, h('kbd', null, 'C'), 'Mark unsolved'))));
-  }
-  function aiTab(d, staff) {
-    const sc = d.scanner || {};
-    const { rows, counts, checks, perPerson } = reviewRows(d);
-    rvRows = rows;
-    if (!rows.some((c) => c.id === st.sel)) { st.sel = rows.length ? rows[0].id : null; st.threadTop = null; st.selScroll = false; }
-    const cur = rows.find((c) => c.id === st.sel) || null;
-    if (cur) { const i = rows.indexOf(cur); if (rows[i + 1]) loadDetail(rows[i + 1]); }   // the next one opens instantly
-    const left = st.scanning && st.scanLeft != null ? st.scanLeft : sc.queued || 0;
-    const total = (sc.done || 0) + left;
-    const scan = sc.enabled === false ? h('div', { class: 'tm-scanline err' }, U.icon('warn', 'sm'), h('span', null, h('b', null, 'The AI check is switched off.')))
-      : h('div', { class: `tm-scanline${left ? ' busy' : ''}` }, U.icon(left ? 'refresh' : 'check', 'sm'),
-        h('span', null, left ? [h('b', null, `AI is reading: ${num(left)} chats to go`), ` · newest first${left > 15 ? `, about ${Math.ceil(left / 13)} min` : ''}`]
-          : [h('b', null, 'AI has checked every chat'), sc.last_checked_at ? ` · last check ${U.ago(sc.last_checked_at)}` : '']),
-        left ? h('span', { class: 'tm-prog' }, h('i', { style: `width:${total ? Math.round(((sc.done || 0) / total) * 100) : 0}%` })) : null,
-        left || st.scanning ? h('button', { class: 'btn sm', onclick: scanNow }, st.scanning ? 'Stop' : 'Check now') : null,
-        sc.errors ? h('button', { class: 'btn sm', title: sc.last_error || '', onclick: retryErrors }, `${plural(sc.errors, 'chat')} failed · try again`) : null);
-    const who = staff.filter((p) => checks.some((c) => c.staff_id === p.id));
-    const tabs = [['open', 'To review'], ['confirmed', 'Marked unsolved'], ['dismissed', 'Fine'], ['all', 'Every marked chat']];
-    return [h('div', { class: 'tm-review' },
-      h('div', { class: 'tm-rv-bar' },
-        h('div', { class: 'tm-filter', role: 'tablist' }, tabs.map(([k, l]) => h('button', { class: `tm-tab${st.filter === k ? ' on' : ''}`, role: 'tab', 'aria-selected': String(st.filter === k),
-          onclick: () => { st.filter = k; st.sel = null; draw(); } }, l, h('span', null, num(counts[k]))))),
-        h('div', { class: 'tm-people' }, h('button', { class: `tm-tab${!st.person ? ' on' : ''}`, onclick: () => { st.person = 0; st.sel = null; draw(); } }, 'Everyone'),
-          who.map((p) => { const t = p.totals, bad = t.flagged + t.doubt; return h('button', { class: `tm-tab${st.person === p.id ? ' on' : ''}`, dataset: { tip: `${p.name}\n${bad} of ${t.checked} checked chats had a problem (${pct(bad, t.checked)})\n${t.flagged} not solved · ${t.doubt} please check${t.pending ? `\n${t.pending} still waiting for the AI` : ''}` },
-            onclick: () => { st.person = st.person === p.id ? 0 : p.id; st.sel = null; draw(); } }, p.name, perPerson.get(p.id) ? h('span', { class: 'bad' }, num(perPerson.get(p.id))) : h('span', null, '0')); })),
-        scan),
-      h('div', { class: 'tm-rv-cols' },
-        h('ul', { class: 'tm-rv-list', 'aria-label': 'Chats to review' }, rows.length ? rows.slice(0, 400).map(listRow)
-          : h('li', { class: 'tm-rv-none' }, st.filter === 'open' ? (left ? 'No problems found so far. The AI is still reading.' : 'No problems waiting for you.') : 'Nothing here.')),
-        detailPane(cur)),
-      h('div', { class: 'tm-rv-keys muted' }, h('kbd', null, 'J'), h('kbd', null, 'K'), ' move  ', h('kbd', null, 'V'), ' it’s fine  ', h('kbd', null, 'C'), ' mark unsolved (back to Unresolved)  ',
-        h('kbd', null, 'Z'), ' undo  ', h('kbd', null, 'O'), ' open chat  ', h('kbd', null, 'Esc'), ' back to chats'))];
   }
 
   // ---------------------------------------------------------------- live board
@@ -578,7 +281,7 @@
       { w: 40, label: 'Answered within 5 minutes', v: share(k.in_5, k.turns), tip: `${num(k.in_5)} of ${num(k.turns)} customer messages got a reply from a person within 5 minutes.` },
       { w: 20, label: 'Nobody left without an answer', v: k.turns ? 1 - share(k.missed, k.turns) : null, tip: `${num(k.missed)} customers got no answer within 24 hours (a plain “thanks” does not count).` },
       { w: 25, label: kind === 'support' ? 'Solved for real' : 'Completed for real', v: chk.checked ? 1 - share(chk.not_solved, chk.checked) : null,
-        tip: `The AI checked ${num(chk.checked)} chats marked ${kind === 'support' ? 'solved' : 'complete'}; ${num(chk.not_solved)} were not (${num(chk.doubt)} more are doubtful).` },
+        tip: `You reviewed ${num(chk.checked)} chats marked ${kind === 'support' ? 'solved' : 'complete'} in Radar and sent ${num(chk.not_solved)} back.` },
     ];
     if (kind === 'support') out.push({ w: 15, label: 'Customer did not have to come back', v: chk.marked ? 1 - share(chk.came_back, chk.marked) : null,
       tip: `After ${num(chk.came_back)} of ${num(chk.marked)} solves the customer wrote again within 48 hours.` });
@@ -621,7 +324,7 @@
     else if (L.over_15) items.push(['warn', `${plural(L.over_15, 'customer')} waiting over 15 minutes`, h('button', { class: 'btn sm', onclick: () => { st.tab = 'live'; draw(); } }, 'See who')]);
     if (paid.length) items.push(['bad', [`${plural(paid.length, 'customer says', 'customers say')} they paid and nothing was activated: `, names(paid)], null]);
     if (ready.length) items.push(['warn', [`${plural(ready.length, 'customer')} chose a plan and wait for payment details: `, names(ready)], null]);
-    if (q.flags_open) items.push(['warn', `${plural(q.flags_open, 'chat')} marked finished that the AI thinks are not`, h('button', { class: 'btn sm', onclick: () => { st.tab = 'ai'; st.filter = 'open'; st.person = 0; st.sel = null; draw(); } }, 'Review')]);
+    if (q.flags_open) items.push(['warn', `${plural(q.flags_open, 'finished chat')} waiting for your review`, h('button', { class: 'btn sm', onclick: () => { st.tab = 'ai'; draw(); } }, 'Review')]);
     const f = q.followup_health;
     if (f) {
       const age = f.last_run_at ? U.now() - Date.parse(f.last_run_at) : Infinity;
@@ -664,7 +367,6 @@
     const sc = c.support_check || {}, lc = c.sales_check || {}, fu = q.followup, f = c.funnel || {};
     const days = q.days || [], multi = days.length > 1;
     const minutes = (sv) => (sv == null ? 0 : Math.round(sv / 60));
-    const cats = (kind) => (q.categories || []).filter((x) => x.kind === kind).map((x) => ({ name: CATEGORY[x.category] || CATEGORY.none, v: x.n, cls: 'bad' }));
     const staff = d ? [...d.staff].filter((x) => x.totals.sent || x.totals.solved || x.totals.sales_done || x.totals.audited) : [];
     const fh = q.followup_health;
     return [
@@ -679,13 +381,12 @@
           qTile('Never answered', num(S.missed), delta(S.missed, PS.missed, { lower: true }), 'Customers who got no answer within 24 hours.', S.missed ? 'bad' : ''),
           qTile('Chats solved', num(c.solved), delta(c.solved, p.solved, { neutral: true }), `${num(c.solved_msg)} with a closing message.`),
           qTile('Typical time to solve', secs(c.solve_median_s), delta(c.solve_median_s, p.solve_median_s, { lower: true }), 'From the start of the issue (or the customer writing again) to the solve.'),
-          qTile('Marked solved, but not', num(sc.not_solved), h('span', { class: 'tm-tile-s' }, sc.checked ? `${pct(sc.not_solved, sc.checked)} of ${num(sc.checked)} checked` : 'nothing checked yet'), 'Found by the AI check and not dismissed by you.', sc.not_solved ? 'bad' : '')),
+          qTile('Sent back after review', num(sc.not_solved), h('span', { class: 'tm-tile-s' }, sc.checked ? `${pct(sc.not_solved, sc.checked)} of ${num(sc.checked)} reviewed` : 'nothing reviewed yet'), 'Solved chats you reviewed in Radar and sent back to Unresolved.', sc.not_solved ? 'bad' : '')),
         h('div', { class: 'tm-charts' },
           multi ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Typical answer time per day'), h('span', { class: 'muted' }, 'minutes')),
             columns(days, { unit: 'n', label: 'Support: typical answer time per day', value: (x) => minutes(x.sup_median_s), tip: (x) => `${dayName(x.day)}\nTypical answer after ${secs(x.sup_median_s)}\n${pct(x.sup_in_5, x.sup_turns)} of ${x.sup_turns} within 5 min` })) : null,
-          multi ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Solved per day'), h('span', { class: 'muted' }, 'and how many the AI found not solved')),
-            columns(days, { unit: 'n', label: 'Support chats solved per day', value: (x) => x.solved, tip: (x) => `${dayName(x.day)}\n${x.solved} solved\n${x.problems} of ${x.checked} checked had a problem` })) : null,
-          compare('What went wrong in solved chats', 'found by the AI check', cats('support'), num, true))),
+          multi ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Solved per day'), h('span', { class: 'muted' }, 'and how many you sent back')),
+            columns(days, { unit: 'n', label: 'Support chats solved per day', value: (x) => x.solved, tip: (x) => `${dayName(x.day)}\n${x.solved} solved\n${x.problems} of ${x.checked} reviewed were sent back` })) : null)),
 
       h('section', { class: 'tm-sec' }, h('div', { class: 'tm-sec-h' }, h('div', null, h('h3', null, 'Sales'))),
         h('div', { class: 'tm-tiles' },
@@ -694,7 +395,7 @@
           qTile('Got a price', num(f.priced), delta(f.priced, (p.funnel || {}).priced, { neutral: true }), 'Chats in which a price was sent in this period.'),
           qTile('Bought', num(f.bought), delta(f.bought, (p.funnel || {}).bought), 'Purchases recorded in this period.'),
           qTile('Priced → bought', f.priced ? pct(f.bought, f.priced) : '–', null, 'Purchases in the period divided by prices sent in the period.'),
-          qTile('Marked complete, but not', num(lc.not_solved), h('span', { class: 'tm-tile-s' }, lc.checked ? `${pct(lc.not_solved, lc.checked)} of ${num(lc.checked)} checked` : 'nothing checked yet'), 'The customer was still waiting for something. Found by the AI check.', lc.not_solved ? 'bad' : '')),
+          qTile('Sent back after review', num(lc.not_solved), h('span', { class: 'tm-tile-s' }, lc.checked ? `${pct(lc.not_solved, lc.checked)} of ${num(lc.checked)} reviewed` : 'nothing reviewed yet'), 'Completed sales chats you reviewed in Radar and sent back.', lc.not_solved ? 'bad' : '')),
         h('div', { class: 'tm-charts' },
           funnelCard(q),
           multi ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Purchases per day')),
@@ -722,8 +423,8 @@
 
       staff.length ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Quality per person'), h('span', { class: 'muted' }, 'replies sent from the desk; replies from the BSB phone app cannot be told apart')),
         h('div', { class: 'tm-scroll' }, h('table', { class: 'tm-table wide' },
-          h('thead', null, h('tr', null, ['Employee', 'Typical reply', 'Slow replies', 'Solved', 'Completed', 'Checked by AI', 'Not finished', 'Customer came back'].map((x, i) => h('th', { class: i ? 'r' : '' }, x)))),
-          h('tbody', null, staff.map((x) => { const t = x.totals, bad = t.flagged + t.doubt; return h('tr', null, h('td', null, x.name), h('td', { class: 'r' }, secs(t.reply_median_s)), h('td', { class: 'r' }, secs(t.reply_p90_s)),
+          h('thead', null, h('tr', null, ['Employee', 'Typical reply', 'Slow replies', 'Solved', 'Completed', 'Reviewed by you', 'Sent back', 'Customer came back'].map((x, i) => h('th', { class: i ? 'r' : '' }, x)))),
+          h('tbody', null, staff.map((x) => { const t = x.totals, bad = t.flagged; return h('tr', null, h('td', null, x.name), h('td', { class: 'r' }, secs(t.reply_median_s)), h('td', { class: 'r' }, secs(t.reply_p90_s)),
             h('td', { class: 'r' }, num(t.solved)), h('td', { class: 'r' }, num(t.sales_done)), h('td', { class: 'r' }, num(t.checked)),
             h('td', { class: `r${t.checked && bad / t.checked > 0.15 ? ' tm-badcell' : ''}` }, t.checked ? `${num(bad)} (${pct(bad, t.checked)})` : '–'), h('td', { class: 'r' }, t.audited ? `${num(t.reopened)} (${pct(t.reopened, t.audited)})` : '–')); }))))) : null,
     ];
@@ -749,7 +450,7 @@
         compare('Support chats solved', '', rows((p) => p.totals.solved), num),
         compare('Sales chats completed', '', rows((p) => p.totals.sales_done), num),
         compare('Typical reply time', 'shorter is better', medians.map((p) => ({ name: p.name, v: p.totals.reply_median_s, tip: `typical ${secs(p.totals.reply_median_s)} · slow replies ${secs(p.totals.reply_p90_s)} · ${p.totals.reply_n} replies` })).sort((a, b) => a.v - b.v), secs),
-        compare('Problems found by the AI', 'fewer is better', staff.map((p) => ({ name: p.name, v: p.totals.flagged + p.totals.doubt, cls: 'bad', tip: `${p.totals.flagged} not solved · ${p.totals.doubt} please check · of ${p.totals.checked} checked` })).filter((r) => r.v > 0).sort((a, b) => b.v - a.v), num),
+        compare('Sent back after your review', 'fewer is better', staff.map((p) => ({ name: p.name, v: p.totals.flagged, cls: 'bad', tip: `${p.totals.flagged} sent back · of ${p.totals.checked} you reviewed` })).filter((r) => r.v > 0).sort((a, b) => b.v - a.v), num),
         teamDays.length > 1 ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Whole team: working time per day')),
           columns(teamDays, { unit: 'h', label: 'Team working time per day', value: (x) => x.active_min, tip: (x) => `${dayName(x.day)}\nWorking ${hm(x.active_min)} (everyone together)\n${x.sent} sent · ${x.solved} solved · ${x.sales_done} sales completed` })) : null,
         teamDays.length > 1 ? h('div', { class: 'tm-card' }, h('div', { class: 'tm-card-h' }, h('b', null, 'Whole team: messages sent per day')),
@@ -757,15 +458,15 @@
       h('div', { class: 'tm-card' },
         h('div', { class: 'tm-card-h' }, h('b', null, 'All the numbers'), h('button', { class: 'btn sm', onclick: () => downloadCsv(d, staff) }, U.icon('file', 'sm'), 'Download as spreadsheet')),
         h('div', { class: 'tm-scroll' }, h('table', { class: 'tm-table wide' },
-          h('thead', null, h('tr', null, ['Employee', 'Working time', 'Desk open', 'Messages', 'Customers', 'Solved', 'Sales completed', 'Typical reply', 'Not solved', 'Please check'].map((x, i) => h('th', { class: i ? 'r' : '' }, x)))),
+          h('thead', null, h('tr', null, ['Employee', 'Working time', 'Desk open', 'Messages', 'Customers', 'Solved', 'Sales completed', 'Typical reply', 'Reviewed by you', 'Sent back'].map((x, i) => h('th', { class: i ? 'r' : '' }, x)))),
           h('tbody', null, staff.map((p) => { const t = p.totals; return h('tr', null, h('td', null, p.name), h('td', { class: 'r' }, hm(t.active_min)), h('td', { class: 'r' }, hm(t.online_min)), h('td', { class: 'r' }, num(t.sent)),
-            h('td', { class: 'r' }, num(t.chats)), h('td', { class: 'r' }, num(t.solved)), h('td', { class: 'r' }, num(t.sales_done)), h('td', { class: 'r' }, secs(t.reply_median_s)), h('td', { class: 'r' }, num(t.flagged)), h('td', { class: 'r' }, num(t.doubt))); }))))),
+            h('td', { class: 'r' }, num(t.chats)), h('td', { class: 'r' }, num(t.solved)), h('td', { class: 'r' }, num(t.sales_done)), h('td', { class: 'r' }, secs(t.reply_median_s)), h('td', { class: 'r' }, num(t.checked)), h('td', { class: 'r' }, num(t.flagged))); }))))),
     ];
   }
   function downloadCsv(d, staff) {
     const cols = [['Employee', (p) => p.name], ['Working minutes', (p) => p.totals.active_min], ['Desk open minutes', (p) => p.totals.online_min], ['Days worked', (p) => p.totals.days_active],
       ['Messages sent', (p) => p.totals.sent], ['Customers messaged', (p) => p.totals.chats], ['Support solved', (p) => p.totals.solved], ['Sales completed', (p) => p.totals.sales_done],
-      ['Typical reply seconds', (p) => p.totals.reply_median_s ?? ''], ['Chats checked by AI', (p) => p.totals.checked], ['Not solved', (p) => p.totals.flagged], ['Please check', (p) => p.totals.doubt],
+      ['Typical reply seconds', (p) => p.totals.reply_median_s ?? ''], ['Reviewed by you', (p) => p.totals.checked], ['Sent back after review', (p) => p.totals.flagged],
       ['Customer came back', (p) => p.totals.reopened]];
     // a cell starting with = + - @ would run as a formula in a spreadsheet: keep it text
     const esc = (v) => { let x = String(v); if (/^[=+\-@]/.test(x) && typeof v !== 'number') x = "'" + x; return /[",\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x; };
@@ -811,7 +512,7 @@
     else {
       const single = d.from === d.to;
       const staff = [...d.staff].sort((a, b) => (b.totals.active_min - a.totals.active_min) || (b.totals.sent - a.totals.sent) || a.name.localeCompare(b.name));
-      const parts = st.tab === 'ai' ? aiTab(d, staff) : st.tab === 'quality' ? qualityTab(d) : compareTab(d, staff, single);
+      const parts = st.tab === 'quality' ? qualityTab(d) : compareTab(d, staff, single);
       body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' },
         st.error ? h('p', { class: 'tm-note warn' }, `Could not refresh (${st.error}). Showing the last numbers.`) : null,
         h('p', { class: 'tm-period' }, single ? dayName(d.from) : `${dayName(d.from)} – ${dayName(d.to)}`, h('span', { class: 'muted' }, ' · Beirut time')),
@@ -832,7 +533,7 @@
     if (conv && st.tab === 'ai') conv.scrollTop = conv.dataset.key === convKey ? convTop : conv.scrollHeight;   // a new chat opens on its latest messages
     else if (conv) {
       if (st.threadTop !== null) conv.scrollTop = st.threadTop;
-      else if (conv._conv && conv._conv._mark) { conv.scrollTop = 0; st.threadTop = 0; }   // the AI's finding first; the mark is one scroll away
+      else if (conv._conv && conv._conv._mark) { conv.scrollTop = 0; st.threadTop = 0; }   // the mark first; the rest is one scroll away
     }
   }
 
@@ -863,8 +564,6 @@
     if (!root) return;
     clearTimeout(timer); clearInterval(liveTimer);
     window.DeskRadar.stop();
-    flushAnswer();
-    st.stopScan = true;
     document.removeEventListener('keydown', onKey, true);
     root.remove(); root = null;
     if (tip) { tip.remove(); tip = null; }
