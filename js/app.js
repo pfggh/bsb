@@ -1,4 +1,4 @@
-/* Teshrij Desk — one inbox for WhatsApp + Instagram, one conversation per contact.
+/* Teshrij Desk — one inbox for WhatsApp + Instagram + TikTok, one conversation per contact.
  *
  * Two kinds of labels, kept apart on purpose:
  *  - SYSTEM labels (set automatically, shown as square badges): every conversation episode is
@@ -62,6 +62,7 @@
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
     ig: '<rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor"/>',
+    tt: '<path d="M12 3v12.5a3.5 3.5 0 1 1-3.5-3.5"/><path d="M12 3a5 5 0 0 0 5 5"/>',
     lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
     chat: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
     life: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m4.9 4.9 4.3 4.3m5.6 5.6 4.3 4.3m0-14.2-4.3 4.3m-5.6 5.6-4.3 4.3"/>',
@@ -177,28 +178,30 @@
   }
   function copyNumber() {
     const c = S.active && S.active.data ? S.active.data.conv : null;
-    if (!c || isIg(c)) return toast('Instagram chats have no phone number');
+    if (!c || isSocial(c)) return toast(`${c && isTt(c) ? 'TikTok' : 'Instagram'} chats have no phone number`);
     const n = localNumber(c.contact);
     const done = () => toast(`Copied ${n}`, 'ok');
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(n).then(done, () => toast('Could not copy', 'error'));
     else { const ta = h('textarea', { style: 'position:fixed;opacity:0' }); ta.value = n; document.body.append(ta); ta.select(); try { document.execCommand('copy'); done(); } catch (e) { toast('Could not copy', 'error'); } ta.remove(); }
   }
   const isIg = (c) => c && (c.channel === 'ig' || /^ig_/.test(c.contact || ''));
+  const isTt = (c) => c && (c.channel === 'tt' || /^tt_/.test(c.contact || ''));
+  const isSocial = (c) => isIg(c) || isTt(c);   // no phone number: no copy / wa.me / subscriptions by number
   const realName = (n) => n && /[\p{L}\p{N}]/u.test(n) ? n : null;
-  const displayName = (c) => realName(c.name) || (isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram user') : phoneLabel(c.contact));
-  const subtitle = (c) => isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram') : phoneLabel(c.contact);
+  const displayName = (c) => realName(c.name) || (isTt(c) ? (c.handle ? '@' + c.handle : 'TikTok user') : isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram user') : phoneLabel(c.contact));
+  const subtitle = (c) => isTt(c) ? (c.handle ? '@' + c.handle : 'TikTok') : isIg(c) ? (c.handle ? '@' + c.handle : 'Instagram') : phoneLabel(c.contact);
 
   const AV_COLORS = ['#0ea5e9', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#84cc16', '#ef4444', '#06b6d4', '#a855f7', '#f59e0b', '#10b981'];
   function avColor(key) { let x = 0; for (const ch of String(key)) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return AV_COLORS[x % AV_COLORS.length]; }
   function initials(c) {
     const n = (c.name || c.handle || '').replace(/[^\p{L}\p{N} ]/gu, '').trim();
-    if (!n) return isIg(c) ? '@' : '#';
+    if (!n) return isSocial(c) ? '@' : '#';
     const p = n.split(/\s+/).map((w) => Array.from(w));
     return ((p[0][0] || '') + (p.length > 1 ? p[p.length - 1][0] || '' : '')).toUpperCase();
   }
   function avatar(c, size = '') {
     return h('div', { class: `av ${size}`, style: `background:${avColor(c.contact || c.name)}` }, initials(c),
-      size === 'sm' ? null : h('span', { class: `ch ${isIg(c) ? 'ig' : 'wa'}`, title: isIg(c) ? 'Instagram' : 'WhatsApp' }, icon(isIg(c) ? 'ig' : 'phone')));
+      size === 'sm' ? null : h('span', { class: `ch ${isTt(c) ? 'tt' : isIg(c) ? 'ig' : 'wa'}`, title: isTt(c) ? 'TikTok' : isIg(c) ? 'Instagram' : 'WhatsApp' }, icon(isTt(c) ? 'tt' : isIg(c) ? 'ig' : 'phone')));
   }
 
   function toast(msg, kind = '') {
@@ -289,11 +292,12 @@
   }
   const validView = (v) => ALL_VIEWS.some((x) => x[0] === v) || (/^l\d+$/.test(v) && S.labelById.has(Number(v.slice(1))));
 
-  // Channels = the lines (WhatsApp numbers / BSB channels, Instagram @teshrij), like BSB.
+  // Channels = the lines (WhatsApp numbers / BSB channels, Instagram @teshrij, TikTok tt@teshrij), like BSB.
   function lineName(l) {
     const n = (S.channelNames || {})[l];
     if (n) return n;
     if (/^@/.test(l)) return `Instagram ${l}`;
+    if (/^tt@/.test(l)) return `TikTok ${l.slice(2)}`;
     if (/^\d{8,}$/.test(l)) return phoneLabel(l);
     return l;
   }
@@ -302,10 +306,11 @@
     const n = (S.channelNames || {})[l];
     if (n) return n.slice(0, 16);
     if (/^@/.test(l)) return l;
+    if (/^tt@/.test(l)) return 'TikTok';   // the row has the TikTok note icon; the full name is in the tooltip
     if (/^961\d{7,8}$/.test(l)) { const r = l.slice(3); return r.length === 8 ? `${r.slice(0, 2)} ${r.slice(2, 5)} ${r.slice(5)}` : `0${r.slice(0, 1)} ${r.slice(1, 4)} ${r.slice(4)}`; }
     return l;
   }
-  const lineIcon = (l) => icon(/^@/.test(l) ? 'ig' : 'phone');
+  const lineIcon = (l) => icon(/^@/.test(l) ? 'ig' : /^tt@/.test(l) ? 'tt' : 'phone');
 
   // System label vocabulary
   const PRODUCTS = { gpt: 'ChatGPT', gpt_private: 'ChatGPT private', anghami: 'Anghami', netflix: 'Netflix', shahid: 'Shahid', spotify: 'Spotify', gemini: 'Gemini', capcut: 'CapCut', canva: 'Canva', other: 'Other' };
@@ -1052,7 +1057,7 @@
   // ------------------------------------------------------------------ chat
 
   async function openChat(contact) {
-    if (!/^([0-9]{6,20}|ig_[0-9]{5,30})$/.test(contact)) return;
+    if (!/^([0-9]{6,20}|ig_[0-9]{5,30}|tt_[0-9a-f]{20})$/.test(contact)) return;
     if (S.active && S.active.contact === contact) { showChatPane(); return; }
     if (!voiceMayLeave()) return;
     S.detailsNarrow = false;
@@ -1195,24 +1200,33 @@
   function windowInfo(c) {
     const ends = c.window_ends ? Date.parse(c.window_ends) : NaN;
     const left = Number.isFinite(ends) ? ends - now() : -1;
-    return { open: left > 30000, left };
+    // TikTok: also closed once 10 of our messages went out after the customer's last one (the chat answer counts them)
+    const tt = isTt(c) && S.active && S.active.contact === c.contact && S.active.data ? S.active.data.tt : null;
+    const cap = !!(tt && tt.sent >= tt.max);
+    return { open: left > 30000 && !cap, left, cap, tt };
+  }
+  const TT_RULE = 'TikTok allows replies within 48 hours of the customer’s last message, at most 10 messages';
+  function closedText(c, w) {
+    if (isTt(c)) return w.cap ? `TikTok allows at most ${w.tt.max} messages after the customer’s last message. Wait for the customer to write again.`
+      : 'TikTok allows replies only within 48 hours of the customer’s last message.';
+    return isIg(c) ? 'Instagram only allows replies within 7 days of the customer’s last message.' : 'The 24h WhatsApp window is closed. Only an approved template can be sent now (from BSB).';
   }
   function renderHead(c0) {
     const c = c0 || (S.active && S.active.data && S.active.data.conv);
     if (!c) return;
     const w = windowInfo(c);
-    if (same($('#chatHead'), JSON.stringify([c.contact, c.name, c.handle, c.channel, c.line, c.last_in_at, w.open, w.open ? dur(w.left) : 0, detailsOn(), S.metaVer, isAdmin()]))) return;
+    if (same($('#chatHead'), JSON.stringify([c.contact, c.name, c.handle, c.channel, c.line, c.last_in_at, w.open, w.open ? dur(w.left) : 0, w.tt ? w.tt.sent : null, detailsOn(), S.metaVer, isAdmin()]))) return;
     let win;
     if (!c.last_in_at) win = h('span', { class: 'win closed', title: 'The customer has never written' }, icon('lock'), h('span', { class: 'wtxt' }, 'No window'));
-    else if (!w.open) win = h('span', { class: 'win closed', title: isIg(c) ? 'Instagram allows replies up to 7 days after the last customer message' : 'WhatsApp allows free replies up to 24h after the last customer message' }, icon('lock'), h('span', { class: 'wtxt' }, 'Window closed'));
-    else win = h('span', { class: `win${w.left < 4 * 3600000 ? ' warn' : ''}`, title: 'Time left to reply' }, icon('clock'), h('span', { class: 'wtxt' }, `${dur(w.left)} left`));
+    else if (!w.open) win = h('span', { class: 'win closed', title: isTt(c) ? (w.cap ? closedText(c, w) : TT_RULE) : isIg(c) ? 'Instagram allows replies up to 7 days after the last customer message' : 'WhatsApp allows free replies up to 24h after the last customer message' }, icon('lock'), h('span', { class: 'wtxt' }, 'Window closed'));
+    else win = h('span', { class: `win${w.left < 4 * 3600000 ? ' warn' : ''}`, title: isTt(c) ? `Time left to reply. ${TT_RULE}${w.tt ? ` (${w.tt.sent} sent)` : ''}` : 'Time left to reply' }, icon('clock'), h('span', { class: 'wtxt' }, `${dur(w.left)} left`));
     $('#chatHead').replaceChildren(
       h('button', { class: 'icon-btn back-btn', 'aria-label': 'Back to chats', onclick: closeChat }, icon('back')),
       avatar(c),
       h('div', { class: 'chat-who' },
         h('div', { class: 'chat-name' }, displayName(c)),
         h('div', { class: 'chat-sub' }, h('span', null, subtitle(c)),
-          !isIg(c) ? h('button', { class: 'copy-num', title: `Copy ${localNumber(c.contact)} (N)`, 'aria-label': 'Copy number', onclick: copyNumber }, icon('copy', 'xs'), 'Copy', h('kbd', { class: 'mini' }, 'N')) : null,
+          !isSocial(c) ? h('button', { class: 'copy-num', title: `Copy ${localNumber(c.contact)} (N)`, 'aria-label': 'Copy number', onclick: copyNumber }, icon('copy', 'xs'), 'Copy', h('kbd', { class: 'mini' }, 'N')) : null,
           h('span', { class: 'chat-here', id: 'chatHere', role: 'status', hidden: true }),
           c.line ? h('span', { class: 'chan-badge', title: 'Channel this chat is on' }, lineIcon(c.line), lineName(c.line)) : null)),
       win,
@@ -2362,24 +2376,25 @@
       comp.querySelector('.composer-box').hidden = true;
       comp.querySelector('.composer-foot').hidden = true;
       if (!closed) {
-        closed = h('div', { class: 'composer-closed', id: 'composerClosed' }, icon('lock'),
-          h('span', null, isIg(c) ? 'Instagram only allows replies within 7 days of the customer’s last message.' : 'The 24h WhatsApp window is closed. Only an approved template can be sent now (from BSB).'));
+        closed = h('div', { class: 'composer-closed', id: 'composerClosed' }, icon('lock'), h('span', null, closedText(c, w)));
         comp.prepend(closed);
-      }
+      } else if (closed.lastChild.textContent !== closedText(c, w)) closed.lastChild.textContent = closedText(c, w);
       return;
     }
     if (closed) closed.remove();
     comp.querySelector('.composer-box').hidden = false;
     comp.querySelector('.composer-foot').hidden = false;
     const ig = c && isIg(c);
-    $('#attachBtn').hidden = !!ig;
-    $('#micBtn').hidden = !!ig;
+    const tt = c && isTt(c);
+    $('#attachBtn').hidden = !!(ig || tt);
+    $('#micBtn').hidden = !!(ig || tt);
     const note = $('#composerNote');
     if (ig && w.left < 6 * 86400000) note.textContent = 'Over 24h: Instagram sends this with the human-agent tag';
+    else if (tt) note.textContent = `Enter to send · text only · ${TT_RULE}${w.tt ? ` (${w.tt.sent} sent)` : ''}`;
     else note.textContent = 'Enter to send · Shift+Enter new line · paste a photo to send it';
     updateSend();
   }
-  function maxLen() { const c = S.active && (S.active.data ? S.active.data.conv : null); return c && isIg(c) ? 1000 : 4096; }
+  function maxLen() { const c = S.active && (S.active.data ? S.active.data.conv : null); return c && isIg(c) ? 1000 : c && isTt(c) ? 6000 : 4096; }
   function updateSend() {
     const ta = $('#reply');
     if (!ta) return;
@@ -2445,7 +2460,7 @@
   }
   async function sendFile(f) {
     if (!S.active || !S.active.data) return;
-    if (isIg(S.active.data.conv)) return toast('Photos and files can only be sent on WhatsApp', 'error');
+    if (isSocial(S.active.data.conv)) return toast('Photos and files can only be sent on WhatsApp', 'error');
     if (f.size > MEDIA_MAX) return toast('Files must be under 15 MB', 'error');
     const isImg = /^image\/(jpeg|png|webp)$/.test(f.type);
     if (!confirm(`Send ${isImg ? 'this photo' : `“${f.name}”`} to ${displayName(S.active.data.conv)}?`)) return;
@@ -2513,7 +2528,7 @@
     }
     // the chat itself may still be loading: the list row already says which channel it is on
     const conv = S.active.data ? S.active.data.conv : S.chats.find((x) => x.contact === S.active.contact) || { contact: S.active.contact };
-    if (isIg(conv)) return toast('Voice notes can only be sent on WhatsApp', 'error');
+    if (isSocial(conv)) return toast('Voice notes can only be sent on WhatsApp', 'error');
     if (!window.DeskVoice) { api.report('voice', 'recorder script missing'); return toast('The voice recorder did not load — reload the page', 'error'); }
     const sup = window.DeskVoice.support();
     if (!sup.ok) { api.report('voice', 'not supported', { reason: sup.reason }); return toast(sup.reason === 'insecure' ? 'The microphone needs https' : 'This browser cannot record voice notes — update it, or use Chrome, Edge, Firefox or Safari', 'error'); }
@@ -2875,7 +2890,7 @@
     renderDetails();
   }
   async function loadCustomer(contact) {
-    if (/^ig_/.test(contact)) return;
+    if (/^(ig|tt)_/.test(contact)) return;
     try {
       const ctx = await api.call('customer', { contact });
       if (S.active && S.active.contact === contact) { S.active.customer = ctx; renderDetails(); }
@@ -2889,13 +2904,14 @@
     const d = S.active.data;
     const c = d.conv;
     if (same(pane, JSON.stringify([c, d.thread, d.threads, d.events.length, d.events.slice(-10), S.active.customer, S.metaVer, minute()]))) return;
-    const link = isIg(c) ? (c.handle ? `https://instagram.com/${encodeURIComponent(c.handle)}` : null) : `https://wa.me/${c.contact}`;
+    const link = isTt(c) ? (c.handle ? `https://www.tiktok.com/@${encodeURIComponent(c.handle)}` : null)
+      : isIg(c) ? (c.handle ? `https://instagram.com/${encodeURIComponent(c.handle)}` : null) : `https://wa.me/${c.contact}`;
     const head = h('div', { class: 'd-head' },
       h('button', { class: 'icon-btn d-close', 'aria-label': 'Close details', onclick: toggleDetails }, icon('x')),
       avatar(c, 'lg'), h('h3', null, displayName(c)), h('div', { class: 'muted' }, subtitle(c)),
       h('div', { class: 'd-links' },
-        !isIg(c) ? h('button', { class: 'btn', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(c.contact); toast('Number copied'); } }, icon('copy', 'sm'), 'Copy') : null,
-        link ? h('a', { class: 'btn', href: link, target: '_blank', rel: 'noopener noreferrer' }, icon('ext', 'sm'), isIg(c) ? 'Profile' : 'WhatsApp') : null));
+        !isSocial(c) ? h('button', { class: 'btn', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(c.contact); toast('Number copied'); } }, icon('copy', 'sm'), 'Copy') : null,
+        link ? h('a', { class: 'btn', href: link, target: '_blank', rel: 'noopener noreferrer' }, icon('ext', 'sm'), isSocial(c) ? 'Profile' : 'WhatsApp') : null));
     const secs = [head];
 
     const t = d.thread;
@@ -2924,8 +2940,8 @@
           h('span', { class: s.active ? 'ok' : 'old' }, s.expiry ? `${s.active ? 'until' : 'ended'} ${fmtDate.format(new Date(String(s.expiry).replace(' ', 'T') + (/[zZ+]/.test(String(s.expiry).slice(10)) ? '' : 'Z')))}` : (s.active ? 'active' : 'ended')))))
           : h('p', { class: 'hint' }, 'No subscriptions on this number.'),
         ctx.renewals_pending ? h('p', { class: 'hint', style: 'margin-top:8px' }, `${ctx.renewals_pending} unpaid renewal${ctx.renewals_pending > 1 ? 's' : ''}`) : null));
-    } else if (isIg(c)) {
-      secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Subscriptions'), h('p', { class: 'hint' }, 'Instagram chats have no phone number: ask for their WhatsApp number to see subscriptions.')));
+    } else if (isSocial(c)) {
+      secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Subscriptions'), h('p', { class: 'hint' }, `${isTt(c) ? 'TikTok' : 'Instagram'} chats have no phone number: ask for their WhatsApp number to see subscriptions.`)));
     }
     if ((d.threads || []).length) {
       secs.push(h('div', { class: 'd-sec' }, h('h4', null, 'Episodes'), h('div', { class: 'd-act' }, d.threads.map((x) => h('div', null,

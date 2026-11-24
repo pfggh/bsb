@@ -49,7 +49,7 @@
     else if (p === 'yesterday') { st.from = st.to = addDays(t, -1); }
     else { st.from = addDays(t, -(Number(p) - 1)); st.to = t; }
   }
-  const custName = (c) => c.name && /[\p{L}\p{N}]/u.test(c.name) ? c.name : c.handle ? '@' + c.handle : /^\d+$/.test(c.contact) ? '+' + c.contact : 'Instagram user';
+  const custName = (c) => c.name && /[\p{L}\p{N}]/u.test(c.name) ? c.name : c.handle ? '@' + c.handle : /^\d+$/.test(c.contact) ? '+' + c.contact : /^tt_/.test(c.contact) ? 'TikTok user' : 'Instagram user';
 
   // ---------------------------------------------------------------- data
 
@@ -166,7 +166,7 @@
 
   const OPS = { send: 'sent a message', send_media: 'sent a photo, file or voice note', resolve: 'solved a chat with a closing message', resolve_silent: 'marked a chat finished',
     reopen: 'reopened a chat', label: 'changed a label', set_kind: 'changed sales / support', close_no_reply: 'closed a chat without reply' };
-  const who = (name, contact) => name && /[\p{L}\p{N}]/u.test(name) ? name : /^\d+$/.test(String(contact || '')) ? '+' + contact : 'Instagram user';
+  const who = (name, contact) => name && /[\p{L}\p{N}]/u.test(name) ? name : /^\d+$/.test(String(contact || '')) ? '+' + contact : /^tt_/.test(String(contact || '')) ? 'TikTok user' : 'Instagram user';
   const since = (ts) => ts ? U.dur(Math.max(0, U.now() - Date.parse(ts))) : '';
   const chatLink = (name, contact) => h('button', { class: 'tm-link', title: 'Open this chat', onclick: () => { close(); U.openChat(contact); } }, who(name, contact));
   async function loadLive() {

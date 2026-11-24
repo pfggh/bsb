@@ -23,7 +23,7 @@
   const st = { data: null, error: '', list: 'review', person: '', sel: null, pending: null, chats: new Map(), timer: null, active: false };
   const h = (...a) => U.h(...a);
   const keyOf = (c) => `${c.contact}|${c.basis_at}`;
-  const nameOf = (c) => (c.name && /[\p{L}\p{N}]/u.test(c.name) ? c.name : c.handle ? '@' + c.handle : /^\d+$/.test(c.contact) ? '+' + c.contact : 'Instagram user');
+  const nameOf = (c) => (c.name && /[\p{L}\p{N}]/u.test(c.name) ? c.name : c.handle ? '@' + c.handle : /^\d+$/.test(c.contact) ? '+' + c.contact : /^tt_/.test(c.contact) ? 'TikTok user' : 'Instagram user');
   const reasonOf = (c) => REASONS[c.reason] || c.reason || 'Not checked yet';
   const draw = () => { if (st.active) redraw(); };
   const fTime = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
@@ -110,7 +110,7 @@
   function bubble(m) {
     const mine = !/^in/i.test(String(m.dir || ''));
     const raw = String(m.text || '');
-    const type = String(m.media_type || '').replace(/^instagram_/, '');
+    const type = String(m.media_type || '').replace(/^(instagram|tiktok)_/, '');
     const reaction = /^reaction$/i.test(type) || /Reaction Received/.test(raw);
     if (reaction) return h('div', { class: `rd-react ${mine ? 'out' : 'in'}` }, `Reacted ${(raw.match(/Reaction Received\*:\s*(\S+)/) || [])[1] || ''}`, h('span', null, fTime.format(new Date(m.ts))));
     const kids = [];
