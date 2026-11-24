@@ -311,6 +311,9 @@
   const PRODUCTS = { gpt: 'ChatGPT', gpt_private: 'ChatGPT private', anghami: 'Anghami', netflix: 'Netflix', shahid: 'Shahid', spotify: 'Spotify', gemini: 'Gemini', capcut: 'CapCut', canva: 'Canva', other: 'Other' };
   const STAGES = { unanswered: 'Unanswered', got_price: 'Got price', waiting_payment: 'Waiting payment', needs_followup: 'Needs follow-up', bought: 'Bought', lost: 'Lost' };
   const GATE_TEXT = {
+    // desk v6 Solve (blocked outcomes; the server also sends the full message)
+    last_send_failed: 'Your last message was NOT delivered: send it again before solving.',
+    promise_open: 'We promised the customer something and have not delivered it.',
     not_support: 'Only support episodes are resolved.',
     not_open: 'This episode is already closed.',
     never_replied: 'Nobody has replied to the customer yet.',
@@ -482,6 +485,7 @@
       setMeta(b.meta);
       S.canned = b.canned || [];
       S.closers = b.closers || [];
+      S.v6 = b.v6_mode || 'off'; // desk v6: 'live' = V answers with blocked / waiting / promised / solved
       S.skew = b.now ? Date.parse(b.now) - Date.now() : 0;
       renderStaff();
       if (!validView(S.view)) {
@@ -849,7 +853,7 @@
     const unsolved = todo(c.sys);
     const late = unsolved && c.sys.kind === 'support' && c.last_in_at && now() - Date.parse(c.last_in_at) > LATE_MS;
     return JSON.stringify([unsolved, c.name, c.handle, c.channel, c.line, c.last_at, c.last_dir, c.last_by, c.last_text, c.unread, c.unread_n,
-      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled, c.fu_alert || '', heldBy(c) || '', c.sys && c.sys.hold ? c.sys.hold.reason || '' : '']);
+      c.sys && c.sys.kind, c.sys && c.sys.status, c.labels, c.last_in_at, listTime(c.last_at), !!late, S.metaVer, S.me && S.me.name, !!c.scheduled, c.fu_alert || '', heldBy(c) || '', c.sys && c.sys.hold ? c.sys.hold.reason || '' : '', v6Key(c)]);
   }
   // An admin sent this chat back and nobody has replied to the customer since.
   function heldBy(c) {
@@ -872,10 +876,36 @@
           sb, rowDot(c)),
         held ? h('div', { class: 'row-held', title: `${held} sent this chat back. Reply to the customer before completing it again.` },
           icon('warn', 'xs'), h('b', null, `Sent back by ${held}`), c.sys.hold.reason ? h('span', null, c.sys.hold.reason) : null) : null,
-        c.fu_alert || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' },
+        c.fu_alert || (c.v6 && ((c.v6.alerts || []).length || c.v6.state)) || (c.labels && c.labels.length) ? h('div', { class: 'row-chips' },
+          v6Chips(c),
           c.fu_alert === 'says_paid' ? h('span', { class: 'fu-chip paid', title: 'The customer says they paid. Check the payment and activate.' }, icon('warn', 'xs'), 'Says paid')
             : c.fu_alert === 'plan_chosen' ? h('span', { class: 'fu-chip', title: 'The customer chose a plan and is waiting for the payment details.' }, icon('check', 'xs'), 'Ready to pay') : null,
           (c.labels || []).map((id) => labelChip(id))) : null));
+  }
+  // ---- desk v6: the four alert chips and the waiting / promised markers (server: followup.v6_marks, live mode only).
+  // Same chip shapes as before: red = act now (says paid, customer waiting), plain = next step, dashed = parked.
+  const V6_ALERT = {
+    says_paid: { cls: 'fu-chip paid', ic: 'warn', text: 'Says paid', tip: 'The customer says they paid. Check the payment and activate.' },
+    customer_waiting: { cls: 'fu-chip paid', ic: 'clock', text: 'Customer waiting', tip: 'The customer asked something and nobody answered yet.' },
+    ready_to_pay: { cls: 'fu-chip', ic: 'check', text: 'Ready to pay', tip: 'The customer chose a plan or asked how to pay and has no payment details yet.' },
+    promise_open: { cls: 'fu-chip', ic: 'clock', text: 'Promise open', tip: 'We promised something ("let me check", "code coming") and have not delivered it.' },
+  };
+  function v6Key(c) { return c.v6 ? JSON.stringify([c.v6.state || '', c.v6.remind_at || '', (c.v6.alerts || []).map((a) => a.kind)]) : ''; }
+  function v6Marker(x) {
+    if (!x || !x.state) return null;
+    if (x.state === 'waiting_customer') return h('span', { class: 'sched-chip', title: `Solved as "waiting for the customer"${x.reason ? ': ' + x.reason : ''}. It comes back when they write.` }, icon('clock', 'xs'), 'Waiting');
+    if (x.state === 'promised') return h('span', { class: 'sched-chip', title: `We promised something${x.reason ? ': ' + x.reason : ''}. Back to staff at the time shown, or when the customer writes.` },
+      icon('clock', 'xs'), x.remind_at ? `Promised · back ${fmtTime.format(new Date(x.remind_at))}` : 'Promised');
+    return null;
+  }
+  function v6Chips(c) {
+    if (!c.v6) return null;
+    const seen = new Set();
+    const chips = (c.v6.alerts || []).filter((a) => V6_ALERT[a.kind] && !seen.has(a.kind) && seen.add(a.kind)).map((a) => {
+      const d = V6_ALERT[a.kind];
+      return h('span', { class: d.cls, title: a.reason ? `${d.tip} (${a.reason})` : d.tip }, icon(d.ic, 'xs'), d.text);
+    });
+    return [...chips, v6Marker(c.v6)];
   }
   // The customer's last words are a thank-you or "it works" (and not "ma zabat" / "still not").
   const THANKS_RE = /\b(thanks?|thank you|thx|tnx|merci+|shukran|shokran|tslm|yslmo|yislamo|ysalmo|ya3tik|appreciate|perfect|zabatet|zabat|it works|works now|worked)\b|🙏|❤|♥|😍|🥰|شكرا|يسلمو/iu;
@@ -1256,11 +1286,12 @@
       const g = d.gate || {};
       if (t.status !== 'open') {
         const c = S.closers.find((x) => x.key === t.resolution);
+        const v6s = t.resolution === 'v6_waiting_customer' ? 'waiting for the customer' : t.resolution === 'v6_promised' ? 'promise noted' : null;
         right.push(h('span', { class: 'ok-strong' }, icon('check', 'xs'), ` Solved${t.resolved_by ? ' by ' + t.resolved_by : ''}`),
-          h('span', { class: 'muted' }, `${c ? '“' + c.title + '” sent' : 'no message'} · ${ago(t.status_at)}`));
+          h('span', { class: 'muted' }, `${c ? '“' + c.title + '” sent' : v6s || 'no message'} · ${ago(t.status_at)}`));
       } else {
         right.push(h('span', { class: 'unsolved' }, 'Unsolved'), resolveHint(g),
-          g.can_send ? h('button', { class: 'link', title: 'Choose the closing message yourself instead of the AI', onclick: openResolve }, 'Pick message myself') : null);
+          g.can_send && S.v6 !== 'live' ? h('button', { class: 'link', title: 'Choose the closing message yourself instead of the AI', onclick: openResolve }, 'Pick message myself') : null);
       }
     } else if (t.kind === 'ignore') {
       right.push(h('span', { class: 'muted' }, t.kind_reason || 'Nothing to do.'));
@@ -1499,9 +1530,9 @@
       const c = plan.closer, request_id = uuid();
       return {
         ms: C.undoMs, text: [h('b', null, `Solving ${name}`), ' · sending “', c.body, '”'],
-        sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : `Picked “${c.title}” (${plan.reason})`,
+        sub: plan.source === 'ai' ? `AI picked “${c.title}”: ${plan.reason}` : plan.source === 'v6' ? `“${c.title}”${plan.reason ? ': ' + plan.reason : ''}` : `Picked “${c.title}” (${plan.reason})`,
         run: async () => {
-          try { await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, expect_in: plan.expect_in ?? null }); await labelComplete(contact); }
+          try { await api.call('resolve', { thread_id: plan.thread_id, closer: c.key, request_id, expect_in: plan.expect_in ?? null, ...(plan.v6 ? { v6_plan: plan.v6.plan_id } : {}) }); await labelComplete(contact); }
           catch (e) { failed(e, 'solved'); }
           after();
         },
@@ -1509,14 +1540,20 @@
     }
     if (plan.action === 'resolve_silent') {
       const sales = plan.kind === 'sales';
-      const why = sales ? 'no message is sent'
+      // desk v6 (live): solved silently / waiting for the customer / promise noted; nothing is sent
+      const v = plan.v6 || null;
+      const at = v && v.remind_at ? fmtTime.format(new Date(v.remind_at)) : '';
+      const why = v ? (v.kind === 'waiting_customer' ? 'waiting for the customer · nothing is sent, it comes back when they write'
+          : v.kind === 'promised' ? `promise noted · nothing is sent, back to you at ${at} or when they write`
+          : sales ? 'no message is sent' : 'no closing message')
+        : sales ? 'no message is sent'
         : plan.why === 'closer_sent' ? 'no message: a closing message was already sent in this chat'
         : plan.why === 'customer_quiet' ? `no message: the customer last wrote ${plan.last_in_at ? dur(now() - Date.parse(plan.last_in_at)) + ' ago' : 'long ago'} (more than ${plan.recent_hours}h)`
         : 'no message: the reply window is closed';
       return {
-        ms: sales ? 2000 : 3000, text: [h('b', null, `${sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`],
+        ms: sales ? 2000 : 3000, text: [h('b', null, `${sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`], sub: v && v.reason ? v.reason : null,
         run: async () => {
-          try { await api.call('resolve_silent', { thread_id: plan.thread_id, expect_in: plan.expect_in ?? null }); await labelComplete(contact); }
+          try { await api.call('resolve_silent', { thread_id: plan.thread_id, expect_in: plan.expect_in ?? null, ...(v ? { v6_plan: v.plan_id } : {}) }); await labelComplete(contact); }
           catch (e) { failed(e, sales ? 'completed' : 'solved'); }
           after();
         },
@@ -1571,10 +1608,11 @@
   function silentPending(contact, name, threadId, why, opt = {}) {
     goNext(contact);
     startPending({
-      contact, ms: opt.sales ? 2000 : 3000, text: [h('b', null, `${opt.sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`],
+      contact, ms: opt.sales ? 2000 : 3000, text: [h('b', null, `${opt.sales ? 'Completing' : 'Solving'} ${name}`), ` · ${why}`], sub: opt.sub || '',
       run: async () => {
         try {
-          await api.call('resolve_silent', { thread_id: threadId, expect_in: opt.expect ?? null, ...(opt.warned ? { warned: opt.warned } : {}) });
+          await api.call('resolve_silent', { thread_id: threadId, expect_in: opt.expect ?? null, ...(opt.warned ? { warned: opt.warned } : {}),
+            ...(opt.v6_plan ? { v6_plan: opt.v6_plan } : {}) });
           await labelComplete(contact);
         }
         catch (e) { toast(e.body && e.body.customer_wrote ? `${name} wrote again just now — read it first` : `${name} not ${opt.sales ? 'completed' : 'solved'}: ${e.message}`, 'error'); if (e.body && e.body.customer_wrote) openChat(contact); }
@@ -1662,7 +1700,9 @@
       ['M', null, 'My day: your own numbers, thank-yous and stars (only you see them)', ''],
     ]],
     ['Act on the open chat', [
-      ['V', null, 'Solve / complete. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it is solved without a message. Sales: marks the chat complete (no message); it stays in Unresolved until you do, and comes back when the customer writes again', 'Ctrl+Shift+E'],
+      ['V', null, S.v6 === 'live'
+        ? 'Solve / complete. Not possible while your last message failed, or (staff) while the customer waits for an answer. If you asked the customer something it waits for them; if we promised something it comes back to you at the reminder time. A closing message goes out only when the chat proves it (5 s to undo). Sales: marked complete, never a message (the follow-up engine handles sales)'
+        : 'Solve / complete. Support: if the customer wrote in the last 4h (1h from 11pm to 7am) the AI picks a closing message and sends it (5 s to undo); otherwise it is solved without a message. Sales: marks the chat complete (no message); it stays in Unresolved until you do, and comes back when the customer writes again', 'Ctrl+Shift+E'],
       ['R', 'Enter', 'Reply: jump into the message box', 'Ctrl+M'],
       ['U', null, 'Mark unread and leave', 'Ctrl+Shift+U'],
       ['L', null, 'Labels: add or remove (then 1…9)', 'Ctrl+Shift+L'],
@@ -1880,6 +1920,11 @@
     }
     for (const f of d.scheduled || []) put(`f:${f.id}`, JSON.stringify([f.body, f.due_at]), () => scheduledLine(f));
     if (d.fu_alert && d.fu_alert.kind) put('fu-alert', JSON.stringify([d.fu_alert.kind, d.fu_alert.at]), () => alertLine(d.fu_alert));
+    // desk v6 (live): the open alerts of this chat and its waiting / promised state
+    if (d.v6) {
+      for (const al of d.v6.alerts || []) if (V6_ALERT[al.kind]) put(`v6a:${al.kind}`, JSON.stringify([al.kind, al.since_at, al.reason]), () => v6AlertLine(al));
+      if (d.v6.state === 'waiting_customer' || d.v6.state === 'promised') put('v6s', JSON.stringify([d.v6.state, d.v6.remind_at, d.v6.reason]), () => v6StateLine(d.v6));
+    }
     // forget nodes and media of lines that are gone
     for (const k of a.nodes.keys()) if (!used.has(k)) a.nodes.delete(k);
     for (const k of a.media.keys()) if (!used.has(k)) a.media.delete(k);
@@ -1901,6 +1946,27 @@
       h('div', null, h('b', null, paid ? 'The customer says they paid' : 'The customer chose a plan'),
         h('span', null, paid ? 'Check the payment and activate. This note goes away once the purchase is recorded or the chat is marked complete.'
           : 'Send the payment details. This note goes away when someone replies.')));
+  }
+  // desk v6: one line per open alert (what to do), and the parked state. Never sent to the customer.
+  const V6_DO = {
+    says_paid: 'Check the payment and activate. This note goes away once the purchase is recorded or delivered.',
+    customer_waiting: 'Answer the customer. This note goes away when someone replies.',
+    ready_to_pay: 'Send the payment details. This note goes away when the Whish number is sent.',
+    promise_open: 'Deliver what was promised, or tell the customer when it will come.',
+  };
+  function v6AlertLine(al) {
+    const d = V6_ALERT[al.kind];
+    const red = d.cls.includes('paid');
+    return h('div', { class: `fu-alert${red ? ' paid' : ''}`, role: 'status' }, icon(red ? 'warn' : d.ic, 'sm'),
+      h('div', null, h('b', null, `${d.text}${al.since_at ? ' · since ' + fmtTime.format(new Date(al.since_at)) : ''}`),
+        h('span', null, `${al.reason ? al.reason + '. ' : ''}${V6_DO[al.kind]}`)));
+  }
+  function v6StateLine(x) {
+    const txt = x.state === 'promised' ? `Promise noted · back to staff at ${x.remind_at ? fmtTime.format(new Date(x.remind_at)) : 'the reminder time'}, or when the customer writes`
+      : x.state === 'waiting_customer' ? 'Waiting for the customer · it comes back when they write' : null;
+    if (!txt) return null;
+    return h('div', { class: 'sched-msg', title: x.reason || '' }, h('div', { class: 'sched-when' }, icon('clock', 'xs'), txt),
+      x.reason ? h('div', { class: 'sched-text' }, x.reason) : null);
   }
   // An automatic follow-up booked for this chat: faint, inside the chat only.
   function scheduledLine(f) {
