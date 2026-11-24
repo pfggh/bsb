@@ -95,7 +95,7 @@
     if (t.work_min >= 60 && t.chat_min / t.work_min < 0.6) out.push(['warn', `Only ${pct(t.chat_min, t.work_min)} of working time was near a chat action`]);
     if (presses >= 5 && t.s_bare / presses >= 0.3) out.push(['warn', `${pct(t.s_bare, presses)} of support solves had no reply from them`]);
     if (t.warned) out.push(['bad', `Solved ${plural(t.warned, 'chat')} through the red "not helped" warning`]);
-    if (t.flagged) out.push(['bad', `AI: ${plural(t.flagged, 'chat')} closed too early`]);
+    if (t.flagged) out.push(['bad', `You sent back ${plural(t.flagged, 'chat')} they had closed`]);
     return out;
   }
 
@@ -349,7 +349,7 @@
           p.role === 'staff' ? ['Efficiency', effOf(t) == null ? '–' : String(effOf(t)), t.fair ? `answered ${num(t.did)} of a fair share of ${num(Math.round(t.fair))} customers — ${effWords(effOf(t))}` : null] : null,
           ['Answered within 5 min', t.reply_n ? `${fastOf(t)}%` : '–', t.reply_n ? `${num(t.reply_within5)} of ${num(t.reply_n)} replies` : null],
           ['Typical wait', secs(t.reply_median_s), t.reply_n ? `slowest 10% over ${secs(t.reply_p90_s)}` : null],
-          ['AI: closed too early', num(t.flagged), t.doubt ? `+${num(t.doubt)} it is unsure about` : null],
+          ['Sent back after your review', num(t.flagged), t.checked ? `of ${num(t.checked)} you reviewed in Radar` : 'none reviewed yet'],
           ['Customer came back', `${num(t.came_back)} of ${num(t.audited)}`, 'wrote again within 48 h of the solve'],
           ['Solved through red warning', num(t.warned)],
         ]))),
