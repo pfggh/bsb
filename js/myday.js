@@ -20,7 +20,7 @@
   const num = (v) => n0(v).toLocaleString('en-US');
   const plural = (n, one, many) => `${num(n)} ${n0(n) === 1 ? one : many || one + 's'}`;
   const obj = (v) => (v && typeof v === 'object' ? v : {});
-  const custName = (x) => (x.name && /[\p{L}\p{N}]/u.test(x.name) ? x.name : /^\d+$/.test(String(x.contact || '')) ? '+' + x.contact : 'Instagram user');
+  const custName = (x) => (x.name && /[\p{L}\p{N}]/u.test(x.name) ? x.name : /^\d+$/.test(String(x.contact || '')) ? '+' + x.contact : /^tt_/.test(String(x.contact || '')) ? 'TikTok user' : 'Instagram user');
   function when(ts) {
     const d = new Date(ts);
     if (Number.isNaN(d.getTime())) return '';

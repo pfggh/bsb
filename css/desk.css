@@ -170,6 +170,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .av .ch svg.i { width: 10px; height: 10px; stroke-width: 2.6; }
 .ch.wa { background: #25d366; }
 .ch.ig { background: radial-gradient(circle at 30% 110%, #fdf497 0%, #fd5949 45%, #d6249f 60%, #285aeb 90%); }
+.ch.tt { background: #111; box-shadow: inset 1px 0 0 #25f4ee, inset -1px 0 0 #fe2c55; }
 
 /* ---------- list pane */
 .list-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); border-right: 1px solid var(--border); }
