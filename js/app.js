@@ -87,6 +87,7 @@
     chev: '<path d="m6 9 6 6 6-6"/>',
     star: '<path d="m12 2.5 2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5-4.8-4.6 6.6-.9z"/>',
     day: '<path d="M12 3v4M5.2 8.2l2 2M18.8 8.2l-2 2M2 18h20M6.5 18a5.5 5.5 0 0 1 11 0M9 22h6"/>',
+    radar: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12 18.4 5.6"/><circle cx="12" cy="12" r="1"/>',
   };
   function icon(name, cls = '') {
     const span = document.createElement('span');
@@ -246,6 +247,7 @@
     here: new Map(),    // contact -> [{name, typing}]: colleagues who have that chat on screen right now
     kudosSeen: null,    // id of the last thank-you this page knows about (null until the server said)
     kudosToday: 0,      // my thank-yous today (the small number next to "My day")
+    radarOpen: null,    // chats waiting in MY Radar (sidebar number; admins: the whole queue)
   };
   const now = () => Date.now() + S.skew;
   const sys = () => S.counts.sys || {};
@@ -487,6 +489,7 @@
       const b = await api.call('boot', { view: /^(all|sales|unresolved|l\d+)$/.test(S.view) ? S.view : 'unresolved', line: S.line || null });
       S.me = b.me;
       if (b.admin) S.adminFlags = b.admin.flags || 0;
+      if (typeof b.radar === 'number') S.radarOpen = b.radar;
       setMeta(b.meta);
       S.canned = b.canned || [];
       S.closers = b.closers || [];
@@ -551,7 +554,7 @@
       h('div', { class: 'sheet-body' },
         h('p', { class: 'hint' }, `Signed in with your personal access token${S.me ? ` (${S.me.role})` : ''}. Everything you do is saved under your name.`),
         h('div', { class: 'menu-list' },
-          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openTracking(); } }, icon('chart', 'sm'), 'Team, quality & AI check') : null,
+          isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openTracking(); } }, icon('chart', 'sm'), 'Team & quality') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: openTeam }, icon('team', 'sm'), 'Team & access tokens') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openManage(); } }, icon('sliders', 'sm'), 'Labels & views') : null,
           isAdmin ? h('button', { class: 'btn block', onclick: () => { closeModal(); openQuickManage(); } }, icon('zap', 'sm'), 'Quick replies') : null,
@@ -610,7 +613,15 @@
   // The admin's tracking panel lives in js/team.js.
   function openTracking(tab) {
     if (!window.DeskTeam) return toast('The team panel did not load; reload the page', 'error');
-    window.DeskTeam.open({ h, icon, toast, api, avColor, initials, dur, ago, now, displayName, openChat, TZ }, { tab });
+    window.DeskTeam.open({ h, icon, toast, api, avColor, initials, dur, ago, now, displayName, openChat, TZ, openRadar }, { tab });
+  }
+  // Radar: every finished chat of the last 24 hours, for everyone to look over (js/radar.js).
+  // Admin V = good (gone for everyone); employee V = checked (gone from their own Radar); C = send back.
+  function openRadar() {
+    if (!window.DeskRadar) return toast('Radar did not load; reload the page', 'error');
+    if (!S.me) return;
+    closeSide();
+    window.DeskRadar.open({ h, icon, toast, api, now, openChat, TZ, me: S.me, onCount: (n) => { S.radarOpen = n; renderNav(); } });
   }
   // "My day": each person's own numbers, thank-yous and stars (js/myday.js). Private: nobody else's numbers.
   function openMyDay() {
@@ -662,14 +673,16 @@
     const isAdmin = S.me && S.me.role === 'admin';
     if (S.line && c.lines && !c.lines[S.line]) { S.line = ''; store('desk_line', ''); }
     // the sidebar is rebuilt only when something it shows changed (not on every 8 s poll)
-    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin, S.adminFlags, S.kudosToday]))) return;
+    if (same($('#navMain'), JSON.stringify([c.uncomplete, c.labels, c.lines, S.view, S.line, S.metaVer, isAdmin, S.radarOpen, S.kudosToday]))) return;
     // replaceChildren() prints a null argument as the word "null" (staff saw it under My day), so drop empties
     $('#navMain').replaceChildren(...[...MAIN_VIEWS.map(([key, ic, name, n, hot, title], i) => navItem(key, ic, name, n(), hot && n() > 0, title, String(i + 1))),
+      h('button', { class: 'nav-item', title: 'Radar: finished chats of the last 24 hours to look over. V marks one checked, C sends it back to Unresolved.', onclick: openRadar },
+        icon('radar'), h('span', { class: 'lbl' }, 'Radar'), S.radarOpen ? h('span', { class: 'n' }, S.radarOpen > 999 ? '999+' : S.radarOpen) : null),
       h('button', { class: 'nav-item', title: 'My day: your own numbers, thank-yous and stars. Only you see them. (key M)', onclick: openMyDay }, icon('day'), h('span', { class: 'lbl' }, 'My day'),
         S.kudosToday ? h('span', { class: 'n thx-n', title: `${S.kudosToday} thank-you${S.kudosToday > 1 ? 's' : ''} from customers today` }, `♥ ${S.kudosToday}`) : null,
         h('kbd', { class: 'nav-key' }, 'M')),
-      isAdmin ? h('button', { class: 'nav-item', title: S.adminFlags ? `Team activity: ${S.adminFlags} chat${S.adminFlags > 1 ? 's' : ''} marked solved that the AI thinks are not (only admins see this)` : 'Who worked when, what they did, and the AI check of solved chats (only admins see this)',
-        onclick: () => { closeSide(); openTracking(S.adminFlags ? 'ai' : null); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team & quality'), S.adminFlags ? h('span', { class: 'n hot' }, S.adminFlags > 99 ? '99+' : S.adminFlags) : null) : null].filter(Boolean));
+      isAdmin ? h('button', { class: 'nav-item', title: 'Who worked when, what they did, and the quality numbers (only admins see this)',
+        onclick: () => { closeSide(); openTracking(); } }, icon('chart'), h('span', { class: 'lbl' }, 'Team & quality')) : null].filter(Boolean));
     // labels: BSB lists every custom label as a filter
     const out = S.labels.map((l) => navItem('l' + l.id, h('span', { class: 'dot', style: `background:${l.color}` }), l.name, (c.labels || {})[l.id], false, `Chats labelled ${l.name}`));
     if (!S.labels.length) out.push(h('p', { class: 'hint', style: 'padding:0 10px' }, isAdmin ? 'No labels yet: add some with the ⚙ button.' : 'No labels yet.'));
@@ -755,6 +768,7 @@
   function applyList(b, replace, reset = false) {
     if (b.counts) S.counts = b.counts;
     if (b.admin) S.adminFlags = b.admin.flags || 0;
+    if (typeof b.radar === 'number') S.radarOpen = b.radar;
     checkVersion();
     if (b.now) S.skew = Date.parse(b.now) - Date.now();
     // a chat being completed (undo bar showing) is already gone from the list
