@@ -1,13 +1,12 @@
 /* Teshrij Desk — Team & quality (admins only), v3.
  *
- * Five tabs, in plain words:
+ * Four tabs, in plain words:
  *   Live      who is doing what this minute, which customers are waiting, the latest actions (refreshes itself)
  *   Quality   how well customers are served: answer speed, missed customers, solved for real, sales results
  *   People    js/people.js (op people_report): working time split into on-chats / no-action / open-unused,
  *             typed messages apart from automatic closers, solves as distinct chats with / without a reply
- *   Radar     js/radar.js: the owner's manual review of every solved / completed chat. The AI solve checker
- *             was removed on 2026-11-24; every "solved for real" number now comes from the owner's Radar answers
- *             (server: checked = reviewed, flagged = sent back).
+ *   (Radar moved to its own screen for everyone on 2026-11-27: js/radar.js, sidebar "Radar". The
+ *   "solved for real" numbers still come from Radar answers: admin Good = reviewed, anyone's send-back = flagged.)
  *   Compare   the same numbers side by side, and per day
  * All numbers come from the server (op team_report); this file only draws them. Times are Beirut time.
  */
@@ -324,7 +323,7 @@
     else if (L.over_15) items.push(['warn', `${plural(L.over_15, 'customer')} waiting over 15 minutes`, h('button', { class: 'btn sm', onclick: () => { st.tab = 'live'; draw(); } }, 'See who')]);
     if (paid.length) items.push(['bad', [`${plural(paid.length, 'customer says', 'customers say')} they paid and nothing was activated: `, names(paid)], null]);
     if (ready.length) items.push(['warn', [`${plural(ready.length, 'customer')} chose a plan and wait for payment details: `, names(ready)], null]);
-    if (q.flags_open) items.push(['warn', `${plural(q.flags_open, 'finished chat')} waiting for your review`, h('button', { class: 'btn sm', onclick: () => { st.tab = 'ai'; draw(); } }, 'Review')]);
+    if (q.flags_open) items.push(['warn', `${plural(q.flags_open, 'finished chat')} waiting for your review`, h('button', { class: 'btn sm', onclick: () => { close(); if (U.openRadar) U.openRadar(); } }, 'Review')]);
     const f = q.followup_health;
     if (f) {
       const age = f.last_run_at ? U.now() - Date.parse(f.last_run_at) : Infinity;
@@ -484,7 +483,6 @@
     const keepScroll = oldBody && oldBody.dataset.tab === st.tab ? oldBody.scrollTop : 0;
     const oldList = root.querySelector('.tm-rv-list'), oldConv = root.querySelector('.tm-rv-scroll');
     const listTop = oldList ? oldList.scrollTop : 0;
-    const convKey = oldConv ? oldConv.dataset.key : '', convTop = oldConv ? oldConv.scrollTop : 0;
     if (oldConv && st.threadTop !== null) st.threadTop = oldConv.scrollTop;
     const from = h('input', { type: 'date', value: st.from, max: today(), 'aria-label': 'From' });
     const to = h('input', { type: 'date', value: st.to, max: today(), 'aria-label': 'To' });
@@ -494,17 +492,16 @@
       h('div', { class: 'tm-head-1' },
         h('button', { class: 'btn sm', onclick: close }, U.icon('back', 'sm'), 'Back to chats', h('kbd', null, 'Esc')),
         h('h2', null, 'Team & quality'),
-        st.tab === 'live' ? h('span', { class: 'tm-livedot' }, h('i'), 'Live · updates every 10 seconds') : st.tab === 'ai' ? null : h('div', { class: 'tm-range', role: 'group', 'aria-label': 'Period' },
+        st.tab === 'live' ? h('span', { class: 'tm-livedot' }, h('i'), 'Live · updates every 10 seconds') : h('div', { class: 'tm-range', role: 'group', 'aria-label': 'Period' },
           PRESETS.map(([k, l]) => h('button', { class: `tm-tab${st.preset === k ? ' on' : ''}`, onclick: () => { setPreset(k); st.logMore = false; load(); } }, l)),
           h('span', { class: 'tm-dates' }, from, h('span', { class: 'muted' }, 'to'), to)),
         h('button', { class: 'icon-btn', title: 'Refresh', 'aria-label': 'Refresh', onclick: () => { if (st.tab === 'live') loadLive(); else { load(); if (st.tab === 'quality') loadQuality(false, true); if (st.tab === 'people') window.DeskPeople.refresh(); } } }, U.icon('refresh'))),
-      h('nav', { class: 'tm-tabs', role: 'tablist' }, [['live', 'clock', 'Live'], ['quality', 'check', 'Quality'], ['people', 'team', 'People'], ['ai', 'warn', 'Radar'], ['compare', 'chart', 'Compare']].map(([k, ic, l]) =>
+      h('nav', { class: 'tm-tabs', role: 'tablist' }, [['live', 'clock', 'Live'], ['quality', 'check', 'Quality'], ['people', 'team', 'People'], ['compare', 'chart', 'Compare']].map(([k, ic, l]) =>
         h('button', { class: `tm-maintab${st.tab === k ? ' on' : ''}`, role: 'tab', 'aria-selected': String(st.tab === k), onclick: () => { st.tab = k; if (k === 'live') loadLive(); draw(); } },
-          U.icon(ic, 'sm'), l, k === 'ai' && window.DeskRadar.count() ? h('span', { class: 'tm-badge' }, num(window.DeskRadar.count())) : null))));
+          U.icon(ic, 'sm'), l))));
 
     let body;
     if (st.tab === 'live') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' }, liveTab().flat(Infinity)));
-    else if (st.tab === 'ai') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' }, window.DeskRadar.view()));
     else if (st.tab === 'people') body = h('div', { class: 'tm-body', dataset: { tab: st.tab } }, h('div', { class: 'tm-wrap' },
       h('p', { class: 'tm-period' }, st.from === st.to ? dayName(st.from) : `${dayName(st.from)} – ${dayName(st.to)}`, h('span', { class: 'muted' }, ' · Beirut time')),
       window.DeskPeople.view({ U, from: st.from, to: st.to, redraw: draw, dayLog, hourHeat }).flat(Infinity)));
@@ -528,10 +525,9 @@
     if (list) {
       list.scrollTop = listTop;
       const on = list.querySelector('.tm-rv-row.on');
-      if (on && (st.selScroll || st.tab === 'ai')) { on.scrollIntoView({ block: 'nearest' }); st.selScroll = false; }
+      if (on && st.selScroll) { on.scrollIntoView({ block: 'nearest' }); st.selScroll = false; }
     }
-    if (conv && st.tab === 'ai') conv.scrollTop = conv.dataset.key === convKey ? convTop : conv.scrollHeight;   // a new chat opens on its latest messages
-    else if (conv) {
+    if (conv) {
       if (st.threadTop !== null) conv.scrollTop = st.threadTop;
       else if (conv._conv && conv._conv._mark) { conv.scrollTop = 0; st.threadTop = 0; }   // the mark first; the rest is one scroll away
     }
@@ -542,19 +538,18 @@
     // the desk's own shortcuts (J, K, V, Tab, arrows...) stay off while this screen is open
     e.stopPropagation();
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
-    if (st.tab === 'ai' && window.DeskRadar.key(e)) e.preventDefault();
-    else if (st.tab === 'people' && window.DeskPeople.key(e)) e.preventDefault();
+    if (st.tab === 'people' && window.DeskPeople.key(e)) e.preventDefault();
   }
   function open(helpers, opts = {}) {
     U = helpers;
     if (root) return;
     if (!st.from) setPreset('today');
     if (opts.tab) st.tab = opts.tab;
+    if (st.tab === 'ai') st.tab = 'live';   // Radar moved to its own screen (js/radar.js)
     root = h('div', { class: 'team-screen', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Team activity' });
     document.body.append(root);
     bindTip(root);
     document.addEventListener('keydown', onKey, true);
-    window.DeskRadar.start({ U, draw, close, root: () => root });
     draw();
     load();
     loadLive();
@@ -563,7 +558,6 @@
   function close() {
     if (!root) return;
     clearTimeout(timer); clearInterval(liveTimer);
-    window.DeskRadar.stop();
     document.removeEventListener('keydown', onKey, true);
     root.remove(); root = null;
     if (tip) { tip.remove(); tip = null; }
